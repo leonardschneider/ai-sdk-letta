@@ -1,0 +1,34 @@
+{
+  "name": "@ai-sdk-letta/tui",
+  "version": "0.1.0",
+  "description": "Terminal UI for ai-sdk-letta agents (patched @ai-sdk/tui): conversations, /resume, /search, approvals and questions.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git", "directory": "apps/tui" },
+  "engines": { "node": ">=22.19.0" },
+  "files": ["dist", "patches", "README.md"],
+  "exports": {
+    ".": {
+      "ai-sdk-letta-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/tui": "1.0.119",
+    "ai-sdk-letta": "0.1.0"
+  },
+  "peerDependencies": {
+    "ai": "7.0.118"
+  },
+  "devDependencies": {
+    "@letta-ai/letta-agent-sdk": "0.8.22",
+    "ai": "7.0.118"
+  }
+}

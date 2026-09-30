@@ -1,0 +1,645 @@
+diff --git a/node_modules/@ai-sdk/tui/dist/index.d.ts b/node_modules/@ai-sdk/tui/dist/index.d.ts
+index 1cab715..6ceac90 100644
+--- a/node_modules/@ai-sdk/tui/dist/index.d.ts
++++ b/node_modules/@ai-sdk/tui/dist/index.d.ts
+@@ -24,7 +24,14 @@ type AgentTUIAgent = Agent<any, any, any, any>;
+ /**
+  * Options for starting an agent in the default terminal UI.
+  */
++type LocalInteractionRequest = { id: string; toolCallId: string; tool: string; kind: 'approval' | 'question'; title: string; details?: string; options?: { id: string; label: string }[]; allowFreeText?: boolean; multiSelect?: boolean };
++type LocalInteraction = { connect(handler: (request: LocalInteractionRequest, signal: AbortSignal) => Promise<unknown>): () => void };
+ type RunAgentTUIOptions = {
++    interaction?: LocalInteraction;
++    /** Display-only restored transcript. Never passed to agent/transport or executed. */
++    initialMessages?: UIMessage[];
++    /** Idle-only local interception before display/provider history; terminal released during run. */
++    localCommand?: { matches: (text: string) => boolean; run: (text: string) => Promise<void | 'exit'> };
+     /**
+      * The title shown in the terminal UI.
+      */
+diff --git a/node_modules/@ai-sdk/tui/dist/index.js b/node_modules/@ai-sdk/tui/dist/index.js
+index bdc31f9..de42692 100644
+--- a/node_modules/@ai-sdk/tui/dist/index.js
++++ b/node_modules/@ai-sdk/tui/dist/index.js
+@@ -1,4 +1,4 @@
+-// src/tui/terminal-text.ts
++// node_modules/@ai-sdk/tui/src/tui/terminal-text.ts
+ var ansiEscape = String.fromCharCode(27);
+ var ansiPattern = new RegExp(`${ansiEscape}\\[[0-?]*[ -/]*[@-~]`, "g");
+ var ansiPrefixPattern = new RegExp(
+@@ -79,7 +79,7 @@ function isWideCodePoint(codePoint) {
+   return codePoint >= 4352 && (codePoint <= 4447 || codePoint === 9001 || codePoint === 9002 || codePoint >= 11904 && codePoint <= 42191 && codePoint !== 12351 || codePoint >= 44032 && codePoint <= 55203 || codePoint >= 63744 && codePoint <= 64255 || codePoint >= 65040 && codePoint <= 65049 || codePoint >= 65072 && codePoint <= 65135 || codePoint >= 65280 && codePoint <= 65376 || codePoint >= 65504 && codePoint <= 65510 || codePoint >= 127744 && codePoint <= 128591 || codePoint >= 129280 && codePoint <= 129535 || codePoint >= 131072 && codePoint <= 262141);
+ }
+ 
+-// src/tui/markdown.ts
++// node_modules/@ai-sdk/tui/src/tui/markdown.ts
+ var ansi = {
+   bold: "\x1B[1m",
+   boldOff: "\x1B[22m",
+@@ -240,7 +240,7 @@ function alignTableCell(cell, width, alignment) {
+   return `${cell}${" ".repeat(paddingWidth)}`;
+ }
+ 
+-// src/tui/layout.ts
++// node_modules/@ai-sdk/tui/src/tui/layout.ts
+ var horizontal = "\u2500";
+ function renderScreenViewport(state) {
+   const width = Math.max(20, state.width);
+@@ -290,7 +290,7 @@ function boxLine(line, width) {
+   return `\u2502 ${visible}${padding} \u2502`;
+ }
+ 
+-// src/tui/terminal-frame-buffer.ts
++// node_modules/@ai-sdk/tui/src/tui/terminal-frame-buffer.ts
+ var escape = "\x1B";
+ var cursorHome = `${escape}[H`;
+ var clearScreen = `${escape}[2J`;
+@@ -358,7 +358,7 @@ function diffFrame(previousFrame, nextFrame) {
+   return output;
+ }
+ 
+-// src/tui/terminal-renderer.ts
++// node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
+ import {
+   getToolName,
+   isToolUIPart,
+@@ -399,6 +399,7 @@ var TerminalRenderer = class {
+   #reasoning;
+   #responseStatistics;
+   #defaultContextSize;
++  #interaction;
+   #sections = [];
+   #inputText = "";
+   #inputActive = false;
+@@ -425,6 +426,17 @@ var TerminalRenderer = class {
+     this.#responseStatistics = options?.responseStatistics ?? defaultResponseStatistics;
+     this.#defaultContextSize = options?.contextSize;
+     this.#contextSize = options?.contextSize;
++    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
++      if (message.role === "user") {
++        this.#addUserSection(message.parts.filter((p) => p.type === "text").map((p) => p.text).join(""));
++      } else if (message.role === "assistant") {
++        this.#renderAssistantMessage({ ...message, id: `restored-${index}` }, {
++          tools: this.#tools,
++          reasoning: "hidden",
++          responseStatistics: this.#responseStatistics
++        });
++      }
++    }
+   }
+   async readPrompt(options) {
+     this.#start(options);
+@@ -452,6 +464,12 @@ var TerminalRenderer = class {
+             this.#inputActive = false;
+             this.#stopInputCursorBlink();
+             this.#status = processingStatus;
++            if (options?.isLocalCommand?.(prompt)) {
++              this.#inputText = "";
++              this.#stop();
++              resolve(prompt);
++              break;
++            }
+             this.#addUserSection(prompt);
+             this.#inputText = "";
+             this.#paint();
+@@ -524,6 +542,7 @@ var TerminalRenderer = class {
+         this.#renderAssistantMessage(responseMessage, displayModes);
+       }
+     } finally {
++      this.#interaction?.cancel();
+       this.#resolveStreamInterrupt = void 0;
+       if (this.#interrupted) {
+         result.abort?.();
+@@ -541,6 +560,102 @@ var TerminalRenderer = class {
+     }
+     return responseMessage;
+   }
++  async readInteraction(request, signal) {
++    if (this.#interaction || signal.aborted) throw new Error("Interaction unavailable");
++    const clean = (value) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
++    let cursor = 0;
++    let text = "";
++    let editing = !request.options?.length && !!request.allowFreeText;
++    const selected = /* @__PURE__ */ new Set();
++    let scroll = 0;
++    return new Promise((resolve, reject) => {
++      const finish = (value, error) => {
++        if (this.#interaction !== modal) return;
++        signal.removeEventListener("abort", abort);
++        this.#interaction = void 0;
++        this.#paint();
++        if (error) reject(error);
++        else resolve({ id: request.id, ...value });
++      };
++      const abort = () => finish(void 0, new Error("Interaction cancelled"));
++      const modal = {
++        status: request.kind === "approval" ? "y approve once \xB7 n deny \xB7 Esc cancel \xB7 Ctrl+C abort turn \xB7 PgUp/PgDn" : "\u2191/\u2193 choose \xB7 Space select \xB7 Enter submit \xB7 f free text \xB7 Esc cancel \xB7 Ctrl+C abort turn",
++        cancel: abort,
++        input: () => editing ? text : "",
++        editing: () => editing,
++        lines: () => {
++          const raw = [clean(request.title), ...request.details ? [clean(request.details)] : [], ...(request.options ?? []).map((option, index) => `${index === cursor ? ">" : " "} [${selected.has(option.id) ? "x" : " "}] ${index + 1}. ${clean(option.label)}`), ...editing ? ["Free text (Enter submits):"] : request.allowFreeText ? ["Press f to write your own answer."] : [], request.multiSelect ? "Multiple selections allowed." : ""];
++          const width = Math.max(10, this.#width() - 4);
++          const lines = raw.flatMap((line) => {
++            const chars = Array.from(line);
++            const parts = [];
++            for (let i = 0; i < chars.length; i += width) parts.push(chars.slice(i, i + width).join(""));
++            return parts.length ? parts : [""];
++          });
++          const height = Math.max(1, this.#height() - 8);
++          scroll = Math.min(scroll, Math.max(0, lines.length - height));
++          return lines.slice(scroll, scroll + height);
++        },
++        key: (chunk) => {
++          const tokens = chunk.toString("utf8").match(/\x1b\[[0-9;]*[A-Za-z~]|\x1b|[\r\n\x03\x0c\x7f\b]|[^\x00-\x1f\x7f]+/g) ?? [];
++          for (const token of tokens.flatMap((token2) => token2.startsWith("\x1B") ? [token2] : Array.from(token2))) {
++            if (this.#interaction !== modal) break;
++            modal.handle(Buffer.from(token));
++          }
++          this.#paint();
++        },
++        handle: (chunk) => {
++          const key = parseKey(chunk);
++          if (key.type === "ctrl-c") {
++            abort();
++            this.#handleStreamingKey(chunk);
++            return;
++          }
++          if (key.type === "escape") {
++            finish({ cancelled: true });
++            return;
++          }
++          if (key.type === "page-up" || key.type === "page-down") {
++            scroll = Math.max(0, scroll + (key.type === "page-up" ? -5 : 5));
++            this.#paint();
++            return;
++          }
++          if (key.type === "ctrl-l") {
++            this.#repaint();
++            return;
++          }
++          if (request.kind === "approval") {
++            if (key.type === "character" && /^[yn]$/i.test(key.value)) finish({ approved: key.value.toLowerCase() === "y" });
++            return;
++          }
++          const options = request.options ?? [];
++          if (key.type === "up" || key.type === "down") {
++            editing = false;
++            cursor = Math.max(0, Math.min(options.length - 1, cursor + (key.type === "up" ? -1 : 1)));
++          } else if (key.type === "character") {
++            if (editing) text = (text + clean(key.value)).slice(0, 2e3);
++            else if (key.value === "f" && request.allowFreeText) editing = true;
++            else if (key.value === " " && options[cursor]) {
++              const id = options[cursor].id;
++              if (selected.has(id)) selected.delete(id);
++              else {
++                if (!request.multiSelect) selected.clear();
++                selected.add(id);
++              }
++            }
++          } else if (key.type === "backspace" && editing) text = removeLastGrapheme(text);
++          else if (key.type === "enter") {
++            if (!editing && !selected.size && !request.multiSelect && options[cursor]) selected.add(options[cursor].id);
++            if (selected.size || text.trim()) finish({ selected: [...selected], ...text.trim() ? { text: text.trim() } : {} });
++          }
++        }
++      };
++      this.#interaction = modal;
++      signal.addEventListener("abort", abort, { once: true });
++      if (signal.aborted) abort();
++      else this.#paint();
++    });
++  }
+   async readToolApproval(request, options) {
+     this.#start(options);
+     this.#inputActive = false;
+@@ -636,6 +751,10 @@ var TerminalRenderer = class {
+     }
+   }
+   #handleStreamingKey(chunk) {
++    if (this.#interaction) {
++      this.#interaction.key(chunk);
++      return;
++    }
+     const key = parseKey(chunk);
+     switch (key.type) {
+       case "up":
+@@ -845,16 +964,17 @@ var TerminalRenderer = class {
+     this.#paint();
+   }
+   #paint() {
++    if (!this.#isInteractive) return;
+     const frame = renderScreenViewport({
+       width: this.#width(),
+       height: this.#height(),
+       title: this.#title,
+       rightTitle: formatTokenCount(this.#totalTokens, this.#contextSize),
+-      visibleBodyLines: this.#visibleBodyLines(),
+-      input: this.#inputText,
+-      inputActive: this.#inputActive,
++      visibleBodyLines: this.#interaction?.lines() ?? this.#visibleBodyLines(),
++      input: this.#interaction?.input() ?? this.#inputText,
++      inputActive: this.#interaction ? this.#interaction.editing() : this.#inputActive,
+       inputCursorVisible: this.#inputCursorVisible,
+-      status: this.#status
++      status: this.#interaction?.status ?? this.#status
+     });
+     this.#frameBuffer.present(frame);
+   }
+@@ -1378,7 +1498,7 @@ function parseKey(chunk) {
+   }
+ }
+ 
+-// src/agent-tui-runner.ts
++// node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
+ import {
+   convertToModelMessages,
+   generateId,
+@@ -1387,8 +1507,21 @@ import {
+ } from "ai";
+ var defaultResponseStatistics2 = "outputTokensPerSecond";
+ var AgentTUIRunner = class {
++  interaction;
++  localCommand;
++  agent;
++  transport;
++  chatId = generateId();
++  renderer;
++  title;
++  tools;
++  reasoning;
++  responseStatistics;
++  contextSize;
++  sandbox;
+   constructor(options) {
+-    this.chatId = generateId();
++    this.interaction = options.interaction;
++    this.localCommand = options.localCommand;
+     this.agent = options.agent;
+     this.transport = options.transport;
+     this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
+@@ -1400,6 +1533,17 @@ var AgentTUIRunner = class {
+     this.sandbox = options.sandbox;
+   }
+   async run() {
++    const disconnect = this.interaction?.connect((request, signal) => {
++      if (!this.renderer.readInteraction) return Promise.reject(new Error("Renderer does not support local interactions"));
++      return this.renderer.readInteraction(request, signal);
++    });
++    try {
++      await this.runSession();
++    } finally {
++      disconnect?.();
++    }
++  }
++  async runSession() {
+     const title = this.title;
+     const messages = [];
+     let nextMessageIndex = 0;
+@@ -1419,7 +1563,7 @@ var AgentTUIRunner = class {
+             );
+           }
+           try {
+-            prompt = await this.renderer.readPrompt({ title });
++            prompt = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches });
+           } catch (error) {
+             if (isInterruptedError(error)) {
+               return;
+@@ -1430,6 +1574,11 @@ var AgentTUIRunner = class {
+             return;
+           }
+         }
++        if (this.localCommand?.matches(prompt)) {
++          if (await this.localCommand.run(prompt) === "exit") return;
++          prompt = void 0;
++          continue;
++        }
+         messages.push(createUserMessage(generateMessageId(), prompt));
+         hasRunTurn = true;
+       }
+@@ -1520,7 +1669,8 @@ var AgentTUIRunner = class {
+   }
+ };
+ function createDefaultRenderer(options) {
+-  return options.tools === void 0 && options.reasoning === void 0 && options.responseStatistics === void 0 && options.contextSize === void 0 ? new TerminalRenderer() : new TerminalRenderer({
++  return options.tools === void 0 && options.reasoning === void 0 && options.responseStatistics === void 0 && options.contextSize === void 0 && options.initialMessages === void 0 ? new TerminalRenderer() : new TerminalRenderer({
++    initialMessages: options.initialMessages,
+     tools: options.tools,
+     reasoning: options.reasoning,
+     responseStatistics: options.responseStatistics,
+@@ -1535,6 +1685,7 @@ function createRenderer(options) {
+     return void 0;
+   }
+   return new TerminalRenderer({
++    initialMessages: options.initialMessages,
+     tools: options.tools,
+     reasoning: options.reasoning,
+     responseStatistics: options.responseStatistics,
+@@ -1874,11 +2025,10 @@ function isInterruptedError(error) {
+   return error instanceof Error && error.message === "Interrupted";
+ }
+ 
+-// src/run-agent-tui.ts
++// node_modules/@ai-sdk/tui/src/run-agent-tui.ts
+ async function runAgentTUI(options) {
+   await new AgentTUIRunner(options).run();
+ }
+ export {
+   runAgentTUI
+ };
+-//# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
+index 240b4c3..c23ee83 100644
+--- a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
++++ b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
+@@ -40,6 +40,7 @@ export type AgentTUIStreamOptions = {
+ };
+ 
+ export type AgentTUISessionOptions = {
++  isLocalCommand?: (text: string) => boolean;
+   title?: string;
+   initialPrompt?: string;
+   submittedPrompt?: string;
+@@ -68,6 +69,7 @@ export type AgentTUIToolApprovalResponse = {
+ };
+ 
+ export type AgentTUIRenderer = {
++  readInteraction?(request: import('./run-agent-tui').LocalInteractionRequest, signal: AbortSignal): Promise<unknown>;
+   readPrompt?(options?: AgentTUISessionOptions): Promise<string | undefined>;
+   readToolApproval?(
+     request: AgentTUIToolApprovalRequest,
+@@ -86,6 +88,8 @@ export type AgentTUIRunnerOptions = RunAgentTUIOptions & {
+ };
+ 
+ export class AgentTUIRunner {
++  private readonly interaction?: RunAgentTUIOptions['interaction'];
++  private readonly localCommand?: RunAgentTUIOptions['localCommand'];
+   private readonly agent?: AgentTUIAgent;
+   private readonly transport?: ChatTransport<UIMessage>;
+   private readonly chatId = generateId();
+@@ -98,6 +102,8 @@ export class AgentTUIRunner {
+   private readonly sandbox?: Experimental_SandboxSession;
+ 
+   constructor(options: AgentTUIRunnerOptions) {
++    this.interaction = options.interaction;
++    this.localCommand = options.localCommand;
+     this.agent = options.agent;
+     this.transport = options.transport;
+     this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
+@@ -111,6 +117,14 @@ export class AgentTUIRunner {
+   }
+ 
+   async run() {
++    const disconnect = this.interaction?.connect((request, signal) => {
++      if (!this.renderer.readInteraction) return Promise.reject(new Error('Renderer does not support local interactions'));
++      return this.renderer.readInteraction(request, signal);
++    });
++    try { await this.runSession(); } finally { disconnect?.(); }
++  }
++
++  private async runSession() {
+     const title = this.title;
+     const messages: UIMessage[] = [];
+     let nextMessageIndex = 0;
+@@ -133,7 +147,7 @@ export class AgentTUIRunner {
+           }
+ 
+           try {
+-            prompt = await this.renderer.readPrompt({ title });
++            prompt = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches });
+           } catch (error) {
+             if (isInterruptedError(error)) {
+               return;
+@@ -147,6 +161,11 @@ export class AgentTUIRunner {
+           }
+         }
+ 
++        if (this.localCommand?.matches(prompt)) {
++          if (await this.localCommand.run(prompt) === 'exit') return;
++          prompt = undefined;
++          continue;
++        }
+         messages.push(createUserMessage(generateMessageId(), prompt));
+         hasRunTurn = true;
+       }
+@@ -257,9 +276,10 @@ function createDefaultRenderer(options: AgentTUIRunnerOptions) {
+   return options.tools === undefined &&
+     options.reasoning === undefined &&
+     options.responseStatistics === undefined &&
+-    options.contextSize === undefined
++    options.contextSize === undefined && options.initialMessages === undefined
+     ? new TerminalRenderer()
+     : new TerminalRenderer({
++        initialMessages: options.initialMessages,
+         tools: options.tools,
+         reasoning: options.reasoning,
+         responseStatistics: options.responseStatistics,
+@@ -279,6 +299,7 @@ function createRenderer(
+   }
+ 
+   return new TerminalRenderer({
++    initialMessages: options.initialMessages,
+     tools: options.tools,
+     reasoning: options.reasoning,
+     responseStatistics: options.responseStatistics,
+diff --git a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
+index c26dfb9..bd65db4 100644
+--- a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
++++ b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
+@@ -39,7 +39,17 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
+ /**
+  * Options for starting an agent in the default terminal UI.
+  */
++export type LocalInteractionRequest = { id: string; toolCallId: string; tool: string; kind: 'approval' | 'question'; title: string; details?: string; options?: { id: string; label: string }[]; allowFreeText?: boolean; multiSelect?: boolean };
++export type LocalInteraction = { connect(handler: (request: LocalInteractionRequest, signal: AbortSignal) => Promise<unknown>): () => void };
++
+ export type RunAgentTUIOptions = {
++  /** App-owned in-stream tool interaction; never triggers an AI SDK approval loop. */
++  interaction?: LocalInteraction;
++  /** Display-only restored transcript. Never passed to agent/transport or executed. */
++  initialMessages?: UIMessage[];
++  /** Idle-only local input interception, before display/provider history. Renderer
++   * releases the terminal while run executes; void resumes unchanged, exit ends. */
++  localCommand?: { matches: (text: string) => boolean; run: (text: string) => Promise<void | 'exit'> };
+   /**
+    * The title shown in the terminal UI.
+    */
+diff --git a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
+index cba32e1..c84854c 100644
+--- a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
++++ b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
+@@ -46,6 +46,7 @@ const defaultResponseStatistics: ResponseStatisticsMode =
+   'outputTokensPerSecond';
+ 
+ export type TerminalRendererOptions = {
++  initialMessages?: UIMessage[];
+   input?: TerminalInput;
+   output?: TerminalOutput;
+   frameBuffer?: TerminalFrameBuffer;
+@@ -56,6 +57,7 @@ export type TerminalRendererOptions = {
+ };
+ 
+ export type TerminalSessionOptions = {
++  isLocalCommand?: (text: string) => boolean;
+   title?: string;
+   initialPrompt?: string;
+   submittedPrompt?: string;
+@@ -156,6 +158,7 @@ export class TerminalRenderer {
+   readonly #responseStatistics: ResponseStatisticsMode;
+   readonly #defaultContextSize?: number;
+ 
++  #interaction?: { key(chunk: Buffer): void; lines(): string[]; input(): string; editing(): boolean; status: string; cancel(): void };
+   #sections: ChatSection[] = [];
+   #inputText = '';
+   #inputActive = false;
+@@ -185,6 +188,16 @@ export class TerminalRenderer {
+       options?.responseStatistics ?? defaultResponseStatistics;
+     this.#defaultContextSize = options?.contextSize;
+     this.#contextSize = options?.contextSize;
++    // Seed real scrollable sections, not terminal output or provider history.
++    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
++      if (message.role === 'user') {
++        this.#addUserSection(message.parts.filter(p => p.type === 'text').map(p => p.text).join(''));
++      } else if (message.role === 'assistant') {
++        this.#renderAssistantMessage({ ...message, id: `restored-${index}` }, {
++          tools: this.#tools, reasoning: 'hidden', responseStatistics: this.#responseStatistics,
++        });
++      }
++    }
+   }
+ 
+   async readPrompt(options?: TerminalSessionOptions): Promise<string> {
+@@ -215,6 +228,12 @@ export class TerminalRenderer {
+             this.#inputActive = false;
+             this.#stopInputCursorBlink();
+             this.#status = processingStatus;
++            if (options?.isLocalCommand?.(prompt)) {
++              this.#inputText = '';
++              this.#stop();
++              resolve(prompt);
++              break;
++            }
+             this.#addUserSection(prompt);
+             this.#inputText = '';
+             this.#paint();
+@@ -302,6 +321,7 @@ export class TerminalRenderer {
+         this.#renderAssistantMessage(responseMessage, displayModes);
+       }
+     } finally {
++      this.#interaction?.cancel();
+       this.#resolveStreamInterrupt = undefined;
+       if (this.#interrupted) {
+         result.abort?.();
+@@ -327,6 +347,81 @@ export class TerminalRenderer {
+     return responseMessage;
+   }
+ 
++  async readInteraction(request: import('../run-agent-tui').LocalInteractionRequest, signal: AbortSignal): Promise<unknown> {
++    if (this.#interaction || signal.aborted) throw new Error('Interaction unavailable');
++    const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/[\u202a-\u202e\u2066-\u2069]/g, '');
++    let cursor = 0;
++    let text = '';
++    let editing = !request.options?.length && !!request.allowFreeText;
++    const selected = new Set<string>();
++    let scroll = 0;
++    return new Promise((resolve, reject) => {
++      const finish = (value?: object, error?: Error) => {
++        if (this.#interaction !== modal) return;
++        signal.removeEventListener('abort', abort);
++        this.#interaction = undefined;
++        this.#paint();
++        if (error) reject(error); else resolve({ id: request.id, ...value });
++      };
++      const abort = () => finish(undefined, new Error('Interaction cancelled'));
++      const modal = {
++        status: request.kind === 'approval' ? 'y approve once · n deny · Esc cancel · Ctrl+C abort turn · PgUp/PgDn' : '↑/↓ choose · Space select · Enter submit · f free text · Esc cancel · Ctrl+C abort turn',
++        cancel: abort,
++        input: () => editing ? text : '',
++        editing: () => editing,
++        lines: () => {
++          const raw = [clean(request.title), ...(request.details ? [clean(request.details)] : []), ...(request.options ?? []).map((option, index) => `${index === cursor ? '>' : ' '} [${selected.has(option.id) ? 'x' : ' '}] ${index + 1}. ${clean(option.label)}`), ...(editing ? ['Free text (Enter submits):'] : request.allowFreeText ? ['Press f to write your own answer.'] : []), request.multiSelect ? 'Multiple selections allowed.' : ''];
++          const width = Math.max(10, this.#width() - 4);
++          const lines = raw.flatMap(line => { const chars = Array.from(line); const parts: string[] = []; for (let i = 0; i < chars.length; i += width) parts.push(chars.slice(i, i + width).join('')); return parts.length ? parts : ['']; });
++          const height = Math.max(1, this.#height() - 8);
++          scroll = Math.min(scroll, Math.max(0, lines.length - height));
++          return lines.slice(scroll, scroll + height);
++        },
++        key: (chunk: Buffer) => {
++          // A data event may contain several keys. Never carry its remaining
++          // bytes into a newly opened prompt or back into ordinary chat input.
++          const tokens = chunk.toString('utf8').match(/\x1b\[[0-9;]*[A-Za-z~]|\x1b|[\r\n\x03\x0c\x7f\b]|[^\x00-\x1f\x7f]+/g) ?? [];
++          for (const token of tokens.flatMap(token => token.startsWith('\x1b') ? [token] : Array.from(token))) {
++            if (this.#interaction !== modal) break;
++            modal.handle(Buffer.from(token));
++          }
++          this.#paint();
++        },
++        handle: (chunk: Buffer) => {
++          const key = parseKey(chunk);
++          if (key.type === 'ctrl-c') { abort(); this.#handleStreamingKey(chunk); return; }
++          if (key.type === 'escape') { finish({ cancelled: true }); return; }
++          if (key.type === 'page-up' || key.type === 'page-down') { scroll = Math.max(0, scroll + (key.type === 'page-up' ? -5 : 5)); this.#paint(); return; }
++          if (key.type === 'ctrl-l') { this.#repaint(); return; }
++          if (request.kind === 'approval') {
++            if (key.type === 'character' && /^[yn]$/i.test(key.value)) finish({ approved: key.value.toLowerCase() === 'y' });
++            return;
++          }
++          const options = request.options ?? [];
++          if (key.type === 'up' || key.type === 'down') {
++            editing = false;
++            cursor = Math.max(0, Math.min(options.length - 1, cursor + (key.type === 'up' ? -1 : 1)));
++          } else if (key.type === 'character') {
++            if (editing) text = (text + clean(key.value)).slice(0, 2000);
++            else if (key.value === 'f' && request.allowFreeText) editing = true;
++            else if (key.value === ' ' && options[cursor]) {
++              const id = options[cursor].id;
++              if (selected.has(id)) selected.delete(id);
++              else { if (!request.multiSelect) selected.clear(); selected.add(id); }
++            }
++          } else if (key.type === 'backspace' && editing) text = removeLastGrapheme(text);
++          else if (key.type === 'enter') {
++            if (!editing && !selected.size && !request.multiSelect && options[cursor]) selected.add(options[cursor].id);
++            if (selected.size || text.trim()) finish({ selected: [...selected], ...(text.trim() ? { text: text.trim() } : {}) });
++          }
++        },
++      };
++      this.#interaction = modal;
++      signal.addEventListener('abort', abort, { once: true });
++      if (signal.aborted) abort(); else this.#paint();
++    });
++  }
++
+   async readToolApproval(
+     request: AgentTUIToolApprovalRequest,
+     options?: TerminalSessionOptions,
+@@ -442,6 +537,7 @@ export class TerminalRenderer {
+   }
+ 
+   #handleStreamingKey(chunk: Buffer) {
++    if (this.#interaction) { this.#interaction.key(chunk); return; }
+     const key = parseKey(chunk);
+ 
+     switch (key.type) {
+@@ -711,16 +807,17 @@ export class TerminalRenderer {
+   }
+ 
+   #paint() {
++    if (!this.#isInteractive) return;
+     const frame = renderScreenViewport({
+       width: this.#width(),
+       height: this.#height(),
+       title: this.#title,
+       rightTitle: formatTokenCount(this.#totalTokens, this.#contextSize),
+-      visibleBodyLines: this.#visibleBodyLines(),
+-      input: this.#inputText,
+-      inputActive: this.#inputActive,
++      visibleBodyLines: this.#interaction?.lines() ?? this.#visibleBodyLines(),
++      input: this.#interaction?.input() ?? this.#inputText,
++      inputActive: this.#interaction ? this.#interaction.editing() : this.#inputActive,
+       inputCursorVisible: this.#inputCursorVisible,
+-      status: this.#status,
++      status: this.#interaction?.status ?? this.#status,
+     });
+ 
+     this.#frameBuffer.present(frame);
