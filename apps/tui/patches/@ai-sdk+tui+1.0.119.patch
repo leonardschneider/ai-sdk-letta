@@ -1,14 +1,41 @@
 diff --git a/node_modules/@ai-sdk/tui/dist/index.d.ts b/node_modules/@ai-sdk/tui/dist/index.d.ts
-index 1cab715..6ceac90 100644
+index 1cab715..f4345d5 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.d.ts
 +++ b/node_modules/@ai-sdk/tui/dist/index.d.ts
-@@ -24,7 +24,14 @@ type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -1,4 +1,4 @@
+-import { Agent, Experimental_SandboxSession, ChatTransport, UIMessage } from 'ai';
++import { Agent, Experimental_SandboxSession, ChatTransport, UIMessage, FileUIPart } from 'ai';
+ 
+ /**
+  * Controls how terminal UI sections for stream parts are displayed.
+@@ -24,7 +24,35 @@ type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
 +type LocalInteractionRequest = { id: string; toolCallId: string; tool: string; kind: 'approval' | 'question'; title: string; details?: string; options?: { id: string; label: string }[]; allowFreeText?: boolean; multiSelect?: boolean };
 +type LocalInteraction = { connect(handler: (request: LocalInteractionRequest, signal: AbortSignal) => Promise<unknown>): () => void };
++/** Outcome of reading attachments: files to attach and/or a short notice for the user. */
++type TerminalAttachmentResult = { files?: FileUIPart[]; notice?: string };
++/**
++ * Prompt attachments. Attached files appear in the prompt as `[Image 1]`
++ * (or `[File 1]`) markers; Backspace right after a marker removes it. On
++ * Enter the markers are removed from the text and the files are sent as
++ * `file` parts of the user message; sent and restored messages show
++ * `[Image]` / `[File]`. The application reads and validates files.
++ */
++type TerminalAttachments = {
++    /** Ctrl+V while typing: read attachments from the system clipboard. */
++    fromClipboard?: (context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult>;
++    /**
++     * Pasted or dropped text, such as a file path dragged into the terminal.
++     * Return files (or a notice) to attach instead of inserting the text, or
++     * `undefined` to insert it as typed text.
++     */
++    fromText?: (text: string, context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult | undefined>;
++};
  type RunAgentTUIOptions = {
++    /** Prompt attachments (Ctrl+V, pasted or dropped file paths). Off when omitted. */
++    attachments?: TerminalAttachments;
 +    interaction?: LocalInteraction;
 +    /** Display-only restored transcript. Never passed to agent/transport or executed. */
 +    initialMessages?: UIMessage[];
@@ -17,8 +44,14 @@ index 1cab715..6ceac90 100644
      /**
       * The title shown in the terminal UI.
       */
+@@ -77,4 +105,4 @@ type RunAgentTUIOptions = {
+  */
+ declare function runAgentTUI(options: RunAgentTUIOptions): Promise<void>;
+ 
+-export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalPartDisplayMode, runAgentTUI };
++export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalAttachmentResult, type TerminalAttachments, type TerminalPartDisplayMode, runAgentTUI };
 diff --git a/node_modules/@ai-sdk/tui/dist/index.js b/node_modules/@ai-sdk/tui/dist/index.js
-index bdc31f9..de42692 100644
+index bdc31f9..83a0cb4 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.js
 +++ b/node_modules/@ai-sdk/tui/dist/index.js
 @@ -1,4 +1,4 @@
@@ -45,6 +78,15 @@ index bdc31f9..de42692 100644
  var horizontal = "\u2500";
  function renderScreenViewport(state) {
    const width = Math.max(20, state.width);
+@@ -256,7 +256,7 @@ function renderScreenViewport(state) {
+     topBorder(width, state.title, state.rightTitle),
+     ...visibleBody.map((line) => boxLine(line, width)),
+     bottomBorder(width),
+-    topBorder(width, state.inputActive ? "Input" : "Status"),
++    topBorder(width, state.inputActive ? state.inputTitle ?? "Input" : "Status"),
+     boxLine(
+       state.inputActive ? `> ${state.input}${state.inputCursorVisible === false ? " " : "\u2588"}` : state.status ?? "Streaming... \u2191/\u2193 scroll \xB7 Ctrl+C quit",
+       width
 @@ -290,7 +290,7 @@ function boxLine(line, width) {
    return `\u2502 ${visible}${padding} \u2502`;
  }
@@ -54,7 +96,7 @@ index bdc31f9..de42692 100644
  var escape = "\x1B";
  var cursorHome = `${escape}[H`;
  var clearScreen = `${escape}[2J`;
-@@ -358,7 +358,7 @@ function diffFrame(previousFrame, nextFrame) {
+@@ -358,13 +358,28 @@ function diffFrame(previousFrame, nextFrame) {
    return output;
  }
  
@@ -63,21 +105,45 @@ index bdc31f9..de42692 100644
  import {
    getToolName,
    isToolUIPart,
-@@ -399,6 +399,7 @@ var TerminalRenderer = class {
+   readUIMessageStream
+ } from "ai";
+ var defaultResponseStatistics = "outputTokensPerSecond";
++function attachmentLabel(mediaType) {
++  return /^image(\/|$)/i.test(mediaType) ? "[Image]" : "[File]";
++}
++function userDisplayText(parts) {
++  const labels = [];
++  let text = "";
++  for (const part of parts) {
++    if (part.type === "file") labels.push(attachmentLabel(part.mediaType));
++    else if (part.type === "text") {
++      if (/^\[(Image|File)\]$/.test(part.text.trim())) labels.push(part.text.trim());
++      else text += part.text;
++    }
++  }
++  return [...labels, text].filter(Boolean).join(" ");
++}
+ var colors = {
+   reset: "\x1B[0m",
+   dim: "\x1B[2m",
+@@ -399,8 +414,10 @@ var TerminalRenderer = class {
    #reasoning;
    #responseStatistics;
    #defaultContextSize;
 +  #interaction;
    #sections = [];
    #inputText = "";
++  #inputTitle;
    #inputActive = false;
-@@ -425,6 +426,17 @@ var TerminalRenderer = class {
+   #scrollOffset = 0;
+   #title = "";
+@@ -425,38 +442,141 @@ var TerminalRenderer = class {
      this.#responseStatistics = options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
 +    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
 +      if (message.role === "user") {
-+        this.#addUserSection(message.parts.filter((p) => p.type === "text").map((p) => p.text).join(""));
++        this.#addUserSection(userDisplayText(message.parts));
 +      } else if (message.role === "assistant") {
 +        this.#renderAssistantMessage({ ...message, id: `restored-${index}` }, {
 +          tools: this.#tools,
@@ -89,20 +155,153 @@ index bdc31f9..de42692 100644
    }
    async readPrompt(options) {
      this.#start(options);
-@@ -452,6 +464,12 @@ var TerminalRenderer = class {
+     this.#inputActive = true;
+     this.#inputText = options?.initialPrompt ?? "";
+     this.#status = `Type a prompt and press Enter \xB7 ${activeControls}`;
++    const source = options?.attachments;
++    const attached = [];
++    let notice;
++    let busy = false;
++    let slow = false;
++    const refreshTitle = () => {
++      const images = attached.filter((a) => a.kind === "Image").length;
++      const others = attached.length - images;
++      const summary = [images ? `${images} image${images === 1 ? "" : "s"}` : "", others ? `${others} file${others === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
++      this.#inputTitle = !source ? void 0 : busy && slow ? "Input \xB7 Reading attachment\u2026" : notice ? `Input \xB7 ${notice}` : summary ? `Input \xB7 ${summary} attached \xB7 Backspace removes` : source.fromClipboard ? "Input \xB7 Ctrl+V attaches an image" : void 0;
++    };
++    refreshTitle();
+     this.#startInputCursorBlink();
+     this.#paint();
+     return await new Promise((resolve, reject) => {
+-      this.#onData = (chunk) => {
++      let settled = false;
++      const queue = [];
++      const files = () => attached.map((a) => a.file);
++      const attach = (result) => {
++        notice = result?.notice;
++        for (const file of result?.files ?? []) {
++          const kind = attachmentLabel(file.mediaType) === "[Image]" ? "Image" : "File";
++          const marker = `[${kind} ${attached.filter((a) => a.kind === kind).length + 1}]`;
++          this.#inputText += `${this.#inputText && !/\s$/.test(this.#inputText) ? " " : ""}${marker} `;
++          attached.push({ marker, kind, file });
++        }
++      };
++      const read = (work, text) => {
++        busy = true;
++        const timer = setTimeout(() => {
++          if (busy && !settled) {
++            slow = true;
++            refreshTitle();
++            this.#paint();
++          }
++        }, 150);
++        void Promise.resolve().then(work).then(
++          (result) => {
++            if (settled) return;
++            if (result === void 0) this.#inputText += text ?? "";
++            else attach(result);
++          },
++          () => {
++            if (settled) return;
++            if (text !== void 0) this.#inputText += text;
++            else notice = "Could not read the clipboard";
++          }
++        ).finally(() => {
++          clearTimeout(timer);
++          if (settled) return;
++          busy = false;
++          slow = false;
++          refreshTitle();
++          this.#showInputCursor();
++          this.#paint();
++          while (!busy && !settled && queue.length) handle(queue.shift());
++        });
++      };
++      const finish = () => {
++        settled = true;
++        this.#inputTitle = void 0;
++      };
++      const handle = (chunk) => {
+         const key = parseKey(chunk);
++        if (busy && key.type !== "escape" && key.type !== "ctrl-c") {
++          queue.push(chunk);
++          return;
++        }
++        if (notice && key.type !== "ignore") {
++          notice = void 0;
++          refreshTitle();
++        }
+         switch (key.type) {
+           case "character":
++            if (source?.fromText && [...graphemeSegmenter.segment(key.value)].length > 1) {
++              const text = key.value;
++              read(() => source.fromText(text, { attached: files() }), text);
++              break;
++            }
+             this.#inputText += key.value;
+             this.#showInputCursor();
+             this.#paint();
+             break;
+-          case "backspace":
+-            this.#inputText = removeLastGrapheme(this.#inputText);
++          case "ctrl-v":
++            if (source?.fromClipboard) read(() => source.fromClipboard({ attached: files() }));
++            break;
++          case "backspace": {
++            const last = attached.at(-1);
++            const end = last && [last.marker, `${last.marker} `].find((tail) => this.#inputText.endsWith(tail));
++            if (last && end) {
++              this.#inputText = this.#inputText.slice(0, -end.length).replace(/ $/, "");
++              attached.pop();
++              refreshTitle();
++            } else this.#inputText = removeLastGrapheme(this.#inputText);
+             this.#showInputCursor();
+             this.#paint();
+             break;
++          }
+           case "enter": {
+-            const prompt = this.#inputText;
++            let prompt = this.#inputText;
++            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${marker.replace(/[[\]]/g, "\\$&")} *`), " ");
++            if (attached.length) prompt = prompt.trim();
++            const input = attached.length ? { text: prompt, files: files() } : prompt;
++            finish();
              this.#inputActive = false;
              this.#stopInputCursorBlink();
              this.#status = processingStatus;
+-            this.#addUserSection(prompt);
 +            if (options?.isLocalCommand?.(prompt)) {
 +              this.#inputText = "";
 +              this.#stop();
 +              resolve(prompt);
 +              break;
 +            }
-             this.#addUserSection(prompt);
++            this.#addUserSection(userDisplayText([...prompt ? [{ type: "text", text: prompt }] : [], ...files()]));
              this.#inputText = "";
              this.#paint();
-@@ -524,6 +542,7 @@ var TerminalRenderer = class {
+             this.#detachInput();
+-            resolve(prompt);
++            resolve(input);
+             break;
+           }
+           case "up":
+@@ -472,6 +592,7 @@ var TerminalRenderer = class {
+             break;
+           case "escape":
+           case "ctrl-c":
++            finish();
+             this.#stopInputCursorBlink();
+             this.#stop();
+             reject(interruptedError());
+@@ -480,6 +601,7 @@ var TerminalRenderer = class {
+             break;
+         }
+       };
++      this.#onData = handle;
+       this.#attachInput();
+     });
+   }
+@@ -524,6 +646,7 @@ var TerminalRenderer = class {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -110,7 +309,7 @@ index bdc31f9..de42692 100644
        this.#resolveStreamInterrupt = void 0;
        if (this.#interrupted) {
          result.abort?.();
-@@ -541,6 +560,102 @@ var TerminalRenderer = class {
+@@ -541,6 +664,102 @@ var TerminalRenderer = class {
      }
      return responseMessage;
    }
@@ -213,7 +412,7 @@ index bdc31f9..de42692 100644
    async readToolApproval(request, options) {
      this.#start(options);
      this.#inputActive = false;
-@@ -636,6 +751,10 @@ var TerminalRenderer = class {
+@@ -636,6 +855,10 @@ var TerminalRenderer = class {
      }
    }
    #handleStreamingKey(chunk) {
@@ -224,7 +423,7 @@ index bdc31f9..de42692 100644
      const key = parseKey(chunk);
      switch (key.type) {
        case "up":
-@@ -845,16 +964,17 @@ var TerminalRenderer = class {
+@@ -845,16 +1068,18 @@ var TerminalRenderer = class {
      this.#paint();
    }
    #paint() {
@@ -240,13 +439,23 @@ index bdc31f9..de42692 100644
 +      visibleBodyLines: this.#interaction?.lines() ?? this.#visibleBodyLines(),
 +      input: this.#interaction?.input() ?? this.#inputText,
 +      inputActive: this.#interaction ? this.#interaction.editing() : this.#inputActive,
++      inputTitle: this.#interaction ? void 0 : this.#inputTitle,
        inputCursorVisible: this.#inputCursorVisible,
 -      status: this.#status
 +      status: this.#interaction?.status ?? this.#status
      });
      this.#frameBuffer.present(frame);
    }
-@@ -1378,7 +1498,7 @@ function parseKey(chunk) {
+@@ -1354,6 +1579,8 @@ function parseKey(chunk) {
+       return { type: "ctrl-l" };
+     case "":
+       return { type: "ctrl-c" };
++    case "":
++      return { type: "ctrl-v" };
+     case "\x1B":
+       return { type: "escape" };
+     case "\r":
+@@ -1378,7 +1605,7 @@ function parseKey(chunk) {
    }
  }
  
@@ -255,12 +464,13 @@ index bdc31f9..de42692 100644
  import {
    convertToModelMessages,
    generateId,
-@@ -1387,8 +1507,21 @@ import {
+@@ -1387,8 +1614,23 @@ import {
  } from "ai";
  var defaultResponseStatistics2 = "outputTokensPerSecond";
  var AgentTUIRunner = class {
 +  interaction;
 +  localCommand;
++  attachments;
 +  agent;
 +  transport;
 +  chatId = generateId();
@@ -275,10 +485,11 @@ index bdc31f9..de42692 100644
 -    this.chatId = generateId();
 +    this.interaction = options.interaction;
 +    this.localCommand = options.localCommand;
++    this.attachments = options.attachments;
      this.agent = options.agent;
      this.transport = options.transport;
      this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
-@@ -1400,6 +1533,17 @@ var AgentTUIRunner = class {
+@@ -1400,11 +1642,23 @@ var AgentTUIRunner = class {
      this.sandbox = options.sandbox;
    }
    async run() {
@@ -296,28 +507,47 @@ index bdc31f9..de42692 100644
      const title = this.title;
      const messages = [];
      let nextMessageIndex = 0;
-@@ -1419,7 +1563,7 @@ var AgentTUIRunner = class {
+     const generateMessageId = () => `message-${++nextMessageIndex}`;
+     let prompt;
++    let files = [];
+     let hasRunTurn = false;
+     let streamWithoutPrompt = false;
+     while (true) {
+@@ -1419,7 +1673,9 @@ var AgentTUIRunner = class {
              );
            }
            try {
 -            prompt = await this.renderer.readPrompt({ title });
-+            prompt = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches });
++            const input = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches, attachments: this.attachments });
++            prompt = typeof input === "object" ? input.text : input;
++            files = typeof input === "object" ? input.files : [];
            } catch (error) {
              if (isInterruptedError(error)) {
                return;
-@@ -1430,6 +1574,11 @@ var AgentTUIRunner = class {
+@@ -1430,7 +1686,12 @@ var AgentTUIRunner = class {
              return;
            }
          }
-+        if (this.localCommand?.matches(prompt)) {
+-        messages.push(createUserMessage(generateMessageId(), prompt));
++        if (!files.length && this.localCommand?.matches(prompt)) {
 +          if (await this.localCommand.run(prompt) === "exit") return;
 +          prompt = void 0;
 +          continue;
 +        }
-         messages.push(createUserMessage(generateMessageId(), prompt));
++        messages.push(createUserMessage(generateMessageId(), prompt, files));
          hasRunTurn = true;
        }
-@@ -1520,7 +1669,8 @@ var AgentTUIRunner = class {
+       const result = await this.streamMessages(
+@@ -1440,7 +1701,7 @@ var AgentTUIRunner = class {
+       try {
+         const responseMessage = await this.renderer.renderStream(result, {
+           title,
+-          submittedPrompt: prompt,
++          submittedPrompt: files.length ? userDisplayText([{ type: "text", text: prompt ?? "" }, ...files]) : prompt,
+           continueSession: Boolean(this.renderer.readPrompt),
+           tools: this.tools,
+           reasoning: this.reasoning,
+@@ -1520,7 +1781,8 @@ var AgentTUIRunner = class {
    }
  };
  function createDefaultRenderer(options) {
@@ -327,7 +557,7 @@ index bdc31f9..de42692 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1535,6 +1685,7 @@ function createRenderer(options) {
+@@ -1535,6 +1797,7 @@ function createRenderer(options) {
      return void 0;
    }
    return new TerminalRenderer({
@@ -335,7 +565,21 @@ index bdc31f9..de42692 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1874,11 +2025,10 @@ function isInterruptedError(error) {
+@@ -1807,11 +2070,11 @@ function* closeOpenParts(textPartIds, reasoningPartIds) {
+   }
+   reasoningPartIds.clear();
+ }
+-function createUserMessage(id, text) {
++function createUserMessage(id, text, files = []) {
+   return {
+     id,
+     role: "user",
+-    parts: [{ type: "text", text }]
++    parts: [...text || !files.length ? [{ type: "text", text }] : [], ...files]
+   };
+ }
+ function upsertResponseMessage(messages, responseMessage, replaceLast) {
+@@ -1874,11 +2137,10 @@ function isInterruptedError(error) {
    return error instanceof Error && error.message === "Interrupted";
  }
  
@@ -350,44 +594,69 @@ index bdc31f9..de42692 100644
 -//# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
-index 240b4c3..c23ee83 100644
+index 240b4c3..3ce91f5 100644
 --- a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
 +++ b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
-@@ -40,6 +40,7 @@ export type AgentTUIStreamOptions = {
+@@ -6,8 +6,10 @@ import type {
+ } from './run-agent-tui';
+ import {
+   TerminalRenderer,
++  userDisplayText,
+   type TerminalInput,
+   type TerminalOutput,
++  type TerminalPromptInput,
+ } from './tui/terminal-renderer';
+ import {
+   convertToModelMessages,
+@@ -15,6 +17,7 @@ import {
+   getToolName,
+   isToolUIPart,
+   type ChatTransport,
++  type FileUIPart,
+   type StepResultPerformance,
+   type Experimental_SandboxSession,
+   type LanguageModelUsage,
+@@ -40,6 +43,8 @@ export type AgentTUIStreamOptions = {
  };
  
  export type AgentTUISessionOptions = {
 +  isLocalCommand?: (text: string) => boolean;
++  attachments?: RunAgentTUIOptions['attachments'];
    title?: string;
    initialPrompt?: string;
    submittedPrompt?: string;
-@@ -68,6 +69,7 @@ export type AgentTUIToolApprovalResponse = {
+@@ -68,7 +73,9 @@ export type AgentTUIToolApprovalResponse = {
  };
  
  export type AgentTUIRenderer = {
+-  readPrompt?(options?: AgentTUISessionOptions): Promise<string | undefined>;
 +  readInteraction?(request: import('./run-agent-tui').LocalInteractionRequest, signal: AbortSignal): Promise<unknown>;
-   readPrompt?(options?: AgentTUISessionOptions): Promise<string | undefined>;
++  /** A string, or text plus attached files when `attachments` produced any. */
++  readPrompt?(options?: AgentTUISessionOptions): Promise<string | TerminalPromptInput | undefined>;
    readToolApproval?(
      request: AgentTUIToolApprovalRequest,
-@@ -86,6 +88,8 @@ export type AgentTUIRunnerOptions = RunAgentTUIOptions & {
+     options?: AgentTUISessionOptions,
+@@ -86,6 +93,9 @@ export type AgentTUIRunnerOptions = RunAgentTUIOptions & {
  };
  
  export class AgentTUIRunner {
 +  private readonly interaction?: RunAgentTUIOptions['interaction'];
 +  private readonly localCommand?: RunAgentTUIOptions['localCommand'];
++  private readonly attachments?: RunAgentTUIOptions['attachments'];
    private readonly agent?: AgentTUIAgent;
    private readonly transport?: ChatTransport<UIMessage>;
    private readonly chatId = generateId();
-@@ -98,6 +102,8 @@ export class AgentTUIRunner {
+@@ -98,6 +108,9 @@ export class AgentTUIRunner {
    private readonly sandbox?: Experimental_SandboxSession;
  
    constructor(options: AgentTUIRunnerOptions) {
 +    this.interaction = options.interaction;
 +    this.localCommand = options.localCommand;
++    this.attachments = options.attachments;
      this.agent = options.agent;
      this.transport = options.transport;
      this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
-@@ -111,6 +117,14 @@ export class AgentTUIRunner {
+@@ -111,11 +124,20 @@ export class AgentTUIRunner {
    }
  
    async run() {
@@ -402,28 +671,47 @@ index 240b4c3..c23ee83 100644
      const title = this.title;
      const messages: UIMessage[] = [];
      let nextMessageIndex = 0;
-@@ -133,7 +147,7 @@ export class AgentTUIRunner {
+     const generateMessageId = () => `message-${++nextMessageIndex}`;
+     let prompt: string | undefined;
++    let files: FileUIPart[] = [];
+     let hasRunTurn = false;
+     let streamWithoutPrompt = false;
+ 
+@@ -133,7 +155,9 @@ export class AgentTUIRunner {
            }
  
            try {
 -            prompt = await this.renderer.readPrompt({ title });
-+            prompt = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches });
++            const input = await this.renderer.readPrompt({ title, isLocalCommand: this.localCommand?.matches, attachments: this.attachments });
++            prompt = typeof input === 'object' ? input.text : input;
++            files = typeof input === 'object' ? input.files : [];
            } catch (error) {
              if (isInterruptedError(error)) {
                return;
-@@ -147,6 +161,11 @@ export class AgentTUIRunner {
+@@ -147,7 +171,12 @@ export class AgentTUIRunner {
            }
          }
  
-+        if (this.localCommand?.matches(prompt)) {
+-        messages.push(createUserMessage(generateMessageId(), prompt));
++        if (!files.length && this.localCommand?.matches(prompt)) {
 +          if (await this.localCommand.run(prompt) === 'exit') return;
 +          prompt = undefined;
 +          continue;
 +        }
-         messages.push(createUserMessage(generateMessageId(), prompt));
++        messages.push(createUserMessage(generateMessageId(), prompt, files));
          hasRunTurn = true;
        }
-@@ -257,9 +276,10 @@ function createDefaultRenderer(options: AgentTUIRunnerOptions) {
+ 
+@@ -159,7 +188,7 @@ export class AgentTUIRunner {
+       try {
+         const responseMessage = await this.renderer.renderStream(result, {
+           title,
+-          submittedPrompt: prompt,
++          submittedPrompt: files.length ? userDisplayText([{ type: 'text', text: prompt ?? '' }, ...files]) : prompt,
+           continueSession: Boolean(this.renderer.readPrompt),
+           tools: this.tools,
+           reasoning: this.reasoning,
+@@ -257,9 +286,10 @@ function createDefaultRenderer(options: AgentTUIRunnerOptions) {
    return options.tools === undefined &&
      options.reasoning === undefined &&
      options.responseStatistics === undefined &&
@@ -435,7 +723,7 @@ index 240b4c3..c23ee83 100644
          tools: options.tools,
          reasoning: options.reasoning,
          responseStatistics: options.responseStatistics,
-@@ -279,6 +299,7 @@ function createRenderer(
+@@ -279,6 +309,7 @@ function createRenderer(
    }
  
    return new TerminalRenderer({
@@ -443,18 +731,75 @@ index 240b4c3..c23ee83 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
+@@ -591,11 +622,11 @@ function* closeOpenParts(
+   reasoningPartIds.clear();
+ }
+ 
+-function createUserMessage(id: string, text: string): UIMessage {
++function createUserMessage(id: string, text: string, files: FileUIPart[] = []): UIMessage {
+   return {
+     id,
+     role: 'user',
+-    parts: [{ type: 'text', text }],
++    parts: [...(text || !files.length ? [{ type: 'text' as const, text }] : []), ...files],
+   };
+ }
+ 
+diff --git a/node_modules/@ai-sdk/tui/src/index.ts b/node_modules/@ai-sdk/tui/src/index.ts
+index 11607c4..ca3730d 100644
+--- a/node_modules/@ai-sdk/tui/src/index.ts
++++ b/node_modules/@ai-sdk/tui/src/index.ts
+@@ -3,5 +3,7 @@ export type {
+   AgentTUIAgent,
+   ResponseStatisticsMode,
+   RunAgentTUIOptions,
++  TerminalAttachmentResult,
++  TerminalAttachments,
+   TerminalPartDisplayMode,
+ } from './run-agent-tui';
 diff --git a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
-index c26dfb9..bd65db4 100644
+index c26dfb9..a572d4d 100644
 --- a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
 +++ b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
-@@ -39,7 +39,17 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -3,6 +3,7 @@ import type {
+   Agent,
+   ChatTransport,
+   Experimental_SandboxSession,
++  FileUIPart,
+   UIMessage,
+ } from 'ai';
+ 
+@@ -39,7 +40,40 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
 +export type LocalInteractionRequest = { id: string; toolCallId: string; tool: string; kind: 'approval' | 'question'; title: string; details?: string; options?: { id: string; label: string }[]; allowFreeText?: boolean; multiSelect?: boolean };
 +export type LocalInteraction = { connect(handler: (request: LocalInteractionRequest, signal: AbortSignal) => Promise<unknown>): () => void };
 +
++/** Outcome of reading attachments: files to attach and/or a short notice for the user. */
++export type TerminalAttachmentResult = { files?: FileUIPart[]; notice?: string };
++
++/**
++ * Prompt attachments. Attached files appear in the prompt as `[Image 1]`
++ * (or `[File 1]`) markers; Backspace right after a marker removes it. On
++ * Enter the markers are removed from the text and the files are sent as
++ * `file` parts of the user message; sent and restored messages show
++ * `[Image]` / `[File]`. The application reads and validates files.
++ */
++export type TerminalAttachments = {
++  /** Ctrl+V while typing: read attachments from the system clipboard. */
++  fromClipboard?: (context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult>;
++  /**
++   * Pasted or dropped text, such as a file path dragged into the terminal.
++   * Return files (or a notice) to attach instead of inserting the text, or
++   * `undefined` to insert it as typed text.
++   */
++  fromText?: (text: string, context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult | undefined>;
++};
++
  export type RunAgentTUIOptions = {
++  /** Prompt attachments (Ctrl+V, pasted or dropped file paths). Off when omitted. */
++  attachments?: TerminalAttachments;
 +  /** App-owned in-stream tool interaction; never triggers an AI SDK approval loop. */
 +  interaction?: LocalInteraction;
 +  /** Display-only restored transcript. Never passed to agent/transport or executed. */
@@ -465,11 +810,50 @@ index c26dfb9..bd65db4 100644
    /**
     * The title shown in the terminal UI.
     */
+diff --git a/node_modules/@ai-sdk/tui/src/tui/layout.ts b/node_modules/@ai-sdk/tui/src/tui/layout.ts
+index 71a17a7..97fa313 100644
+--- a/node_modules/@ai-sdk/tui/src/tui/layout.ts
++++ b/node_modules/@ai-sdk/tui/src/tui/layout.ts
+@@ -19,6 +19,8 @@ export type TUIScreenState = {
+   input: string;
+   inputActive: boolean;
+   inputCursorVisible?: boolean;
++  /** Title of the input box while it is active. @default "Input" */
++  inputTitle?: string;
+   scrollOffset: number;
+   status?: string;
+ };
+@@ -81,7 +83,7 @@ export function renderScreenViewport(state: TUIScreenViewportState): string {
+     topBorder(width, state.title, state.rightTitle),
+     ...visibleBody.map(line => boxLine(line, width)),
+     bottomBorder(width),
+-    topBorder(width, state.inputActive ? 'Input' : 'Status'),
++    topBorder(width, state.inputActive ? (state.inputTitle ?? 'Input') : 'Status'),
+     boxLine(
+       state.inputActive
+         ? `> ${state.input}${state.inputCursorVisible === false ? ' ' : '█'}`
 diff --git a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
-index cba32e1..c84854c 100644
+index cba32e1..eadc0a8 100644
 --- a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
 +++ b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
-@@ -46,6 +46,7 @@ const defaultResponseStatistics: ResponseStatisticsMode =
+@@ -5,6 +5,8 @@ import type {
+ } from '../agent-tui-runner';
+ import type {
+   ResponseStatisticsMode,
++  TerminalAttachmentResult,
++  TerminalAttachments,
+   TerminalPartDisplayMode,
+ } from '../run-agent-tui';
+ import { renderScreenViewport, sliceVisible, visibleLength } from './layout';
+@@ -16,6 +18,7 @@ import {
+   readUIMessageStream,
+   type StepResultPerformance,
+   type DynamicToolUIPart,
++  type FileUIPart,
+   type ToolUIPart,
+   type UIMessage,
+   type UIMessageChunk,
+@@ -46,6 +49,7 @@ const defaultResponseStatistics: ResponseStatisticsMode =
    'outputTokensPerSecond';
  
  export type TerminalRendererOptions = {
@@ -477,30 +861,71 @@ index cba32e1..c84854c 100644
    input?: TerminalInput;
    output?: TerminalOutput;
    frameBuffer?: TerminalFrameBuffer;
-@@ -56,6 +57,7 @@ export type TerminalRendererOptions = {
+@@ -56,6 +60,9 @@ export type TerminalRendererOptions = {
  };
  
  export type TerminalSessionOptions = {
 +  isLocalCommand?: (text: string) => boolean;
++  /** Prompt attachments (Ctrl+V and pasted/dropped text). */
++  attachments?: TerminalAttachments;
    title?: string;
    initialPrompt?: string;
    submittedPrompt?: string;
-@@ -156,6 +158,7 @@ export class TerminalRenderer {
+@@ -67,8 +74,35 @@ export type TerminalSessionOptions = {
+   contextSize?: number;
+ };
+ 
++/** A prompt with attached files, returned by `readPrompt` when files were attached. */
++export type TerminalPromptInput = { text: string; files: FileUIPart[] };
++
++/** `[Image]` for images, `[File]` for anything else. */
++export function attachmentLabel(mediaType: string): string {
++  return /^image(\/|$)/i.test(mediaType) ? '[Image]' : '[File]';
++}
++
++/**
++ * Display text of a user message: one `[Image]` / `[File]` label per file
++ * part (and per text part that is exactly such a label, as display
++ * placeholders are), then the text.
++ */
++export function userDisplayText(parts: readonly UIMessage['parts'][number][]): string {
++  const labels: string[] = [];
++  let text = '';
++  for (const part of parts) {
++    if (part.type === 'file') labels.push(attachmentLabel(part.mediaType));
++    else if (part.type === 'text') {
++      if (/^\[(Image|File)\]$/.test(part.text.trim())) labels.push(part.text.trim());
++      else text += part.text;
++    }
++  }
++  return [...labels, text].filter(Boolean).join(' ');
++}
++
+ export type TerminalKey =
+   | { type: 'character'; value: string }
++  | { type: 'ctrl-v' }
+   | { type: 'backspace' }
+   | { type: 'enter' }
+   | { type: 'up' }
+@@ -156,8 +190,10 @@ export class TerminalRenderer {
    readonly #responseStatistics: ResponseStatisticsMode;
    readonly #defaultContextSize?: number;
  
 +  #interaction?: { key(chunk: Buffer): void; lines(): string[]; input(): string; editing(): boolean; status: string; cancel(): void };
    #sections: ChatSection[] = [];
    #inputText = '';
++  #inputTitle?: string;
    #inputActive = false;
-@@ -185,6 +188,16 @@ export class TerminalRenderer {
+   #scrollOffset = 0;
+   #title = '';
+@@ -185,41 +221,134 @@ export class TerminalRenderer {
        options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
 +    // Seed real scrollable sections, not terminal output or provider history.
 +    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
 +      if (message.role === 'user') {
-+        this.#addUserSection(message.parts.filter(p => p.type === 'text').map(p => p.text).join(''));
++        this.#addUserSection(userDisplayText(message.parts));
 +      } else if (message.role === 'assistant') {
 +        this.#renderAssistantMessage({ ...message, id: `restored-${index}` }, {
 +          tools: this.#tools, reasoning: 'hidden', responseStatistics: this.#responseStatistics,
@@ -509,21 +934,149 @@ index cba32e1..c84854c 100644
 +    }
    }
  
-   async readPrompt(options?: TerminalSessionOptions): Promise<string> {
-@@ -215,6 +228,12 @@ export class TerminalRenderer {
+-  async readPrompt(options?: TerminalSessionOptions): Promise<string> {
++  async readPrompt(options?: TerminalSessionOptions): Promise<string | TerminalPromptInput> {
+     this.#start(options);
+     this.#inputActive = true;
+     this.#inputText = options?.initialPrompt ?? '';
+     this.#status = `Type a prompt and press Enter · ${activeControls}`;
++    const source = options?.attachments;
++    // Attached files, in marker order. Markers only ever end the text when
++    // appended, and Backspace edits only the end, so the last marker always
++    // belongs to the last attachment.
++    const attached: { marker: string; kind: 'Image' | 'File'; file: FileUIPart }[] = [];
++    let notice: string | undefined;
++    let busy = false;
++    let slow = false;
++    const refreshTitle = () => {
++      const images = attached.filter(a => a.kind === 'Image').length;
++      const others = attached.length - images;
++      const summary = [images ? `${images} image${images === 1 ? '' : 's'}` : '', others ? `${others} file${others === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ');
++      this.#inputTitle = !source ? undefined
++        : busy && slow ? 'Input · Reading attachment…'
++        : notice ? `Input · ${notice}`
++        : summary ? `Input · ${summary} attached · Backspace removes`
++        : source.fromClipboard ? 'Input · Ctrl+V attaches an image' : undefined;
++    };
++    refreshTitle();
+     this.#startInputCursorBlink();
+     this.#paint();
+ 
+     return await new Promise((resolve, reject) => {
+-      this.#onData = chunk => {
++      let settled = false;
++      const queue: Buffer[] = [];
++      const files = () => attached.map(a => a.file);
++      const attach = (result: TerminalAttachmentResult | undefined) => {
++        notice = result?.notice;
++        for (const file of result?.files ?? []) {
++          const kind = attachmentLabel(file.mediaType) === '[Image]' ? 'Image' as const : 'File' as const;
++          const marker = `[${kind} ${attached.filter(a => a.kind === kind).length + 1}]`;
++          this.#inputText += `${this.#inputText && !/\s$/.test(this.#inputText) ? ' ' : ''}${marker} `;
++          attached.push({ marker, kind, file });
++        }
++      };
++      // Reading attachments is asynchronous. Keys typed meanwhile are queued
++      // and applied afterwards, in order; Esc and Ctrl+C still act at once.
++      const read = (work: () => Promise<TerminalAttachmentResult | undefined>, text?: string) => {
++        busy = true;
++        // Only mention reading when it takes a noticeable time (no flicker for ordinary pastes).
++        const timer = setTimeout(() => { if (busy && !settled) { slow = true; refreshTitle(); this.#paint(); } }, 150);
++        void Promise.resolve().then(work).then(
++          result => { if (settled) return; if (result === undefined) this.#inputText += text ?? ''; else attach(result); },
++          () => { if (settled) return; if (text !== undefined) this.#inputText += text; else notice = 'Could not read the clipboard'; },
++        ).finally(() => {
++          clearTimeout(timer);
++          if (settled) return;
++          busy = false;
++          slow = false;
++          refreshTitle();
++          this.#showInputCursor();
++          this.#paint();
++          while (!busy && !settled && queue.length) handle(queue.shift()!);
++        });
++      };
++      const finish = () => { settled = true; this.#inputTitle = undefined; };
++      const handle = (chunk: Buffer) => {
+         const key = parseKey(chunk);
++        if (busy && key.type !== 'escape' && key.type !== 'ctrl-c') { queue.push(chunk); return; }
++        if (notice && key.type !== 'ignore') { notice = undefined; refreshTitle(); }
+ 
+         switch (key.type) {
+           case 'character':
++            // Several characters at once are a paste or a dropped file path.
++            if (source?.fromText && [...graphemeSegmenter.segment(key.value)].length > 1) {
++              const text = key.value;
++              read(() => source.fromText!(text, { attached: files() }), text);
++              break;
++            }
+             this.#inputText += key.value;
+             this.#showInputCursor();
+             this.#paint();
+             break;
+-          case 'backspace':
+-            this.#inputText = removeLastGrapheme(this.#inputText);
++          case 'ctrl-v':
++            if (source?.fromClipboard) read(() => source.fromClipboard!({ attached: files() }));
++            break;
++          case 'backspace': {
++            // Right after a marker (and the space that follows it), Backspace removes the whole attachment.
++            const last = attached.at(-1);
++            const end = last && [last.marker, `${last.marker} `].find(tail => this.#inputText.endsWith(tail));
++            if (last && end) {
++              this.#inputText = this.#inputText.slice(0, -end.length).replace(/ $/, '');
++              attached.pop();
++              refreshTitle();
++            } else this.#inputText = removeLastGrapheme(this.#inputText);
+             this.#showInputCursor();
+             this.#paint();
+             break;
++          }
+           case 'enter': {
+-            const prompt = this.#inputText;
++            // Markers leave the text; the files travel as parts of the message.
++            let prompt = this.#inputText;
++            // A marker and the spaces around it collapse to one space ("a [Image 1] b" → "a b").
++            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${marker.replace(/[[\]]/g, '\\$&')} *`), ' ');
++            if (attached.length) prompt = prompt.trim();
++            const input: string | TerminalPromptInput = attached.length ? { text: prompt, files: files() } : prompt;
++            finish();
              this.#inputActive = false;
              this.#stopInputCursorBlink();
              this.#status = processingStatus;
+-            this.#addUserSection(prompt);
 +            if (options?.isLocalCommand?.(prompt)) {
 +              this.#inputText = '';
 +              this.#stop();
 +              resolve(prompt);
 +              break;
 +            }
-             this.#addUserSection(prompt);
++            this.#addUserSection(userDisplayText([...(prompt ? [{ type: 'text' as const, text: prompt }] : []), ...files()]));
              this.#inputText = '';
              this.#paint();
-@@ -302,6 +321,7 @@ export class TerminalRenderer {
+             this.#detachInput();
+-            resolve(prompt);
++            resolve(input);
+             break;
+           }
+           case 'up':
+@@ -235,6 +364,7 @@ export class TerminalRenderer {
+             break;
+           case 'escape':
+           case 'ctrl-c':
++            finish();
+             this.#stopInputCursorBlink();
+             this.#stop();
+             reject(interruptedError());
+@@ -243,6 +373,7 @@ export class TerminalRenderer {
+             break;
+         }
+       };
++      this.#onData = handle;
+ 
+       this.#attachInput();
+     });
+@@ -302,6 +433,7 @@ export class TerminalRenderer {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -531,7 +1084,7 @@ index cba32e1..c84854c 100644
        this.#resolveStreamInterrupt = undefined;
        if (this.#interrupted) {
          result.abort?.();
-@@ -327,6 +347,81 @@ export class TerminalRenderer {
+@@ -327,6 +459,81 @@ export class TerminalRenderer {
      return responseMessage;
    }
  
@@ -613,7 +1166,7 @@ index cba32e1..c84854c 100644
    async readToolApproval(
      request: AgentTUIToolApprovalRequest,
      options?: TerminalSessionOptions,
-@@ -442,6 +537,7 @@ export class TerminalRenderer {
+@@ -442,6 +649,7 @@ export class TerminalRenderer {
    }
  
    #handleStreamingKey(chunk: Buffer) {
@@ -621,7 +1174,7 @@ index cba32e1..c84854c 100644
      const key = parseKey(chunk);
  
      switch (key.type) {
-@@ -711,16 +807,17 @@ export class TerminalRenderer {
+@@ -711,16 +919,18 @@ export class TerminalRenderer {
    }
  
    #paint() {
@@ -637,9 +1190,19 @@ index cba32e1..c84854c 100644
 +      visibleBodyLines: this.#interaction?.lines() ?? this.#visibleBodyLines(),
 +      input: this.#interaction?.input() ?? this.#inputText,
 +      inputActive: this.#interaction ? this.#interaction.editing() : this.#inputActive,
++      inputTitle: this.#interaction ? undefined : this.#inputTitle,
        inputCursorVisible: this.#inputCursorVisible,
 -      status: this.#status,
 +      status: this.#interaction?.status ?? this.#status,
      });
  
      this.#frameBuffer.present(frame);
+@@ -1396,6 +1606,8 @@ export function parseKey(chunk: Buffer): TerminalKey {
+       return { type: 'ctrl-l' };
+     case '\u0003':
+       return { type: 'ctrl-c' };
++    case '\u0016':
++      return { type: 'ctrl-v' };
+     case '\x1B':
+       return { type: 'escape' };
+     case '\r':
