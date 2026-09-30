@@ -172,6 +172,39 @@ try {
 arrive as `providerExecuted` parts: the AI SDK displays them but never runs
 them itself.
 
+### Images
+
+A user turn can carry images as AI SDK `image` or `file` parts (base64,
+bytes or `data:` URLs; `convertToModelMessages` output works as is). They
+are sent to Letta as `ImageContent`, together with the text, as one new user
+message:
+
+```ts
+import { readFileSync } from 'node:fs';
+await support.generate({ messages: [...support.transcript, { role: 'user', content: [
+  { type: 'text', text: 'What is in this screenshot?' },
+  { type: 'image', image: readFileSync('screenshot.png') },
+] }] });
+```
+
+- **Types and limits:** PNG, JPEG, GIF and WebP, checked by content (not by
+  name or declared type); up to 5 MB per image, 4 images and 10 MB in total
+  per message (`IMAGE_LIMITS`). Anything else fails before delivery with an
+  `ImageInputError` whose `code` is one of `image_unsupported_type`,
+  `image_invalid`, `image_remote_url`, `image_too_large`, `images_too_many`,
+  `images_too_large`. Image URLs are never fetched.
+- **No replay:** history must still extend exactly what was sent. Images in
+  history are compared by a SHA-256 of their bytes, and the agent keeps only
+  that hash (`agent.transcript`), never a second copy of the image.
+- **The model must accept images.** The Letta harness passes them to the
+  connected model; verified with `openai-codex/gpt-5.5`.
+- **Images are stored in Letta history,** and so in the local backend's agent
+  state (`LETTA_LOCAL_BACKEND_DIR`) like any message. Restored conversations
+  show them again: the browser app displays the newest 48 MB of images per
+  conversation and `[Image]` for older or undisplayable ones; the terminal
+  shows `[Image]`. The HTTP runtime's own state files record only each
+  image's type, size and hash.
+
 What a definition controls, and when:
 
 | Field | Applied |
@@ -195,6 +228,17 @@ Inside: `/resume [title or ID]`, `/search [text]` (this agent's
 conversations only), `/help`; PgUp/PgDn scroll restored history; Esc exits.
 Approvals and questions appear as prompts during the turn that needs them.
 
+**Images.** Press **Ctrl+V** to attach an image from the clipboard, or drag
+an image file into the terminal (or paste its path; shell-escaped, quoted
+and `file://` paths all work). Each attachment shows as `[Image 1]`,
+`[Image 2]`, ... in the prompt; Backspace right after a marker removes it.
+Sent and restored messages show `[Image]`. Clipboard access uses `osascript`
+on macOS (screenshots, copied images, or image files copied in Finder) and
+`wl-paste` or `xclip` on Linux when installed; without them, Ctrl+V shows a
+short notice and dropping a file still works. The terminal does not resize
+images: files over 5 MB are refused with a notice (the browser app
+downscales automatically).
+
 Use it from code with `runTerminal(definition, process.argv.slice(2))` from
 `@ai-sdk-letta/tui`.
 
@@ -214,7 +258,15 @@ npm run gui -- --port 4500 --state-dir /path/to/state
 A browser app built with [assistant-ui](https://www.assistant-ui.com):
 threads with rename and archive, streaming replies, tool activity lines with
 collapsed technical details, docked approval and question cards, and safe
-Markdown. Use it from code with `startGuiServer(definition, assetsDir, options)`
+Markdown.
+
+**Images.** Paste an image (⌘V / Ctrl+V), drop image files on the composer,
+or use the paperclip. Thumbnails can be removed before sending; images
+larger than 2048 px are downscaled in the browser (and re-encoded if still
+over 5 MB). Sent images appear in your message, also after a reload, and
+open larger on click. Pasting text still pastes text, including rich text
+copied with a snapshot image (as Office apps do). Unsupported, oversized or
+too many images show a notice and are not attached. Use it from code with `startGuiServer(definition, assetsDir, options)`
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
 
@@ -243,8 +295,11 @@ token-authenticated server-to-server API with the same routes.
   header, the Origin, and fetch metadata. A random HttpOnly, SameSite=Strict
   cookie authenticates the browser, and every mutation also needs an
   in-memory CSRF token. No bearer token reaches the browser. A strict CSP
-  applies, Markdown skips raw HTML and never loads remote images, and
-  technical details stay collapsed by default.
+  applies (images: same origin, `data:` and `blob:` only, never remote),
+  Markdown skips raw HTML and never loads remote images, and technical
+  details stay collapsed by default. Only `POST /v1/runs` accepts a larger
+  body (about 13.4 MB, for images); every other route keeps a 24 KB limit.
+  Images are validated again on the server (type by content, size, count).
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
 - **Audit.** Tool activity is logged as metadata only (tool, status, duration,
@@ -304,8 +359,13 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   (the provider package does support them).
 - **One process per agent.** The identity lock allows one open runtime per
   logical ID. The HTTP runtime runs one turn at a time.
-- **Text input only.** Up to 8,000 characters per turn; no files or images.
-  No history edits, regeneration or retries by design.
+- **Text and images only.** Up to 8,000 characters and 4 images (PNG, JPEG,
+  GIF, WebP; 5 MB each, 10 MB total) per turn; no other file types. No
+  history edits, regeneration or retries by design.
+- **Images in restored history** are shown when Letta returns them: the
+  browser displays the newest 48 MB per conversation and `[Image]` for the
+  rest; the terminal always shows `[Image]`. A reply that is still running
+  after a browser refresh shows `[Image]` until it completes.
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default).
