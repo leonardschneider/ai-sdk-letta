@@ -1,0 +1,25 @@
+ai-sdk-letta
+Copyright 2026 Leonard Schneider
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+except where a file or directory states otherwise.
+
+This product includes software developed by Letta:
+
+  packages/provider
+    A port of @letta-ai/vercel-ai-sdk-provider
+    (https://github.com/letta-ai/vercel-ai-sdk-provider) from the Letta REST
+    client to @letta-ai/letta-agent-sdk. The original work is
+    Copyright (c) 2025 Letta and is licensed under the MIT License; the full
+    license text is kept in packages/provider/LICENSE. Modifications in that
+    directory remain available under the same MIT License.
+
+This product patches, at install time, the following third-party package:
+
+  @ai-sdk/tui (https://github.com/vercel/ai), Copyright Vercel, Inc.,
+  licensed under the Apache License, Version 2.0. The patch is in
+  apps/tui/patches/.
+
+ai-sdk-letta is an independent project. It is not affiliated with, endorsed
+by, or sponsored by Letta or Vercel. "Letta" and "Vercel" are trademarks of
+their respective owners.

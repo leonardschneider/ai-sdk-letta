@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.tgz
+coverage/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+# Local runtime state must never be committed.
+.letta/
+.state/
