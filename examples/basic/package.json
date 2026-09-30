@@ -1,0 +1,20 @@
+{
+  "name": "@ai-sdk-letta/example-basic",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal ai-sdk-letta agent with one custom tool, run in the terminal or the browser.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "tui": "node --conditions=ai-sdk-letta-source --import tsx src/tui.ts",
+    "gui": "npm run build --workspace @ai-sdk-letta/web && node --conditions=ai-sdk-letta-source --import tsx src/gui.ts"
+  },
+  "dependencies": {
+    "@ai-sdk-letta/server": "0.1.0",
+    "@ai-sdk-letta/tui": "0.1.0",
+    "@ai-sdk-letta/web": "0.1.0",
+    "ai": "7.0.118",
+    "ai-sdk-letta": "0.1.0"
+  }
+}
