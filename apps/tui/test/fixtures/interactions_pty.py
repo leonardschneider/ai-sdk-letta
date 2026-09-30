@@ -29,6 +29,20 @@ def wait_for(text, timeout=12):
         if text in plain:
             return plain
         if process.poll() is not None:
+            # The child may exit before its final output has been read (common
+            # on Linux). Drain the PTY until EOF/EIO, then check once more.
+            drain_deadline = time.monotonic() + 2
+            while time.monotonic() < drain_deadline and select.select([master], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk.decode('utf-8', errors='replace')
+            plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', buffer)
+            if text in plain:
+                return plain
             break
     raise AssertionError('Missing ' + text + ': ' + buffer[-30000:])
 
