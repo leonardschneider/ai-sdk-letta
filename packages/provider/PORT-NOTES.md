@@ -40,7 +40,7 @@ The SDK logs "v2 specification compatibility mode" at runtime.
 
 ```ts
 import { streamText } from "ai";
-import { lettaRemote } from "@letta-ai/vercel-ai-sdk-provider";
+import { lettaRemote } from "@ai-sdk-letta/provider";
 
 const letta = lettaRemote({
   url: "ws://your-host:4500",
@@ -55,7 +55,7 @@ const res = streamText({
         id: "agent-...",
         // Give each end user their own conversation on ONE agent:
         // isolated transcripts, shared memory.
-        conversationId: "local-conv-7",
+        conversationId: "conv-for-this-user",
       },
     },
   },

@@ -1,8 +1,21 @@
-# AI SDK - Letta Provider
+# @ai-sdk-letta/provider
 
-![NPM Version](https://img.shields.io/npm/v/%40letta-ai%2Fvercel-ai-sdk-provider)
+A Vercel AI SDK `LanguageModel` for Letta agents, speaking the Letta Code
+app-server protocol through `@letta-ai/letta-agent-sdk`.
 
-The official Vercel AI SDK provider for [Letta](https://www.letta.com) - the platform for building stateful AI agents with long-term memory. This provider enables you to use Letta agents seamlessly with the Vercel AI SDK ecosystem.
+> **Unofficial.** This package is a port of Letta's MIT-licensed
+> [`@letta-ai/vercel-ai-sdk-provider`](https://github.com/letta-ai/vercel-ai-sdk-provider)
+> (Copyright (c) 2025 Letta) from the Letta REST client to the Letta Agent SDK.
+> It is maintained as part of [ai-sdk-letta](../../README.md), is not affiliated
+> with or endorsed by Letta or Vercel, and keeps the original MIT license
+> ([LICENSE](./LICENSE)). The upstream git history is preserved in this
+> repository. See [PORT-NOTES.md](./PORT-NOTES.md) for what changed and why.
+
+**Provider or Agent?** Use this provider when you want `generateText` /
+`streamText` against an existing Letta agent, with Letta running its own
+tools. Use the [`ai-sdk-letta`](../ai-sdk-letta) `LettaAgent` when your
+application owns the tools and the human interactions (approvals and
+questions) and you want a persistent agent defined in code.
 
 ## What is Letta?
 
@@ -28,7 +41,8 @@ The official Vercel AI SDK provider for [Letta](https://www.letta.com) - the pla
 ## Installation
 
 ```bash
-npm install @letta-ai/vercel-ai-sdk-provider
+# Not published to npm yet: use it from this repository's workspace.
+npm install @ai-sdk-letta/provider
 ```
 
 ## Quick Start
@@ -39,7 +53,7 @@ The provider speaks the Letta Code **app-server protocol**, so it works against
 Letta Cloud, a local runtime, or an app server you host yourself.
 
 ```typescript
-import { lettaCloud, lettaLocal, lettaRemote } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud, lettaLocal, lettaRemote } from '@ai-sdk-letta/provider';
 
 // Letta Cloud — set LETTA_API_KEY
 const cloud = lettaCloud;
@@ -69,7 +83,7 @@ Give the agent model access on that machine (`letta connect anthropic-oauth`,
 #### Send Message - Non-Streaming Text Generation
 
 ```typescript
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 import { generateText } from 'ai';
 
 const result = await generateText({
@@ -88,7 +102,7 @@ console.log(result.text);
 #### Send Message - Streaming Responses
 
 ```typescript
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 import { streamText } from 'ai';
 
 const result = streamText({
@@ -156,7 +170,7 @@ the retired REST API, which an app server does not serve.
 #### Letta Cloud
 
 ```typescript
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 const model = lettaCloud(); // model/settings live on the Letta agent
 ```
 
@@ -165,14 +179,14 @@ const model = lettaCloud(); // model/settings live on the Letta agent
 Agent state stays on this machine and tools execute here.
 
 ```typescript
-import { lettaLocal } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaLocal } from '@ai-sdk-letta/provider';
 const model = lettaLocal();
 ```
 
 #### Self-hosted app server
 
 ```typescript
-import { lettaRemote } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaRemote } from '@ai-sdk-letta/provider';
 
 const letta = lettaRemote({
   url: 'ws://your-host:4500',
@@ -236,7 +250,7 @@ credentials), pass Letta `AgentTool`s through `session.tools`.
 #### Custom configuration
 
 ```typescript
-import { createLetta } from '@letta-ai/vercel-ai-sdk-provider';
+import { createLetta } from '@ai-sdk-letta/provider';
 
 const letta = createLetta({ backend: 'remote', url: 'ws://host:4500', authToken: '...' });
 const model = letta();
@@ -269,8 +283,8 @@ console.log('Created agent:', agent.id);
 ### Using Existing Messages
 
 ```typescript
-import { convertToAiSdkMessage } from '@letta-ai/vercel-ai-sdk-provider';
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { convertToAiSdkMessage } from '@ai-sdk-letta/provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 import { generateText, convertToModelMessages } from 'ai';
 
 // Load messages from Letta agent
@@ -286,7 +300,7 @@ const uiMessages = convertToAiSdkMessage(lettaMessages);
 
 ```typescript
 // app/api/chat/route.ts - For real-time streaming with useChat
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 import { streamText, convertToModelMessages } from 'ai';
 
 export async function POST(req: Request) {
@@ -390,7 +404,7 @@ export function Chat({ agentId, existingMessages = [] }: ChatProps) {
 ```typescript
 // app/page.tsx - Streaming chat page
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
-import { convertToAiSdkMessage } from '@letta-ai/vercel-ai-sdk-provider';
+import { convertToAiSdkMessage } from '@ai-sdk-letta/provider';
 import { Chat } from './Chat';
 
 export default async function HomePage() {
@@ -579,7 +593,7 @@ message.parts?.forEach((part) => {
 Convert between Letta message formats and AI SDK formats:
 
 ```typescript
-import { convertToAiSdkMessage } from '@letta-ai/vercel-ai-sdk-provider';
+import { convertToAiSdkMessage } from '@ai-sdk-letta/provider';
 
 // Convert Letta messages to AI SDK UIMessage format (for UI components)
 const uiMessages = convertToAiSdkMessage(lettaMessages, {
@@ -618,7 +632,7 @@ Once tools are configured on your agent, they work seamlessly with both streamin
 Tool calls the agent makes are reported as provider-executed, so the AI SDK needs no tool definitions to accept them. If you want typed tool parts in your code, the provider includes a helper to create typed placeholders:
 
 ```typescript
-import { lettaCloud } from '@letta-ai/vercel-ai-sdk-provider';
+import { lettaCloud } from '@ai-sdk-letta/provider';
 import { z } from 'zod';
 
 // Use with streaming

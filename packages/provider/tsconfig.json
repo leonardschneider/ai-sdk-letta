@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "lib": ["dom", "dom.iterable", "esnext"],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
@@ -11,17 +15,19 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "preserve",
     "incremental": false,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": ["./*"]
-    }
+    "types": [
+      "node",
+      "vitest/globals"
+    ]
   },
-  "include": ["."],
-  "exclude": ["*/dist", "dist", "build", "node_modules", "test-apps"]
+  "include": [
+    "src",
+    "*.mjs",
+    "*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }

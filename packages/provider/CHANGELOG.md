@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (ai-sdk-letta)
+
+- Absorbed into the ai-sdk-letta monorepo as `@ai-sdk-letta/provider`, with
+  upstream history preserved. Renamed away from `@letta-ai/...` because this is
+  not an official Letta package. The MIT license is unchanged.
+- Removed upstream-only scaffolding (example Next.js app, Turborepo config,
+  release and dependency-bump workflows). Tests run from the monorepo CI.
+- Pinned `@letta-ai/letta-agent-sdk` to 0.8.22 to match the rest of the
+  workspace.
+
 ## 2.0.0
 
 The transport moved from the Letta REST client (`@letta-ai/letta-client`) to
