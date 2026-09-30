@@ -1,0 +1,33 @@
+{
+  "name": "@ai-sdk-letta/web",
+  "version": "0.1.0",
+  "description": "assistant-ui browser app for ai-sdk-letta agents, served by @ai-sdk-letta/server.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git", "directory": "apps/web" },
+  "files": ["dist"],
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@ai-sdk-letta/server": "0.1.0",
+    "@assistant-ui/react": "0.15.22",
+    "@assistant-ui/react-markdown": "0.14.17",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "ai": "7.0.118",
+    "ai-sdk-letta": "0.1.0",
+    "hast-util-to-jsx-runtime": "2.3.6",
+    "lowlight": "3.3.0",
+    "lucide-react": "1.48.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "remark-gfm": "4.0.1",
+    "vite": "7.3.6"
+  }
+}
