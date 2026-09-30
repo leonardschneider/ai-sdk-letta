@@ -24,6 +24,10 @@ def wait_for(text, timeout=12):
             try:
                 buffer += os.read(master, 65536).decode('utf-8', errors='replace')
             except OSError:
+                # Linux reports EIO once the child has exited; the text may already be buffered.
+                plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', buffer)
+                if text in plain:
+                    return plain
                 break
         plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', buffer)
         if text in plain:
