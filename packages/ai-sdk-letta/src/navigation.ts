@@ -72,7 +72,7 @@ export async function searchConversations(source: NavigationSource, entries: Con
     }, Math.min(SEARCH_RECORDS, SEARCH_TOTAL - records));
     limited ||= history.truncated;
     scanned++;
-    for (const message of projectHistory(history.messages, [])) {
+    for (const message of projectHistory(history.messages, [], 0)) {
       const text = message.parts.filter(p => p.type === 'text').map(p => p.text).join('\n');
       if (plain(text).toLowerCase().includes(query.toLowerCase())) {
         if (matches.length >= SEARCH_MATCHES) { limited = true; break; }

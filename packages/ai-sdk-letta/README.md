@@ -17,7 +17,9 @@ Main exports:
 - `defineAgent(input)`: validate a definition (fail-closed permissions).
 - `openLettaAgent(definition, options)` / `createLettaAgent(...)`: open or
   create the agent on the local Letta backend; returns `{ agent, identity, navigation, close }`.
-- `LettaAgent`: the AI SDK `Agent` (`generate`, `stream`, `interactions`, `presentation`, `close`).
+- `LettaAgent`: the AI SDK `Agent` (`generate`, `stream`, `interactions`, `presentation`, `transcript`, `close`).
+  User turns may include images (`image`/`file` parts), sent as Letta `ImageContent`.
+- `IMAGE_LIMITS`, `ImageInputError`, `validateImages`, `decodeImagePart`: image validation (PNG, JPEG, GIF, WebP).
 - `ToolInteractions`: the broker for approvals and `ask_user` questions.
 - `createToolBridge`, `askUserTool`, `fileTraceWriter`: the tool policy layer.
 - `resolveStateDirectory`, `acquireIdentity`, history and navigation helpers.

@@ -1,5 +1,6 @@
 import type { LettaCodeSession, ListMessagesOptions, ListMessagesResult, LettaConversation } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
+import { decodeImagePart } from './images.js';
 
 /** Maximum backend records loaded when restoring a conversation's display history. */
 export const HISTORY_LIMIT = 10_000;
@@ -70,6 +71,36 @@ function textContent(content: unknown, user = false): string {
   return sanitizeText(text).trim();
 }
 
+/** Text shown for a user image that cannot be displayed (unsupported, invalid, or over the display budget). */
+export const IMAGE_PLACEHOLDER = '[Image]';
+/** Most decoded image bytes restored for display from one conversation, newest first. Older images become placeholders. */
+export const HISTORY_IMAGE_BUDGET = 48 * 1024 * 1024;
+
+/** Letta `ImageContent` items of a backend user record, in order. */
+function imageItems(content: unknown): Row[] {
+  return Array.isArray(content) ? content.map(record).filter((p): p is Row => p?.type === 'image') : [];
+}
+
+/**
+ * Display part for one stored image: a `data:` URL for a well-formed PNG,
+ * JPEG, GIF or WebP within budget, otherwise the {@link IMAGE_PLACEHOLDER}.
+ * The bytes are re-checked, so a mislabelled record never becomes a data URL
+ * of another type.
+ */
+function imagePart(item: Row, budget: { left: number }): UIMessage['parts'][number] {
+  const source = record(item.source);
+  if (budget.left > 0 && source?.type === 'base64' && typeof source.data === 'string' && typeof source.media_type === 'string') {
+    try {
+      const image = decodeImagePart({ type: 'image', image: source.data, mediaType: source.media_type });
+      if (image.bytes <= budget.left) {
+        budget.left -= image.bytes;
+        return { type: 'file', mediaType: image.mediaType, url: `data:${image.mediaType};base64,${image.base64}` };
+      }
+    } catch { /* not displayable */ }
+  }
+  return { type: 'text', text: IMAGE_PLACEHOLDER };
+}
+
 /** Display-only message time from the backend record, when it is a valid date. */
 function timestamp(row: Row): { metadata?: { createdAt: string } } {
   const time = typeof row.date === 'string' ? Date.parse(row.date) : NaN;
@@ -79,12 +110,23 @@ function timestamp(row: Row): { metadata?: { createdAt: string } } {
 /** Display projection only. Never reconstruct the model's context from this.
  * Completed allowlisted app tools become inert output cards; everything else is
  * omitted, including pending approvals, reasoning, system, memory and events.
+ * User images become `file` parts with a `data:` URL (newest first, within
+ * `imageBudget` bytes); the rest become an `[Image]` text placeholder.
  */
-export function projectHistory(messages: ListMessagesResult['messages'], appTools: readonly string[]): UIMessage[] {
+export function projectHistory(messages: ListMessagesResult['messages'], appTools: readonly string[], imageBudget = HISTORY_IMAGE_BUDGET): UIMessage[] {
   const returns = new Map<string, Row>();
   for (const message of messages) {
     const row = message as unknown as Row;
     if (row.message_type === 'tool_return_message' && typeof row.tool_call_id === 'string') returns.set(row.tool_call_id, row);
+  }
+  // Spend the image budget on the newest images first.
+  const images = new Map<string, UIMessage['parts']>();
+  const budget = { left: imageBudget };
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const row = messages[index] as unknown as Row;
+    if (row.message_type !== 'user_message') continue;
+    const items = imageItems(row.content);
+    if (items.length) images.set(messages[index]!.id, items.reverse().map(item => imagePart(item, budget)).reverse());
   }
   const shownCalls = new Set<string>();
   const projected: UIMessage[] = [];
@@ -93,7 +135,8 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
     if (row.message_type === 'user_message' || row.message_type === 'assistant_message') {
       const role = row.message_type === 'user_message' ? 'user' : 'assistant';
       const text = textContent(row.content, role === 'user');
-      if (text) projected.push({ id: `history-${message.id}`, role, parts: [{ type: 'text', text }], ...timestamp(row) });
+      const attached = role === 'user' ? images.get(message.id) ?? [] : [];
+      if (text || attached.length) projected.push({ id: `history-${message.id}`, role, parts: [...(text ? [{ type: 'text' as const, text }] : []), ...attached], ...timestamp(row) });
     } else if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
       const call = record(row.tool_call);
       const id = call?.tool_call_id;
@@ -125,7 +168,7 @@ export function assertHistorySettled(messages: ListMessagesResult['messages']) {
   const calls = new Set<string>();
   for (const message of messages) {
     const row = message as unknown as Row;
-    if (row.message_type === 'user_message' && textContent(row.content, true)) pendingUser = true;
+    if (row.message_type === 'user_message' && (textContent(row.content, true) || imageItems(row.content).length)) pendingUser = true;
     if (row.message_type === 'assistant_message' && textContent(row.content)) pendingUser = false;
     if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
       const id = record(row.tool_call)?.tool_call_id;
