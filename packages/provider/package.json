@@ -1,0 +1,70 @@
+{
+  "name": "@letta-ai/vercel-ai-sdk-provider",
+  "version": "2.0.0",
+  "license": "MIT",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "clean": "rm -rf test-apps/letta-ai-sdk-example/node_modules/@letta-ai/vercel-ai-sdk-provider/dist",
+    "lint": "eslint \"./**/*.ts*\"",
+    "type-check": "tsc --noEmit",
+    "prettier-check": "prettier --check \"./**/*.ts*\"",
+    "test": "npm run test:node && npm run test:e2e",
+    "test:e2e": "vitest --config vitest.e2e.config.mjs --run",
+    "test:e2e:local": "vitest --config vitest.e2e.local.config.mjs --run",
+    "test:node": "vitest --config vitest.node.config.mjs --run",
+    "test:node:watch": "vitest --config vitest.node.config.mjs"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^2.0.0",
+    "@ai-sdk/provider-utils": "^3.0.16",
+    "@letta-ai/letta-agent-sdk": "^0.8.9"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.0",
+    "@types/ws": "^8.18.1",
+    "dotenv": "^17.2.0",
+    "tsup": "^8",
+    "typescript": "5.6.3",
+    "vite": "^7.1.5",
+    "vitest": "^3.1.1",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
+  },
+  "peerDependencies": {
+    "ai": "^7.0.84",
+    "zod": "^4.1.12"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://sdk.vercel.ai/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel/ai.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel/ai/issues"
+  },
+  "keywords": [
+    "ai"
+  ]
+}
