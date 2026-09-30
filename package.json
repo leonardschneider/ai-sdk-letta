@@ -1,0 +1,33 @@
+{
+  "name": "ai-sdk-letta-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A persistent, Letta-backed Vercel AI SDK Agent with memory, dreaming, application-owned tools and human-in-the-loop.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git" },
+  "engines": { "node": ">=22.19.0" },
+  "workspaces": [
+    "packages/provider",
+    "packages/ai-sdk-letta",
+    "packages/server",
+    "apps/tui",
+    "apps/web",
+    "examples/basic"
+  ],
+  "scripts": {
+    "postinstall": "patch-package --patch-dir apps/tui/patches --error-on-fail",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "test:live": "AI_SDK_LETTA_LIVE=1 npm run test:live --workspace ai-sdk-letta",
+    "tui": "npm run tui --workspace @ai-sdk-letta/example-basic --",
+    "gui": "npm run gui --workspace @ai-sdk-letta/example-basic --"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.15",
+    "patch-package": "8.0.1",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}
