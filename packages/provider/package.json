@@ -1,6 +1,6 @@
 {
   "name": "@ai-sdk-letta/provider",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Vercel AI SDK LanguageModel for Letta agents over the Letta Agent SDK. Unofficial port of letta-ai/vercel-ai-sdk-provider.",
   "license": "MIT",
   "author": "Leonard Schneider",
