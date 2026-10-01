@@ -1,19 +1,23 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ThreadListPrimitive, ThreadListItemPrimitive, ThreadListItemMorePrimitive, useAui, useAuiState } from '@assistant-ui/react';
-import { Archive, ArchiveRestore, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Check, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, X } from 'lucide-react';
 import { titleText } from 'ai-sdk-letta/title';
+import { latexChoices } from './latex-menu.js';
+import type { LatexOverride } from './latex.js';
 import { groupByDate, matchesSearch, TITLE_LIMIT, validTitle, type ThreadSummary } from './thread-model.js';
 import { TitleView } from './title.js';
 
 /** Row-level UI state shared by every ThreadListItem (the primitives render items by index). */
-type RowContext = { editingId?: string; setEditingId(id?: string): void; busy: boolean; runningId?: string; archivingIds: ReadonlySet<string> };
-const Rows = createContext<RowContext>({ setEditingId: () => {}, busy: false, archivingIds: new Set() });
+type RowContext = { editingId?: string; setEditingId(id?: string): void; busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; latex: ReadonlyMap<string, LatexOverride>; agentLatex: boolean; onLatex(id: string, value: LatexOverride): void };
+const Rows = createContext<RowContext>({ setEditingId: () => {}, busy: false, archivingIds: new Set(), latex: new Map(), agentLatex: true, onLatex: () => {} });
 
 export type SidebarProps = {
   active: ThreadSummary[]; archived: ThreadSummary[]; times: Map<string, number | undefined>;
   query: string; onQuery(value: string): void; searchRef: React.RefObject<HTMLInputElement | null>;
   busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; isDraft: boolean;
   onClose?(): void; onCollapse?(): void; agent: { id: string; name: string };
+  /** The agent's LaTeX setting, and changing a conversation's override (⋯ menu). */
+  agentLatex: boolean; onLatex(id: string, value: LatexOverride): void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -35,7 +39,8 @@ export function Sidebar(props: SidebarProps) {
   const archivedMatches = archived.filter(include).map(thread => ({ thread, index: archivedIndex.get(thread.id)! }));
   const searching = !!query.trim();
   const archivedOpen = showArchived || (searching && archivedMatches.length > 0);
-  const rows = useMemo(() => ({ editingId, setEditingId, busy, runningId: props.runningId, archivingIds: props.archivingIds }), [editingId, busy, props.runningId, props.archivingIds]);
+  const latex = useMemo(() => new Map([...props.active, ...props.archived].map(t => [t.id, t.latex ?? 'inherit'] as const)), [props.active, props.archived]);
+  const rows = useMemo(() => ({ editingId, setEditingId, busy, runningId: props.runningId, archivingIds: props.archivingIds, latex, agentLatex: props.agentLatex, onLatex: props.onLatex }), [editingId, busy, props.runningId, props.archivingIds, latex, props.agentLatex, props.onLatex]);
   return <Rows.Provider value={rows}>
     <div className="sidebar-head">
       <div className="brand"><span className="brand-mark" aria-hidden="true">✳︎</span><span>{props.agent.name}</span></div>
@@ -78,7 +83,8 @@ function ThreadListItem() {
   const title = useAuiState(s => s.threadListItem.title) ?? 'Untitled';
   const status = useAuiState(s => s.threadListItem.status);
   const custom = useAuiState(s => s.threadListItem.custom) as { state?: string } | undefined;
-  const { editingId, setEditingId, busy, runningId, archivingIds } = useContext(Rows);
+  const { editingId, setEditingId, busy, runningId, archivingIds, latex, agentLatex, onLatex } = useContext(Rows);
+  const latexValue = latex.get(id) ?? 'inherit';
   const [menuOpen, setMenuOpen] = useState(false);
   const renaming = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -112,6 +118,12 @@ function ThreadListItem() {
         {archived
           ? <ThreadListItemMorePrimitive.Item className="menu-item" disabled={archivingIds.has(id)} onSelect={() => aui.threadListItem.unarchive()}><ArchiveRestore size={15} aria-hidden="true"/>Restore</ThreadListItemMorePrimitive.Item>
           : <ThreadListItemMorePrimitive.Item className="menu-item" disabled={lockedByRun || archivingIds.has(id)} onSelect={() => aui.threadListItem.archive()}><Archive size={15} aria-hidden="true"/>{lockedByRun ? 'Archive (after reply)' : 'Archive'}</ThreadListItemMorePrimitive.Item>}
+        <ThreadListItemMorePrimitive.Separator className="menu-sep"/>
+        <div className="menu-label" role="presentation">LaTeX in replies</div>
+        {latexChoices(agentLatex).map(choice => <ThreadListItemMorePrimitive.Item key={choice.value} className="menu-item" role="menuitemradio" aria-checked={latexValue === choice.value}
+          onSelect={() => { if (latexValue !== choice.value) onLatex(id, choice.value); }}>
+          <span className="menu-check" aria-hidden="true">{latexValue === choice.value && <Check size={15}/>}</span>{choice.label}
+        </ThreadListItemMorePrimitive.Item>)}
       </ThreadListItemMorePrimitive.Content>
     </ThreadListItemMorePrimitive.Root>}
   </ThreadListItemPrimitive.Root>;

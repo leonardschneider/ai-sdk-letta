@@ -141,7 +141,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title)));
-  // A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
+  // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off' }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
   app.patch('/v1/threads/:id', async (req, res) => { const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary); });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
@@ -178,6 +178,8 @@ export interface GuiAgentInfo {
   approvalTools?: readonly string[];
   /** Whether the agent accepts file attachments (it has the file tools). */
   files?: boolean;
+  /** The definition's `ui` settings: whether replies render LaTeX unless a conversation overrides it. @default { latex: true } */
+  ui?: { latex: boolean };
 }
 
 /**
@@ -196,13 +198,14 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     const host = `127.0.0.1:${port || req.socket.localPort}`;
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
       // Previews load in frames of this origin (their own responses set a stricter policy); nothing else may frame the app.
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+      // Fonts (KaTeX's, for maths) are files of the app itself: 'self' only, never data: or a CDN.
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
     if (req.headers.host !== host || (req.headers.origin && req.headers.origin !== `http://${host}`) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
     next();
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files } });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ui: { latex: agent.ui?.latex ?? true } } });
   });
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);

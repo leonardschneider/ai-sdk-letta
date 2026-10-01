@@ -483,7 +483,7 @@ function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'mark
   const cut = text.length > MAX_TEXT;
   const shown = cut ? text.slice(0, MAX_TEXT) : text;
   if (kind === 'table') return <TablePreview text={shown} tab={/\.tsv$/i.test(name)} cut={cut}/>;
-  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
+  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown latex={false}/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
   return <><pre className="preview-text">{shown}</pre>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</>;
 }
 

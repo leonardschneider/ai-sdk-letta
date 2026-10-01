@@ -554,6 +554,18 @@ named after the first message as typed, so a pasted URL stays a link. The
 TUI, window titles and resource folders use the plain text
 (`folderNameFromTitle`, `titleText` from `ai-sdk-letta`).
 
+**Maths.** Replies render LaTeX written `\(...\)` (inline) or `\[...\]`
+(display) with [KaTeX](https://katex.org). Dollar signs are never maths ("$5
+and $10" stays as written), code is never touched, and invalid LaTeX shows
+its source marked as an error. Long equations scroll sideways. Copying a
+message copies its Markdown and LaTeX source. It is on by default; turn it
+off for an agent with `ui: { latex: false }` in its definition, and override
+it per conversation from the ⋯ menu or the Σ button in the header
+("LaTeX: Agent default (on) / On / Off"; kept with the conversation). KaTeX
+and its fonts are bundled with the app and load only when a reply contains
+maths; nothing comes from a CDN. Your own messages and the TUI show the
+text as written.
+
 **Images.** Paste an image (⌘V / Ctrl+V), drop image files on the composer,
 or use the paperclip. Thumbnails can be removed before sending; images
 larger than 2048 px are downscaled in the browser (and re-encoded if still

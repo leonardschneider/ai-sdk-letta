@@ -21,6 +21,13 @@ Routes (under `/api` for the GUI): `GET /v1/capabilities`, `GET|POST /v1/threads
 `POST /v1/runs/:id/cancel`, and with the file tools `POST /v1/uploads`,
 `GET /v1/threads/:id/files`, `GET /v1/threads/:id/files/:name`.
 
+`PATCH /v1/threads/:id` takes any of `{ title, archived, latex }`: `title`
+(1–120 characters), `archived` (boolean), and `latex`, the conversation's
+override of the agent's `ui.latex` for the browser app: `'inherit'` (the
+default, also for threads saved by earlier versions), `'on'` or `'off'`.
+Threads are listed with `latex`; `GET /api/session` (GUI) returns the
+agent's `ui: { latex }`. It returns the thread as listed.
+
 `POST /v1/runs` takes `{ id, threadId, text, parentRunId, images? }`, where
 `images` is a list of `{ mediaType, data }` (base64, no `data:` prefix).
 Text may be empty when images are present. Images are validated against

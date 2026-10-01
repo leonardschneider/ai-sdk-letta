@@ -222,6 +222,7 @@ export const agent = defineAgent({
   permissions: { convert_temperature: 'allow', save_note: 'ask', ask_user: 'allow' },
   toolTimeoutMs: 10_000,
   dreaming: { trigger: 'step-count', stepCount: 25 },
+  ui: { latex: false },                            // recipes need no maths (the default is true)
 });
 ```
 
@@ -232,10 +233,17 @@ export const agent = defineAgent({
   arguments; approval is bound to those arguments.
 - `'deny'`: never exposed to the model.
 
+`ui` sets how the browser app presents replies. `ui.latex` (default `true`)
+renders LaTeX maths written `\(...\)` (inline) or `\[...\]` (display); dollar
+signs are never maths, so prices stay as written, and code is never touched.
+Each conversation can override it from its ⋯ menu or the Σ button in the
+header (LaTeX: Agent default / On / Off). The terminal UI always shows the
+text as written.
+
 `defineAgent` throws immediately if a tool has no entry
-(`Missing permission for tool(s): ...`), if an entry names an unknown tool, or
+(`Missing permission for tool(s): ...`), if an entry names an unknown tool,
 if `ask_user` is set to `'ask'` (it is already interactive; it defaults to
-`'allow'`). Put the definition in its own module and import it from each
+`'allow'`), or if `ui` has an unknown key or a non-boolean `latex`. Put the definition in its own module and import it from each
 entry point, so a mistake fails at startup, before any Letta call.
 
 ## 6. Human in the loop

@@ -16,6 +16,19 @@ export interface DreamingSettings {
   stepCount: number;
 }
 
+/** How the browser app presents this agent's replies. Other interfaces ignore it. */
+export interface AgentUiSettings {
+  /**
+   * Render LaTeX maths in replies: `\(...\)` inline and `\[...\]` display
+   * (never `$...$`, never inside code). Each conversation can override it in
+   * the browser app ("LaTeX: Agent default / On / Off"). @default true
+   */
+  latex: boolean;
+}
+
+/** UI settings used when a definition sets none. */
+export const DEFAULT_UI: Readonly<AgentUiSettings> = Object.freeze({ latex: true });
+
 /** Input accepted by {@link defineAgent}. */
 export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   /**
@@ -48,6 +61,8 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
    * those tools are never exposed. See `sandboxTools`.
    */
   sandbox?: SandboxConfig;
+  /** Browser app presentation, e.g. `{ latex: false }`. @default { latex: true } */
+  ui?: Partial<AgentUiSettings>;
 }
 
 /** A validated, immutable agent definition. */
@@ -61,6 +76,7 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly dreaming: Readonly<DreamingSettings>;
   readonly toolTimeoutMs: number;
   readonly sandbox?: ResolvedSandboxConfig;
+  readonly ui: Readonly<AgentUiSettings>;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -108,10 +124,21 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (!Number.isInteger(dreaming.stepCount) || dreaming.stepCount < 1 || dreaming.stepCount > 10_000) throw new Error('Dreaming stepCount must be a positive integer');
   const toolTimeoutMs = input.toolTimeoutMs ?? 5000;
   if (!Number.isInteger(toolTimeoutMs) || toolTimeoutMs < 1 || toolTimeoutMs > 300_000) throw new Error('toolTimeoutMs must be 1–300000');
+  const ui = resolveUi(input.ui);
   return Object.freeze({
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}),
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui,
   });
+}
+
+function resolveUi(input: unknown): Readonly<AgentUiSettings> {
+  if (input === undefined) return DEFAULT_UI;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('ui must be an object such as { latex: false }');
+  const unknown = Object.keys(input).filter(key => key !== 'latex');
+  if (unknown.length) throw new Error(`Unknown ui setting(s): ${unknown.join(', ')}. Supported: latex.`);
+  const { latex = DEFAULT_UI.latex } = input as { latex?: unknown };
+  if (typeof latex !== 'boolean') throw new Error('ui.latex must be true or false');
+  return Object.freeze({ latex });
 }
 
 /**
