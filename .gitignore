@@ -11,3 +11,4 @@ coverage/
 # Local runtime state must never be committed.
 .letta/
 .state/
+docs/.snippets/

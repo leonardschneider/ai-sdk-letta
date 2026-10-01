@@ -8,7 +8,7 @@ Three packages are published to npm:
 | `ai-sdk-letta` | Apache-2.0 | none of the others |
 | `@ai-sdk-letta/server` | Apache-2.0 | `ai-sdk-letta` |
 
-`@ai-sdk-letta/tui`, `@ai-sdk-letta/web` and `examples/basic` are
+`@ai-sdk-letta/tui`, `@ai-sdk-letta/web` and the examples (`examples/*`) are
 `"private": true` and are never published (see [Not published yet](#not-published-yet)).
 
 Versions are managed with [Changesets](https://changesets.dev).

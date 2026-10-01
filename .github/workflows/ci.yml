@@ -33,6 +33,9 @@ jobs:
         # Offline only: no Letta backend or model. The PTY tests use python3,
         # which ubuntu-latest provides; live tests are opt-in and skip here.
         run: npm test
+      - name: Check docs
+        # Typechecks every TypeScript block in docs/ and runs its offline test blocks.
+        run: npm run check:docs
       - name: Build
         run: npm run build
       - name: Check published package contents

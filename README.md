@@ -152,7 +152,12 @@ agent named "Example Assistant"; later runs reopen it. Useful variables:
 approvals). Pass options after `--`, for example `npm run gui -- --port 4500`
 or `npm run tui -- --new "Planning"`.
 
+To build your own agent, follow [Building your own agent](docs/building-your-own-agent.md),
+starting from [`examples/starter`](examples/starter).
+
 ## Defining an agent and tools
+
+Step by step, with testing and troubleshooting: [Building your own agent](docs/building-your-own-agent.md).
 
 ```ts
 import { tool, jsonSchema } from 'ai';
