@@ -310,6 +310,8 @@ export class ResourceStore {
         if (error && !(ok1 && code === 1)) fail(new Error(`git ${args[0]} failed: ${String(stderr).trim().slice(0, 300) || (error as Error).message}`));
         else done(stdout);
       });
+      // git may exit before reading its input (on an error); the exit code reports that, not the pipe.
+      child.stdin?.on('error', () => {});
       child.stdin?.end(input ?? '');
     });
   }
