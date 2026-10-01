@@ -1,35 +1,68 @@
 {
   "name": "@ai-sdk-letta/server",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Local HTTP runtime for ai-sdk-letta agents: durable threads and runs, NDJSON events, a token API and a loopback browser app.",
   "license": "Apache-2.0",
+  "author": "Leonard Schneider",
   "type": "module",
-  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git", "directory": "packages/server" },
-  "engines": { "node": ">=22.19.0" },
-  "files": ["dist", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git",
+    "directory": "packages/server"
+  },
+  "homepage": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/server#readme",
+  "bugs": {
+    "url": "https://github.com/leonardschneider/ai-sdk-letta/issues"
+  },
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "letta",
+    "agent",
+    "server",
+    "ndjson",
+    "express"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "ai-sdk-letta-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "CHANGELOG.md",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p .",
-    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts"
+    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts",
+    "prepack": "node ../../scripts/check-dist.mjs"
   },
   "dependencies": {
-    "ai-sdk-letta": "0.1.0",
-    "express": "5.2.1"
+    "@types/express": "^5.0.6",
+    "ai-sdk-letta": "^0.0.0",
+    "express": "^5.2.1"
   },
   "peerDependencies": {
-    "ai": "7.0.118"
+    "ai": "^7.0.118"
   },
   "devDependencies": {
     "@letta-ai/letta-agent-sdk": "0.8.22",
-    "@types/express": "5.0.6",
     "ai": "7.0.118"
   }
 }

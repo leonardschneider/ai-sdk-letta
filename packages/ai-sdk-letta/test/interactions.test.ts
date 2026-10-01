@@ -12,6 +12,9 @@ test('policy is fail-closed: every tool needs a permission; deny and unknown too
   assert.throws(() => defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: registry, permissions: { text_stats: 'all', approval_demo: 'ask' } as never }), /Invalid permission/);
   assert.throws(() => defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: registry, permissions: { text_stats: 'allow', approval_demo: 'ask', Bash: 'allow' } as never }), /unknown tool/);
   assert.throws(() => defineAgent({ id: 'Bad ID', name: 'X', model: 'a/b', instructions: 'i', tools: {} }), /id/);
+  // Untyped callers that omit tools fail at definition time, not later inside the tool bridge.
+  assert.throws(() => defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i' } as never), /tools must be an object/);
+  assert.deepEqual(defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: {} }).permissions, {});
   assert.equal(defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: registry, permissions: { text_stats: 'deny', approval_demo: 'deny' } }).permissions.ask_user, 'allow');
   const interactions = new ToolInteractions();
   let prompts = 0;

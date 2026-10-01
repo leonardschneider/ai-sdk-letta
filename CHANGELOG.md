@@ -1,5 +1,11 @@
 # Changelog
 
+From 0.1.0 on, each published package keeps its own changelog, written by
+Changesets: [`ai-sdk-letta`](packages/ai-sdk-letta/CHANGELOG.md),
+[`@ai-sdk-letta/server`](packages/server/CHANGELOG.md) and
+[`@ai-sdk-letta/provider`](packages/provider/CHANGELOG.md). This file is the
+repository's history up to the first release.
+
 ## Unreleased
 
 - Image input. `LettaAgent` accepts images (AI SDK `image`/`file` parts) in a

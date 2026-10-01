@@ -57,14 +57,14 @@ flowchart LR
   harness --> model
 ```
 
-| Package | What it is | License |
-| --- | --- | --- |
-| [`ai-sdk-letta`](packages/ai-sdk-letta) | The library: `LettaAgent`, definitions, identity, conversations and history, tool bridge, interaction broker, memory policy | Apache-2.0 |
-| [`@ai-sdk-letta/server`](packages/server) | Local HTTP runtime: durable threads and runs, NDJSON events, answers, cancellation; a token API and a loopback browser app | Apache-2.0 |
-| [`@ai-sdk-letta/tui`](apps/tui) | Terminal UI (patched `@ai-sdk/tui`) with `/resume`, `/search`, approvals and questions | Apache-2.0 |
-| [`@ai-sdk-letta/web`](apps/web) | assistant-ui browser app served by the server package | Apache-2.0 |
-| [`@ai-sdk-letta/provider`](packages/provider) | AI SDK `LanguageModel` for Letta agents; a port of Letta's provider | **MIT** (Letta) |
-| [`examples/basic`](examples/basic) | A minimal agent with one custom tool, in the terminal and the browser | Apache-2.0 |
+| Package | What it is | License | On npm |
+| --- | --- | --- | --- |
+| [`ai-sdk-letta`](packages/ai-sdk-letta) | The library: `LettaAgent`, definitions, identity, conversations and history, tool bridge, interaction broker, memory policy | Apache-2.0 | yes |
+| [`@ai-sdk-letta/server`](packages/server) | Local HTTP runtime: durable threads and runs, NDJSON events, answers, cancellation; a token API and a loopback browser app | Apache-2.0 | yes |
+| [`@ai-sdk-letta/provider`](packages/provider) | AI SDK `LanguageModel` for Letta agents; a port of Letta's provider | **MIT** (Letta) | yes |
+| [`@ai-sdk-letta/tui`](apps/tui) | Terminal UI (patched `@ai-sdk/tui`) with `/resume`, `/search`, approvals and questions | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
+| [`@ai-sdk-letta/web`](apps/web) | assistant-ui browser app served by the server package | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
+| [`examples/basic`](examples/basic) | A minimal agent with one custom tool, in the terminal and the browser | Apache-2.0 | no |
 
 ### Provider or Agent?
 
@@ -109,7 +109,31 @@ flowchart LR
 No Letta account or model is needed to install, typecheck, test or build this
 repository.
 
-## Quickstart
+## Install
+
+```sh
+npm install ai-sdk-letta ai                 # the LettaAgent library (ai is a peer dependency)
+npm install @ai-sdk-letta/server            # optional: the local HTTP runtime
+npm install @ai-sdk-letta/provider ai zod   # or: the plain AI SDK provider
+```
+
+The packages are ESM, typed, and need Node.js 22.19 or newer. `ai-sdk-letta`
+and `@ai-sdk-letta/server` always share a version; `@ai-sdk-letta/provider`
+is versioned on its own. Releases and changelogs:
+[GitHub releases](https://github.com/leonardschneider/ai-sdk-letta/releases).
+
+### Not on npm yet
+
+- **`@ai-sdk-letta/tui`** needs a patched `@ai-sdk/tui`. The patch is applied
+  by this repository's `postinstall`, which does not run for packages
+  installed from npm, so the TUI is used from a checkout of this repository
+  for now (`npm run tui`). Whether it will depend on a published fork of
+  `@ai-sdk/tui` or wait for the changes upstream is still open.
+- **`@ai-sdk-letta/web`**, the browser app, is built in this repository and
+  passed to `startGuiServer` as an assets directory (`npm run gui`). How it
+  will be packaged for npm is a follow-up.
+
+## Quickstart (from source)
 
 ```sh
 git clone https://github.com/leonardschneider/ai-sdk-letta.git
@@ -247,6 +271,8 @@ Use it from code with `runTerminal(definition, process.argv.slice(2))` from
 install. It adds display-only restored history, local slash commands, and an
 interaction renderer for approvals and questions. These changes are being
 upstreamed through a fork of `vercel/ai`; until then, keep the pinned version.
+Because the patch only applies inside this repository, `@ai-sdk-letta/tui` is
+not published to npm yet.
 
 ## GUI
 
@@ -369,11 +395,13 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default).
-- **Pinned versions.** `ai` 7.0.118, `@ai-sdk/tui` 1.0.119 (patched) and
-  `@letta-ai/letta-agent-sdk` 0.8.22. Some workarounds depend on SDK
-  behaviour at these versions (for example, history for the default
-  conversation is read through a protocol command).
-- **Not published to npm.** Use the workspace, or `npm pack` a package.
+- **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22 and
+  `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
+  this repository tests 7.0.118). Some workarounds depend on SDK behaviour at
+  these versions (for example, history for the default conversation is read
+  through a protocol command).
+- **The TUI and the browser app are not on npm yet.** Run them from a
+  checkout (see [Install](#install)).
 - **Live tests are opt-in** (`AI_SDK_LETTA_LIVE=1 npm run test:live`) and
   consume model usage.
 
@@ -387,7 +415,8 @@ npm run build
 AI_SDK_LETTA_LIVE=1 AI_SDK_LETTA_LIVE_STATE_DIR=/tmp/ai-sdk-letta-live npm run test:live
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Releases use Changesets and npm
+trusted publishing; see [RELEASING.md](RELEASING.md).
 
 ## AI assistance
 

@@ -10,13 +10,20 @@ permissions:
 
 jobs:
   build:
+    name: build (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.19.0 is the minimum in every package's `engines`; 24 is what the
+        # release workflow builds and publishes with.
+        node: ['22.19.0', '22.x', '24.x']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: ${{ matrix.node }}
           cache: npm
       - name: Install
         run: npm ci
@@ -28,3 +35,6 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Check published package contents
+        # Runs `npm pack --dry-run` on the published packages; never publishes.
+        run: npm run check:packages

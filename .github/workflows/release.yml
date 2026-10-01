@@ -1,0 +1,160 @@
+# Versions and publishes the npm packages with Changesets.
+#
+# On every push to main:
+# - Changesets pending -> open or update the "Version Packages" PR.
+# - No changesets, but a package version is not on npm yet (that PR was just
+#   merged) -> build, test, pack, and publish with npm trusted publishing.
+# - Otherwise -> nothing.
+#
+# Publishing uses npm trusted publishing (GitHub OIDC): no NPM_TOKEN exists or
+# is read anywhere. npm adds provenance automatically when the repository is
+# public. Only the `publish` job can mint an OIDC token.
+#
+# The first version of each package is published by hand (see RELEASING.md):
+# a trusted publisher can only be configured for a package that already
+# exists on npm. Until the repository variable NPM_TRUSTED_PUBLISHING is set
+# to "true", the publish jobs are skipped and the run summary says why.
+#
+# npmjs.com binds each package's trusted publisher to this file name:
+# release.yml. Renaming the file breaks publishing until the binding is
+# updated.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Reset permissions; each job asks for what it needs.
+permissions: {}
+
+# One release run at a time; never cancel a run that may be publishing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  select-mode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.select-mode.outputs.mode }}
+      publish-plan-artifact-id: ${{ steps.select-mode.outputs.publish-plan-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Select Changesets mode
+        id: select-mode
+        uses: changesets/action/select-mode@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+
+  version:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # commit version changes to changeset-release/main
+      pull-requests: write # open or update the Version Packages PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Open or update the Version Packages PR
+        uses: changesets/action/version@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          # Bumps versions and changelogs, then syncs package-lock.json.
+          script: npm run version-packages
+
+  # Explains a skipped publish instead of failing the run.
+  publish-not-configured:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'publish' && vars.NPM_TRUSTED_PUBLISHING != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Skip publishing until trusted publishing is configured
+        run: |
+          {
+            echo '### Publishing skipped'
+            echo
+            echo 'A package version on `main` is not on npm yet, but trusted publishing is not enabled for this repository.'
+            echo 'Publish the first versions by hand, configure the trusted publisher on npmjs.com, then set the repository'
+            echo 'variable `NPM_TRUSTED_PUBLISHING` to `true`. See RELEASING.md.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '::warning title=Publishing skipped::Trusted publishing is not enabled (repository variable NPM_TRUSTED_PUBLISHING). See RELEASING.md.'
+
+  pack:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'publish' && vars.NPM_TRUSTED_PUBLISHING == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      pack-dir-artifact-id: ${{ steps.pack.outputs.pack-dir-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # Scripts run here (the @ai-sdk/tui patch is needed by the test suite);
+      # this job has no write access and no OIDC token.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Pack the unpublished packages
+        id: pack
+        uses: changesets/action/pack@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          publish-plan-artifact-id: ${{ needs.select-mode.outputs.publish-plan-artifact-id }}
+
+  publish:
+    needs: pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push release tags and create GitHub releases
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node 24 ships npm 11.x. Trusted publishing needs npm >= 11.5.1 and
+      # Node >= 22.14.0; the check below fails clearly if that ever changes.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Check npm supports trusted publishing
+        run: |
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) { console.error(`npm ${process.argv[1]} is too old for trusted publishing (needs >= 11.5.1)`); process.exit(1); }
+            console.log(`npm ${process.argv[1]}`);
+          ' "$(npm --version)"
+      # Only the Changesets CLI is needed to publish the packed tarballs: no
+      # lifecycle scripts run in the job that holds the OIDC token.
+      - run: npm ci --ignore-scripts
+      - name: Publish to npm
+        uses: changesets/action/publish@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          pack-dir-artifact-id: ${{ needs.pack.outputs.pack-dir-artifact-id }}

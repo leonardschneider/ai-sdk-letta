@@ -23,7 +23,7 @@ export async function historyPage(session: Pick<LettaCodeSession, 'listMessages'
 }
 
 /** Page backwards through history up to `maximum` records, validating cursors and IDs. */
-export async function loadHistory(page: (options: ListMessagesOptions) => Promise<ListMessagesResult>, maximum = HISTORY_LIMIT) {
+export async function loadHistory(page: (options: ListMessagesOptions) => Promise<ListMessagesResult>, maximum = HISTORY_LIMIT): Promise<{ messages: ListMessagesResult['messages']; truncated: boolean }> {
   if (!Number.isInteger(maximum) || maximum < 1) throw new Error('Invalid history bound');
   const newest: ListMessagesResult['messages'] = [];
   const ids = new Set<string>();
@@ -180,7 +180,7 @@ export function assertHistorySettled(messages: ListMessagesResult['messages']) {
 }
 
 /** List every conversation of one agent, failing closed on foreign or repeated rows. */
-export async function listConversations(list: (options: { agentId: string; after?: string; limit: number; order: 'asc'; orderBy: 'createdAt' }) => Promise<LettaConversation[]>, agentId: string) {
+export async function listConversations(list: (options: { agentId: string; after?: string; limit: number; order: 'asc'; orderBy: 'createdAt' }) => Promise<LettaConversation[]>, agentId: string): Promise<LettaConversation[]> {
   const result: LettaConversation[] = [];
   const ids = new Set<string>();
   let after: string | undefined;

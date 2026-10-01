@@ -1,14 +1,57 @@
 {
   "name": "@ai-sdk-letta/provider",
-  "version": "2.0.0",
+  "version": "0.0.0",
+  "description": "Vercel AI SDK LanguageModel for Letta agents over the Letta Agent SDK. Unofficial port of letta-ai/vercel-ai-sdk-provider.",
   "license": "MIT",
+  "author": "Leonard Schneider",
+  "contributors": [
+    "Letta (original @letta-ai/vercel-ai-sdk-provider)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git",
+    "directory": "packages/provider"
+  },
+  "homepage": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/provider#readme",
+  "bugs": {
+    "url": "https://github.com/leonardschneider/ai-sdk-letta/issues"
+  },
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "vercel",
+    "letta",
+    "provider",
+    "language-model"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md",
+    "PORT-NOTES.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "test": "vitest --config vitest.node.config.mjs --run",
@@ -16,53 +59,28 @@
     "test:e2e:local": "vitest --config vitest.e2e.local.config.mjs --run",
     "test:node": "vitest --config vitest.node.config.mjs --run",
     "test:node:watch": "vitest --config vitest.node.config.mjs",
-    "typecheck": "tsc --noEmit"
-  },
-  "exports": {
-    "./package.json": "./package.json",
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
+    "typecheck": "tsc --noEmit",
+    "prepack": "node ../../scripts/check-dist.mjs"
   },
   "dependencies": {
     "@ai-sdk/provider": "^2.0.0",
     "@ai-sdk/provider-utils": "^3.0.16",
     "@letta-ai/letta-agent-sdk": "0.8.22"
   },
+  "peerDependencies": {
+    "ai": "^7.0.84",
+    "zod": "^4.1.12"
+  },
   "devDependencies": {
     "@types/node": "22.19.15",
     "@types/ws": "^8.18.1",
+    "ai": "7.0.118",
     "dotenv": "^17.2.0",
     "tsup": "^8",
     "typescript": "5.9.3",
     "vite": "^7.1.5",
     "vitest": "^3.1.1",
     "ws": "^8.21.3",
-    "zod": "^4.6.5",
-    "ai": "7.0.118"
-  },
-  "peerDependencies": {
-    "ai": "^7.0.84",
-    "zod": "^4.1.12"
-  },
-  "engines": {
-    "node": ">=22.19.0"
-  },
-  "homepage": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/provider",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git",
-    "directory": "packages/provider"
-  },
-  "bugs": {
-    "url": "https://github.com/leonardschneider/ai-sdk-letta/issues"
-  },
-  "keywords": [
-    "ai",
-    "ai-sdk",
-    "letta"
-  ],
-  "description": "Vercel AI SDK LanguageModel for Letta agents over the Letta Agent SDK. Unofficial port of letta-ai/vercel-ai-sdk-provider."
+    "zod": "^4.6.5"
+  }
 }

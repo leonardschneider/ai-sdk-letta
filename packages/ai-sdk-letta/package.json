@@ -1,37 +1,67 @@
 {
   "name": "ai-sdk-letta",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "A persistent, Letta-backed Vercel AI SDK Agent with memory, dreaming, application-owned tools and human-in-the-loop.",
   "license": "Apache-2.0",
+  "author": "Leonard Schneider",
   "type": "module",
-  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git", "directory": "packages/ai-sdk-letta" },
-  "keywords": ["ai", "ai-sdk", "vercel", "letta", "agent", "memory"],
-  "engines": { "node": ">=22.19.0" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git",
+    "directory": "packages/ai-sdk-letta"
+  },
+  "homepage": "https://github.com/leonardschneider/ai-sdk-letta#readme",
+  "bugs": {
+    "url": "https://github.com/leonardschneider/ai-sdk-letta/issues"
+  },
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "vercel",
+    "letta",
+    "agent",
+    "memory",
+    "stateful-agents",
+    "human-in-the-loop",
+    "tools"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "sideEffects": false,
-  "files": ["dist", "README.md"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "ai-sdk-letta-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json"
   },
+  "files": [
+    "dist",
+    "src",
+    "CHANGELOG.md",
+    "NOTICE"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p .",
     "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts",
-    "test:live": "node --conditions=ai-sdk-letta-source --import tsx --test --test-concurrency=1 test/live/*.test.ts"
+    "test:live": "node --conditions=ai-sdk-letta-source --import tsx --test --test-concurrency=1 test/live/*.test.ts",
+    "prepack": "node ../../scripts/check-dist.mjs"
   },
   "dependencies": {
-    "@ai-sdk/provider": "4.0.18",
     "@letta-ai/letta-agent-sdk": "0.8.22",
-    "ajv": "8.20.0"
+    "ajv": "^8.20.0"
   },
   "peerDependencies": {
-    "ai": "7.0.118"
+    "ai": "^7.0.118"
   },
   "devDependencies": {
+    "@ai-sdk/provider": "4.0.18",
     "ai": "7.0.118"
   }
 }
