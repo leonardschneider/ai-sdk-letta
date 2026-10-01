@@ -13,7 +13,10 @@ click-to-enlarge in messages. When the agent has the file tools, PDFs and
 text files (Markdown, CSV, JSON, code) attach the same way: they are
 uploaded and checked at once, shown as removable chips, and appear in sent
 messages as chips that download the file (also after a reload). File tool
-activity reads as "Read report.pdf, pages 1–3" or "Searched files for “budget”".
+activity reads as "Read report.pdf, pages 1–3" or "Searched files for “budget”". Shell
+commands read as "Ran `rg budget`" (collapsed; expanding shows the command,
+exit code and monospace output with "show more"), and approval cards for
+network commands show the exact command.
 
 **Not on npm yet.** This package is `"private": true`: build it in this
 repository and pass its `dist/` directory to `startGuiServer`. Shipping the

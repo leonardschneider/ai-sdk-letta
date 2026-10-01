@@ -37,3 +37,7 @@ test('patched real TUI attaches images via Ctrl+V and dropped paths, removes mar
 test('patched real TUI attaches dropped PDF and CSV paths as [File N: name], removes markers, sends only the note', { timeout: 40_000, skip }, async () => {
   assert.match((await run('files_pty.py', 35_000)).stdout, /PASS actual PTY files/);
 });
+
+test('patched real TUI shows run_command as "Ran `cmd`" cards with exit code and verbatim output', { timeout: 30_000, skip }, async () => {
+  assert.match((await run('commands_pty.py', 25_000)).stdout, /PASS actual PTY commands/);
+});

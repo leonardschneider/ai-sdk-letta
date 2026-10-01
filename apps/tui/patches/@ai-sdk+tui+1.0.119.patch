@@ -1,5 +1,5 @@
 diff --git a/node_modules/@ai-sdk/tui/dist/index.d.ts b/node_modules/@ai-sdk/tui/dist/index.d.ts
-index 1cab715..ce9ff22 100644
+index 1cab715..eadd569 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.d.ts
 +++ b/node_modules/@ai-sdk/tui/dist/index.d.ts
 @@ -1,4 +1,4 @@
@@ -8,7 +8,7 @@ index 1cab715..ce9ff22 100644
  
  /**
   * Controls how terminal UI sections for stream parts are displayed.
-@@ -24,7 +24,37 @@ type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -24,7 +24,49 @@ type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
@@ -35,7 +35,19 @@ index 1cab715..ce9ff22 100644
 +     */
 +    fromText?: (text: string, context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult | undefined>;
 +};
++/** A tool call as the terminal shows it; see `toolView`. */
++type TerminalToolPart = { toolName: string; toolCallId: string; state: string; input?: unknown; output?: unknown; errorText?: string };
++/** App-provided presentation of a tool card: replaces the default title, right title and/or content. */
++type TerminalToolView = (part: TerminalToolPart) => {
++    title?: string;
++    rightTitle?: string;
++    content?: string;
++    /** Show `content` verbatim instead of as Markdown (for command output). */
++    raw?: boolean;
++} | undefined;
  type RunAgentTUIOptions = {
++    /** Custom tool card presentation (title, status and content), e.g. "Ran `ls`" for shell tools. */
++    toolView?: TerminalToolView;
 +    /** Prompt attachments (Ctrl+V, pasted or dropped file paths). Off when omitted. */
 +    attachments?: TerminalAttachments;
 +    interaction?: LocalInteraction;
@@ -46,14 +58,14 @@ index 1cab715..ce9ff22 100644
      /**
       * The title shown in the terminal UI.
       */
-@@ -77,4 +107,4 @@ type RunAgentTUIOptions = {
+@@ -77,4 +119,4 @@ type RunAgentTUIOptions = {
   */
  declare function runAgentTUI(options: RunAgentTUIOptions): Promise<void>;
  
 -export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalPartDisplayMode, runAgentTUI };
-+export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalAttachmentResult, type TerminalAttachments, type TerminalPartDisplayMode, runAgentTUI };
++export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalAttachmentResult, type TerminalAttachments, type TerminalPartDisplayMode, type TerminalToolPart, type TerminalToolView, runAgentTUI };
 diff --git a/node_modules/@ai-sdk/tui/dist/index.js b/node_modules/@ai-sdk/tui/dist/index.js
-index bdc31f9..72062c0 100644
+index bdc31f9..bc6327e 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.js
 +++ b/node_modules/@ai-sdk/tui/dist/index.js
 @@ -1,4 +1,4 @@
@@ -135,10 +147,11 @@ index bdc31f9..72062c0 100644
  var colors = {
    reset: "\x1B[0m",
    dim: "\x1B[2m",
-@@ -399,8 +421,10 @@ var TerminalRenderer = class {
+@@ -399,8 +421,11 @@ var TerminalRenderer = class {
    #reasoning;
    #responseStatistics;
    #defaultContextSize;
++  #toolView;
 +  #interaction;
    #sections = [];
    #inputText = "";
@@ -146,10 +159,11 @@ index bdc31f9..72062c0 100644
    #inputActive = false;
    #scrollOffset = 0;
    #title = "";
-@@ -425,38 +449,142 @@ var TerminalRenderer = class {
+@@ -425,38 +450,143 @@ var TerminalRenderer = class {
      this.#responseStatistics = options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
++    this.#toolView = options?.toolView;
 +    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
 +      if (message.role === "user") {
 +        this.#addUserSection(userDisplayText(message.parts));
@@ -295,7 +309,7 @@ index bdc31f9..72062c0 100644
              break;
            }
            case "up":
-@@ -472,6 +600,7 @@ var TerminalRenderer = class {
+@@ -472,6 +602,7 @@ var TerminalRenderer = class {
              break;
            case "escape":
            case "ctrl-c":
@@ -303,7 +317,7 @@ index bdc31f9..72062c0 100644
              this.#stopInputCursorBlink();
              this.#stop();
              reject(interruptedError());
-@@ -480,6 +609,7 @@ var TerminalRenderer = class {
+@@ -480,6 +611,7 @@ var TerminalRenderer = class {
              break;
          }
        };
@@ -311,7 +325,7 @@ index bdc31f9..72062c0 100644
        this.#attachInput();
      });
    }
-@@ -524,6 +654,7 @@ var TerminalRenderer = class {
+@@ -524,6 +656,7 @@ var TerminalRenderer = class {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -319,7 +333,7 @@ index bdc31f9..72062c0 100644
        this.#resolveStreamInterrupt = void 0;
        if (this.#interrupted) {
          result.abort?.();
-@@ -541,6 +672,102 @@ var TerminalRenderer = class {
+@@ -541,6 +674,102 @@ var TerminalRenderer = class {
      }
      return responseMessage;
    }
@@ -422,7 +436,7 @@ index bdc31f9..72062c0 100644
    async readToolApproval(request, options) {
      this.#start(options);
      this.#inputActive = false;
-@@ -636,6 +863,10 @@ var TerminalRenderer = class {
+@@ -636,6 +865,10 @@ var TerminalRenderer = class {
      }
    }
    #handleStreamingKey(chunk) {
@@ -433,7 +447,53 @@ index bdc31f9..72062c0 100644
      const key = parseKey(chunk);
      switch (key.type) {
        case "up":
-@@ -845,16 +1076,18 @@ var TerminalRenderer = class {
+@@ -763,17 +996,28 @@ var TerminalRenderer = class {
+               break;
+             }
+             activeSectionIds.add(id);
++            const section = renderToolInvocation(part, {
++              mode: displayModes.tools,
++              collapsed: shouldCollapsePart(
++                message,
++                index,
++                displayModes.tools,
++                displayModes
++              )
++            });
++            let view;
++            try {
++              view = this.#toolView?.({ toolName: getToolName(part), toolCallId: part.toolCallId, state: part.state, input: "input" in part ? part.input : void 0, output: part.state === "output-available" ? part.output : void 0, errorText: part.state === "output-error" ? part.errorText : void 0 });
++            } catch {
++              view = void 0;
++            }
++            const clean = (value) => value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, " ").replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
+             this.#upsertSection({
+               id,
+-              ...renderToolInvocation(part, {
+-                mode: displayModes.tools,
+-                collapsed: shouldCollapsePart(
+-                  message,
+-                  index,
+-                  displayModes.tools,
+-                  displayModes
+-                )
+-              })
++              ...section,
++              ...view?.title !== void 0 ? { title: clean(view.title).replace(/\n/g, " ") } : {},
++              ...view?.rightTitle !== void 0 ? { rightTitle: clean(view.rightTitle).replace(/\n/g, " ") } : {},
++              ...view?.content !== void 0 && !section.collapsed ? { content: clean(view.content), raw: view.raw === true } : {}
+             });
+           }
+           break;
+@@ -791,6 +1035,7 @@ var TerminalRenderer = class {
+       existingSection.rightTitle = section.rightTitle;
+       existingSection.content = section.content;
+       existingSection.collapsed = section.collapsed;
++      existingSection.raw = section.raw;
+       existingSection.cache = cache && sectionMatchesCache(section, cache) ? cache : void 0;
+       return;
+     }
+@@ -845,16 +1090,18 @@ var TerminalRenderer = class {
      this.#paint();
    }
    #paint() {
@@ -456,7 +516,31 @@ index bdc31f9..72062c0 100644
      });
      this.#frameBuffer.present(frame);
    }
-@@ -1354,6 +1587,8 @@ function parseKey(chunk) {
+@@ -1198,12 +1445,13 @@ function renderSectionLines(section, width) {
+     rightTitle: section.rightTitle,
+     content: section.content,
+     collapsed: section.collapsed === true,
++    raw: section.raw === true,
+     lines
+   };
+   return lines;
+ }
+ function sectionMatchesCache(section, cache, width = cache.width) {
+-  return cache.width === width && cache.kind === section.kind && cache.title === section.title && cache.rightTitle === section.rightTitle && cache.content === section.content && cache.collapsed === (section.collapsed === true);
++  return cache.width === width && cache.kind === section.kind && cache.title === section.title && cache.rightTitle === section.rightTitle && cache.content === section.content && cache.collapsed === (section.collapsed === true) && cache.raw === (section.raw === true);
+ }
+ function createSectionLines(section, width) {
+   const style = sectionStyles[section.kind];
+@@ -1222,7 +1470,7 @@ function createSectionLines(section, width) {
+   const borderWidth = Math.max(0, width - 2 - title.length - rightTitle.length);
+   const top = `${style.color}\u256D${title}${style.border.repeat(borderWidth)}${rightTitle}\u256E${colors.reset}`;
+   const bottom = `${style.color}\u2570${style.border.repeat(Math.max(0, width - 2))}\u256F${colors.reset}`;
+-  const content = section.content.length > 0 ? renderMarkdown(section.content) : colors.dim + "(streaming...)" + colors.reset;
++  const content = section.content.length > 0 ? section.raw ? section.content : renderMarkdown(section.content) : colors.dim + "(streaming...)" + colors.reset;
+   const lines = content.split("\n").flatMap((line) => wrapVisibleLine(line, contentWidth));
+   return [
+     top,
+@@ -1354,6 +1602,8 @@ function parseKey(chunk) {
        return { type: "ctrl-l" };
      case "":
        return { type: "ctrl-c" };
@@ -465,7 +549,7 @@ index bdc31f9..72062c0 100644
      case "\x1B":
        return { type: "escape" };
      case "\r":
-@@ -1378,7 +1613,7 @@ function parseKey(chunk) {
+@@ -1378,7 +1628,7 @@ function parseKey(chunk) {
    }
  }
  
@@ -474,7 +558,7 @@ index bdc31f9..72062c0 100644
  import {
    convertToModelMessages,
    generateId,
-@@ -1387,8 +1622,23 @@ import {
+@@ -1387,8 +1637,23 @@ import {
  } from "ai";
  var defaultResponseStatistics2 = "outputTokensPerSecond";
  var AgentTUIRunner = class {
@@ -499,7 +583,7 @@ index bdc31f9..72062c0 100644
      this.agent = options.agent;
      this.transport = options.transport;
      this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
-@@ -1400,11 +1650,23 @@ var AgentTUIRunner = class {
+@@ -1400,11 +1665,23 @@ var AgentTUIRunner = class {
      this.sandbox = options.sandbox;
    }
    async run() {
@@ -523,7 +607,7 @@ index bdc31f9..72062c0 100644
      let hasRunTurn = false;
      let streamWithoutPrompt = false;
      while (true) {
-@@ -1419,7 +1681,9 @@ var AgentTUIRunner = class {
+@@ -1419,7 +1696,9 @@ var AgentTUIRunner = class {
              );
            }
            try {
@@ -534,7 +618,7 @@ index bdc31f9..72062c0 100644
            } catch (error) {
              if (isInterruptedError(error)) {
                return;
-@@ -1430,7 +1694,12 @@ var AgentTUIRunner = class {
+@@ -1430,7 +1709,12 @@ var AgentTUIRunner = class {
              return;
            }
          }
@@ -548,7 +632,7 @@ index bdc31f9..72062c0 100644
          hasRunTurn = true;
        }
        const result = await this.streamMessages(
-@@ -1440,7 +1709,7 @@ var AgentTUIRunner = class {
+@@ -1440,7 +1724,7 @@ var AgentTUIRunner = class {
        try {
          const responseMessage = await this.renderer.renderStream(result, {
            title,
@@ -557,17 +641,18 @@ index bdc31f9..72062c0 100644
            continueSession: Boolean(this.renderer.readPrompt),
            tools: this.tools,
            reasoning: this.reasoning,
-@@ -1520,7 +1789,8 @@ var AgentTUIRunner = class {
+@@ -1520,7 +1804,9 @@ var AgentTUIRunner = class {
    }
  };
  function createDefaultRenderer(options) {
 -  return options.tools === void 0 && options.reasoning === void 0 && options.responseStatistics === void 0 && options.contextSize === void 0 ? new TerminalRenderer() : new TerminalRenderer({
-+  return options.tools === void 0 && options.reasoning === void 0 && options.responseStatistics === void 0 && options.contextSize === void 0 && options.initialMessages === void 0 ? new TerminalRenderer() : new TerminalRenderer({
++  return options.tools === void 0 && options.reasoning === void 0 && options.responseStatistics === void 0 && options.contextSize === void 0 && options.initialMessages === void 0 && options.toolView === void 0 ? new TerminalRenderer() : new TerminalRenderer({
 +    initialMessages: options.initialMessages,
++    toolView: options.toolView,
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1535,6 +1805,7 @@ function createRenderer(options) {
+@@ -1535,6 +1821,7 @@ function createRenderer(options) {
      return void 0;
    }
    return new TerminalRenderer({
@@ -575,7 +660,7 @@ index bdc31f9..72062c0 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1807,11 +2078,11 @@ function* closeOpenParts(textPartIds, reasoningPartIds) {
+@@ -1807,11 +2094,11 @@ function* closeOpenParts(textPartIds, reasoningPartIds) {
    }
    reasoningPartIds.clear();
  }
@@ -589,7 +674,7 @@ index bdc31f9..72062c0 100644
    };
  }
  function upsertResponseMessage(messages, responseMessage, replaceLast) {
-@@ -1874,11 +2145,10 @@ function isInterruptedError(error) {
+@@ -1874,11 +2161,10 @@ function isInterruptedError(error) {
    return error instanceof Error && error.message === "Interrupted";
  }
  
@@ -604,7 +689,7 @@ index bdc31f9..72062c0 100644
 -//# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
-index 240b4c3..3ce91f5 100644
+index 240b4c3..2f1c10f 100644
 --- a/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
 +++ b/node_modules/@ai-sdk/tui/src/agent-tui-runner.ts
 @@ -6,8 +6,10 @@ import type {
@@ -721,19 +806,20 @@ index 240b4c3..3ce91f5 100644
            continueSession: Boolean(this.renderer.readPrompt),
            tools: this.tools,
            reasoning: this.reasoning,
-@@ -257,9 +286,10 @@ function createDefaultRenderer(options: AgentTUIRunnerOptions) {
+@@ -257,9 +286,11 @@ function createDefaultRenderer(options: AgentTUIRunnerOptions) {
    return options.tools === undefined &&
      options.reasoning === undefined &&
      options.responseStatistics === undefined &&
 -    options.contextSize === undefined
-+    options.contextSize === undefined && options.initialMessages === undefined
++    options.contextSize === undefined && options.initialMessages === undefined && options.toolView === undefined
      ? new TerminalRenderer()
      : new TerminalRenderer({
 +        initialMessages: options.initialMessages,
++        toolView: options.toolView,
          tools: options.tools,
          reasoning: options.reasoning,
          responseStatistics: options.responseStatistics,
-@@ -279,6 +309,7 @@ function createRenderer(
+@@ -279,6 +310,7 @@ function createRenderer(
    }
  
    return new TerminalRenderer({
@@ -741,7 +827,7 @@ index 240b4c3..3ce91f5 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -591,11 +622,11 @@ function* closeOpenParts(
+@@ -591,11 +623,11 @@ function* closeOpenParts(
    reasoningPartIds.clear();
  }
  
@@ -756,19 +842,21 @@ index 240b4c3..3ce91f5 100644
  }
  
 diff --git a/node_modules/@ai-sdk/tui/src/index.ts b/node_modules/@ai-sdk/tui/src/index.ts
-index 11607c4..ca3730d 100644
+index 11607c4..2eb1954 100644
 --- a/node_modules/@ai-sdk/tui/src/index.ts
 +++ b/node_modules/@ai-sdk/tui/src/index.ts
-@@ -3,5 +3,7 @@ export type {
+@@ -3,5 +3,9 @@ export type {
    AgentTUIAgent,
    ResponseStatisticsMode,
    RunAgentTUIOptions,
 +  TerminalAttachmentResult,
 +  TerminalAttachments,
    TerminalPartDisplayMode,
++  TerminalToolPart,
++  TerminalToolView,
  } from './run-agent-tui';
 diff --git a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
-index c26dfb9..8d84844 100644
+index c26dfb9..2945eb4 100644
 --- a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
 +++ b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
 @@ -3,6 +3,7 @@ import type {
@@ -779,7 +867,7 @@ index c26dfb9..8d84844 100644
    UIMessage,
  } from 'ai';
  
-@@ -39,7 +40,42 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -39,7 +40,49 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
@@ -809,7 +897,14 @@ index c26dfb9..8d84844 100644
 +  fromText?: (text: string, context: { attached: readonly FileUIPart[] }) => Promise<TerminalAttachmentResult | undefined>;
 +};
 +
++/** A tool call as the terminal shows it; see `toolView`. */
++export type TerminalToolPart = { toolName: string; toolCallId: string; state: string; input?: unknown; output?: unknown; errorText?: string };
++/** App-provided presentation of a tool card: replaces the default title, right title and/or content. */
++export type TerminalToolView = (part: TerminalToolPart) => { title?: string; rightTitle?: string; content?: string; raw?: boolean } | undefined;
++
  export type RunAgentTUIOptions = {
++  /** Custom tool card presentation (title, status and content), e.g. "Ran `ls`" for shell tools. */
++  toolView?: TerminalToolView;
 +  /** Prompt attachments (Ctrl+V, pasted or dropped file paths). Off when omitted. */
 +  attachments?: TerminalAttachments;
 +  /** App-owned in-stream tool interaction; never triggers an AI SDK approval loop. */
@@ -845,7 +940,7 @@ index 71a17a7..97fa313 100644
        state.inputActive
          ? `> ${state.input}${state.inputCursorVisible === false ? ' ' : '█'}`
 diff --git a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
-index cba32e1..25802d1 100644
+index cba32e1..8d2dee4 100644
 --- a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
 +++ b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
 @@ -5,6 +5,8 @@ import type {
@@ -865,15 +960,17 @@ index cba32e1..25802d1 100644
    type ToolUIPart,
    type UIMessage,
    type UIMessageChunk,
-@@ -46,6 +49,7 @@ const defaultResponseStatistics: ResponseStatisticsMode =
+@@ -46,6 +49,9 @@ const defaultResponseStatistics: ResponseStatisticsMode =
    'outputTokensPerSecond';
  
  export type TerminalRendererOptions = {
 +  initialMessages?: UIMessage[];
++  /** Custom tool card presentation; see `RunAgentTUIOptions.toolView`. */
++  toolView?: import('../run-agent-tui').TerminalToolView;
    input?: TerminalInput;
    output?: TerminalOutput;
    frameBuffer?: TerminalFrameBuffer;
-@@ -56,6 +60,9 @@ export type TerminalRendererOptions = {
+@@ -56,6 +62,9 @@ export type TerminalRendererOptions = {
  };
  
  export type TerminalSessionOptions = {
@@ -883,7 +980,7 @@ index cba32e1..25802d1 100644
    title?: string;
    initialPrompt?: string;
    submittedPrompt?: string;
-@@ -67,8 +74,45 @@ export type TerminalSessionOptions = {
+@@ -67,8 +76,45 @@ export type TerminalSessionOptions = {
    contextSize?: number;
  };
  
@@ -929,9 +1026,28 @@ index cba32e1..25802d1 100644
    | { type: 'backspace' }
    | { type: 'enter' }
    | { type: 'up' }
-@@ -156,8 +200,10 @@ export class TerminalRenderer {
+@@ -88,6 +134,8 @@ type ChatSection = {
+   rightTitle?: string;
+   content: string;
+   collapsed?: boolean;
++  /** Show content verbatim (no Markdown), e.g. command output. */
++  raw?: boolean;
+   id?: string;
+   cache?: RenderedSectionCache;
+ };
+@@ -100,6 +148,7 @@ type RenderedSectionCache = {
+   content: string;
+   collapsed: boolean;
+   lines: string[];
++  raw: boolean;
+ };
+ 
+ type StreamUsage = {
+@@ -155,9 +204,12 @@ export class TerminalRenderer {
+   readonly #reasoning: TerminalPartDisplayMode;
    readonly #responseStatistics: ResponseStatisticsMode;
    readonly #defaultContextSize?: number;
++  readonly #toolView?: import('../run-agent-tui').TerminalToolView;
  
 +  #interaction?: { key(chunk: Buffer): void; lines(): string[]; input(): string; editing(): boolean; status: string; cancel(): void };
    #sections: ChatSection[] = [];
@@ -940,10 +1056,11 @@ index cba32e1..25802d1 100644
    #inputActive = false;
    #scrollOffset = 0;
    #title = '';
-@@ -185,41 +231,135 @@ export class TerminalRenderer {
+@@ -185,41 +237,136 @@ export class TerminalRenderer {
        options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
++    this.#toolView = options?.toolView;
 +    // Seed real scrollable sections, not terminal output or provider history.
 +    for (const [index, message] of (options?.initialMessages ?? []).entries()) {
 +      if (message.role === 'user') {
@@ -1083,7 +1200,7 @@ index cba32e1..25802d1 100644
              break;
            }
            case 'up':
-@@ -235,6 +375,7 @@ export class TerminalRenderer {
+@@ -235,6 +382,7 @@ export class TerminalRenderer {
              break;
            case 'escape':
            case 'ctrl-c':
@@ -1091,7 +1208,7 @@ index cba32e1..25802d1 100644
              this.#stopInputCursorBlink();
              this.#stop();
              reject(interruptedError());
-@@ -243,6 +384,7 @@ export class TerminalRenderer {
+@@ -243,6 +391,7 @@ export class TerminalRenderer {
              break;
          }
        };
@@ -1099,7 +1216,7 @@ index cba32e1..25802d1 100644
  
        this.#attachInput();
      });
-@@ -302,6 +444,7 @@ export class TerminalRenderer {
+@@ -302,6 +451,7 @@ export class TerminalRenderer {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -1107,7 +1224,7 @@ index cba32e1..25802d1 100644
        this.#resolveStreamInterrupt = undefined;
        if (this.#interrupted) {
          result.abort?.();
-@@ -327,6 +470,81 @@ export class TerminalRenderer {
+@@ -327,6 +477,81 @@ export class TerminalRenderer {
      return responseMessage;
    }
  
@@ -1189,7 +1306,7 @@ index cba32e1..25802d1 100644
    async readToolApproval(
      request: AgentTUIToolApprovalRequest,
      options?: TerminalSessionOptions,
-@@ -442,6 +660,7 @@ export class TerminalRenderer {
+@@ -442,6 +667,7 @@ export class TerminalRenderer {
    }
  
    #handleStreamingKey(chunk: Buffer) {
@@ -1197,7 +1314,52 @@ index cba32e1..25802d1 100644
      const key = parseKey(chunk);
  
      switch (key.type) {
-@@ -711,16 +930,18 @@ export class TerminalRenderer {
+@@ -599,17 +825,27 @@ export class TerminalRenderer {
+             }
+ 
+             activeSectionIds.add(id);
++            const section = renderToolInvocation(part, {
++              mode: displayModes.tools,
++              collapsed: shouldCollapsePart(
++                message,
++                index,
++                displayModes.tools,
++                displayModes,
++              ),
++            });
++            // App-provided presentation; a failing view never breaks the turn.
++            let view: ReturnType<import('../run-agent-tui').TerminalToolView> | undefined;
++            try {
++              view = this.#toolView?.({ toolName: getToolName(part), toolCallId: part.toolCallId, state: part.state, input: 'input' in part ? part.input : undefined, output: part.state === 'output-available' ? part.output : undefined, errorText: part.state === 'output-error' ? part.errorText : undefined });
++            } catch { view = undefined; }
++            const clean = (value: string) => value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ').replace(/[\u202a-\u202e\u2066-\u2069]/g, '');
+             this.#upsertSection({
+               id,
+-              ...renderToolInvocation(part, {
+-                mode: displayModes.tools,
+-                collapsed: shouldCollapsePart(
+-                  message,
+-                  index,
+-                  displayModes.tools,
+-                  displayModes,
+-                ),
+-              }),
++              ...section,
++              ...(view?.title !== undefined ? { title: clean(view.title).replace(/\n/g, ' ') } : {}),
++              ...(view?.rightTitle !== undefined ? { rightTitle: clean(view.rightTitle).replace(/\n/g, ' ') } : {}),
++              ...(view?.content !== undefined && !section.collapsed ? { content: clean(view.content), raw: view.raw === true } : {}),
+             });
+           }
+           break;
+@@ -632,6 +868,7 @@ export class TerminalRenderer {
+       existingSection.rightTitle = section.rightTitle;
+       existingSection.content = section.content;
+       existingSection.collapsed = section.collapsed;
++      existingSection.raw = section.raw;
+       existingSection.cache =
+         cache && sectionMatchesCache(section, cache) ? cache : undefined;
+       return;
+@@ -711,16 +948,18 @@ export class TerminalRenderer {
    }
  
    #paint() {
@@ -1220,7 +1382,34 @@ index cba32e1..25802d1 100644
      });
  
      this.#frameBuffer.present(frame);
-@@ -1396,6 +1617,8 @@ export function parseKey(chunk: Buffer): TerminalKey {
+@@ -1148,6 +1387,7 @@ function renderSectionLines(section: ChatSection, width: number) {
+     rightTitle: section.rightTitle,
+     content: section.content,
+     collapsed: section.collapsed === true,
++    raw: section.raw === true,
+     lines,
+   };
+ 
+@@ -1165,7 +1405,8 @@ function sectionMatchesCache(
+     cache.title === section.title &&
+     cache.rightTitle === section.rightTitle &&
+     cache.content === section.content &&
+-    cache.collapsed === (section.collapsed === true)
++    cache.collapsed === (section.collapsed === true) &&
++    cache.raw === (section.raw === true)
+   );
+ }
+ 
+@@ -1191,7 +1432,7 @@ function createSectionLines(section: ChatSection, width: number) {
+   const bottom = `${style.color}╰${style.border.repeat(Math.max(0, width - 2))}╯${colors.reset}`;
+   const content =
+     section.content.length > 0
+-      ? renderMarkdown(section.content)
++      ? section.raw ? section.content : renderMarkdown(section.content)
+       : colors.dim + '(streaming...)' + colors.reset;
+   const lines = content
+     .split('\n')
+@@ -1396,6 +1637,8 @@ export function parseKey(chunk: Buffer): TerminalKey {
        return { type: 'ctrl-l' };
      case '\u0003':
        return { type: 'ctrl-c' };

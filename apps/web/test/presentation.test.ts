@@ -125,3 +125,23 @@ test('live denial reasons and recorded times flow into display parts', () => {
 test('system diagnostics stay outside the chat transcript', () => {
   assert.deepEqual(historyMessages([{ id: 'system', role: 'system', parts: [{ type: 'text', text: 'private diagnostic' }] }]), []);
 });
+test('shell commands read as "Ran `command`", with the exit code only when it failed', async () => {
+  const { commandPreview, commandOutput, commandStatus } = await import('../src/presentation.js');
+  const args = { command: 'rg budget' };
+  assert.equal(toolLabel('run_command', 'running', undefined, args), 'Running `rg budget`…');
+  assert.equal(toolLabel('run_command', 'done', 'Exit code: 0 (12 ms)\nreport.md:3: budget', args), 'Ran `rg budget`');
+  assert.equal(toolLabel('run_command_online', 'done', 'Exit code: 0 (2.1 s)\nok', { command: 'pip install tabulate' }), 'Ran with internet `pip install tabulate`');
+  assert.equal(toolLabel('run_command_online', 'error', '{"error":"user_denied"}', { command: 'curl https://example.com' }), 'Denied: `curl https://example.com`');
+  assert.equal(toolLabel('run_command', 'done', 'Error (cwd_invalid): Working directory must be inside /workspace', args), 'Couldn’t run `rg budget`');
+  assert.equal(toolLabel('run_command', 'error', '{"error":"tool_timeout"}', args), 'Couldn’t run `rg budget`');
+  assert.equal(commandPreview('python3 - <<EOF\nprint(1)\nEOF'), 'python3 - <<EOF…');
+  assert.equal(commandPreview(`echo ${'x'.repeat(200)}`).length <= 73, true);
+  assert.equal(commandStatus('Exit code: 0 (5 ms)\nok'), '');
+  assert.equal(commandStatus('Exit code: 2 (5 ms)\n[stderr]\nnope'), 'exit 2');
+  assert.equal(commandStatus('Exit code: 124 (timed out after 120 s; the command was stopped)\n(no output)'), 'timed out');
+  assert.deepEqual(commandOutput('Exit code: 0 (1.2 s)\n1\n[… 12 KB of output omitted …]\n9\n[Output truncated. To see more, write it to a file and read parts with head, tail, sed -n or rg.]'), { exitCode: 0, duration: '1.2 s', timedOut: false, output: '1\n[… 12 KB of output omitted …]\n9\n[Output truncated. To see more, write it to a file and read parts with head, tail, sed -n or rg.]', truncated: true });
+  assert.deepEqual(commandOutput('Exit code: 0 (3 ms)\n(no output)'), { exitCode: 0, duration: '3 ms', timedOut: false, output: '', truncated: false });
+  assert.equal(commandOutput('Error (sandbox_unavailable): No sandbox')?.error, 'No sandbox');
+  assert.equal(commandOutput({ not: 'text' }), undefined);
+  assert.equal(friendlyName('run_command_online'), 'Command with internet access');
+});

@@ -256,6 +256,18 @@ button.line-summary:hover { color: var(--text); background: var(--hover); }
 .answer-options li svg { color: var(--accent); }
 .answer-options .bullet { width: 13px; display: inline-flex; justify-content: center; }
 .answer-options .bullet::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+/* Shell commands */
+.inline-command { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; background: var(--code-bg); border-radius: 5px; padding: 1px 5px; color: var(--text); }
+.command-detail { margin: 2px 0 8px; display: grid; gap: 6px; min-width: 0; }
+.command-line, .command-output { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.5; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.command-line .prompt { color: var(--text-3); user-select: none; }
+.command-detail > .command-line { max-height: 280px; overflow: auto; }
+.command-output { max-height: 360px; overflow: auto; }
+.command-meta { margin: 0 !important; font-size: 12px; color: var(--text-3); }
+.command-block { display: grid; gap: 4px; justify-items: start; min-width: 0; }
+.command-block .command-output { width: 100%; box-sizing: border-box; }
+.approval-command { margin: 0 0 10px; max-height: 200px; overflow: auto; }
+.approval-cwd { margin: -4px 0 10px !important; }
 .technical { margin-top: 4px; }
 .technical-toggle { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 2px 0; font-size: 12px; color: var(--text-3); }
 .technical-toggle:hover { color: var(--text-2); }

@@ -1,6 +1,6 @@
 /** Human label for a tool or field name, e.g. `fetchWeather_now` → "Fetch Weather now". */
 export function friendlyName(value: string): string {
-  return ({ ask_user: 'Question' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
+  return ({ ask_user: 'Question', run_command: 'Command', run_command_online: 'Command with internet access' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
 }
 export function parseArgs(value?: string): Record<string, unknown> {
   try { const parsed: unknown = JSON.parse(value ?? '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
@@ -70,10 +70,59 @@ function fileToolLabel(name: string, phase: ToolPhase, args: Record<string, unkn
   }
   return undefined;
 }
+/* ------------------------------------------------------------------ */
+/* Shell commands                                                      */
+/* ------------------------------------------------------------------ */
+
+/** The built-in sandbox tools. */
+export const COMMAND_TOOLS: ReadonlySet<string> = new Set(['run_command', 'run_command_online']);
+/** A command shortened to one line for a label: "rg budget", "python3 stats.py …". */
+export function commandPreview(command: unknown, max = 72): string {
+  if (typeof command !== 'string') return '';
+  const lines = command.trim().split('\n').map(line => line.trim()).filter(Boolean);
+  const first = (lines[0] ?? '').replace(/\s+/g, ' ');
+  const more = lines.length > 1;
+  if (first.length <= max) return more ? `${first}…` : first;
+  return `${first.slice(0, max).replace(/\s+\S*$/, '') || first.slice(0, max)}…`;
+}
+/** A finished command's result as the model saw it: exit code, duration, output. */
+export type CommandOutput = { exitCode?: number; duration?: string; timedOut: boolean; output: string; truncated: boolean; error?: string };
+export function commandOutput(result: unknown): CommandOutput | undefined {
+  if (typeof result !== 'string') return undefined;
+  const error = /^Error \(([a-z_]+)\): ([\s\S]*)$/.exec(result);
+  if (error) return { timedOut: false, output: '', truncated: false, error: error[2]!.trim() };
+  const head = /^Exit code: (-?\d+) \(([^)]*)\)\n?/.exec(result);
+  if (!head) return undefined;
+  const output = result.slice(head[0].length);
+  const timedOut = /^timed out/.test(head[2]!);
+  return { exitCode: Number(head[1]), duration: timedOut ? undefined : head[2], timedOut, output: output === '(no output)' ? '' : output, truncated: /\[… [\d.]+ (?:bytes|KB|MB) of output omitted …\]/.test(output) };
+}
+function commandLabel(name: string, phase: ToolPhase, args: Record<string, unknown>, result: unknown): string | undefined {
+  if (!COMMAND_TOOLS.has(name)) return undefined;
+  const command = commandPreview(args.command);
+  if (!command) return undefined;
+  const online = name === 'run_command_online';
+  if (phase === 'running') return `Running ${online ? 'with internet ' : ''}\`${command}\`…`;
+  if (phase === 'error') return `Couldn’t run \`${command}\``;
+  const out = commandOutput(result);
+  if (out?.error) return `Couldn’t run \`${command}\``;
+  return `Ran ${online ? 'with internet ' : ''}\`${command}\``;
+}
+/** Short status after a command label: "exit 1", "timed out". Empty for success. */
+export function commandStatus(result: unknown): string {
+  const out = commandOutput(result);
+  if (!out) return '';
+  if (out.error) return '';
+  if (out.timedOut) return 'timed out';
+  return out.exitCode === 0 ? '' : `exit ${out.exitCode}`;
+}
+
 export function toolLabel(name: string, phase: ToolPhase, result?: unknown, args: Record<string, unknown> = {}): string {
   const reason = phase === 'error' ? failureReason(result) : undefined;
-  if (reason === 'user_denied') return `Denied: ${friendlyName(name)}`;
+  if (reason === 'user_denied') return COMMAND_TOOLS.has(name) && commandPreview(args.command) ? `Denied: \`${commandPreview(args.command)}\`` : `Denied: ${friendlyName(name)}`;
   if (reason === 'approval_cancelled') return `Cancelled: ${friendlyName(name)}`;
+  const shell = commandLabel(name, phase, args, result);
+  if (shell) return shell;
   const file = fileToolLabel(name, phase, args);
   if (file) return file;
   const tool = friendlyName(name);
@@ -101,6 +150,7 @@ const reasonText: Record<string, string> = {
   user_denied: 'You denied this action, so it did not run.',
   approval_cancelled: 'The permission request was cancelled, so it did not run.',
   tool_timeout: 'The tool took too long and was stopped.',
+  tool_denied: 'This tool is not available in this session.',
   tool_cancelled: 'The tool was stopped before it finished.',
   timed_out: 'The turn timed out before this finished.',
   cancelled: 'The turn was stopped before this finished.',
