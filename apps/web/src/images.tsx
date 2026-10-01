@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AttachmentPrimitive, ComposerPrimitive, type Attachment } from '@assistant-ui/react';
-import { ImageOff, X } from 'lucide-react';
-import { IMAGE_PLACEHOLDER } from './attachments.js';
+import { Download, FileCode2, FileSpreadsheet, FileText, ImageOff, X } from 'lucide-react';
+import { IMAGE_PLACEHOLDER, fileDetail, type FileInfo } from './attachments.js';
 
 /**
  * Object URL for a local image, revoked when no longer shown. Data URLs are
@@ -79,11 +79,44 @@ function ComposerThumb({ attachment }: { attachment: Attachment }) {
   </AttachmentPrimitive.Root>;
 }
 
-/** Thumbnails of the images in the composer, each with a remove button. */
-export function ComposerImages() {
-  return <div className="thumbs" aria-label="Attached images">
-    <ComposerPrimitive.Attachments>{({ attachment }) => <ComposerThumb attachment={attachment}/>}</ComposerPrimitive.Attachments>
+/** Icon for a file chip, by kind and name. */
+export function FileIcon({ name, kind, size = 18 }: { name: string; kind?: string; size?: number }) {
+  const Icon = kind === 'pdf' ? FileText : /\.(csv|tsv)$/i.test(name) ? FileSpreadsheet : /\.(md|markdown|txt|text|log)$/i.test(name) || kind === 'pdf' ? FileText : FileCode2;
+  return <span className="file-icon" data-kind={kind ?? 'text'} aria-hidden="true"><Icon size={size}/></span>;
+}
+
+/** A file in the composer: icon, name, type and size, with a remove button. */
+function ComposerFile({ attachment, info }: { attachment: Attachment; info?: FileInfo }) {
+  const detail = info ? fileDetail(info) : '';
+  return <AttachmentPrimitive.Root className="file-chip composer-file" title={detail ? `${attachment.name} · ${detail}` : attachment.name}>
+    <FileIcon name={attachment.name} kind={info?.kind}/>
+    <span className="file-text"><span className="file-name">{attachment.name}</span>{detail && <span className="file-detail">{detail}</span>}</span>
+    <AttachmentPrimitive.Remove className="thumb-remove" aria-label={`Remove ${attachment.name}`} title="Remove"><X size={12} aria-hidden="true"/></AttachmentPrimitive.Remove>
+  </AttachmentPrimitive.Root>;
+}
+
+/** Thumbnails of the images and chips of the files in the composer, each with a remove button. */
+export function ComposerImages({ fileInfo }: { fileInfo?: (id: string) => FileInfo | undefined }) {
+  return <div className="thumbs" aria-label="Attachments">
+    <ComposerPrimitive.Attachments>{({ attachment }) => attachment.type === 'image' ? <ComposerThumb attachment={attachment}/> : <ComposerFile attachment={attachment} info={fileInfo?.(attachment.id)}/>}</ComposerPrimitive.Attachments>
   </div>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Message bubble files                                                */
+/* ------------------------------------------------------------------ */
+
+/** Opens or downloads a sent file. `href` is set once the file is stored in the conversation. */
+export type FileLink = (name: string) => string | undefined;
+export const FileLinkContext = createContext<FileLink>(() => undefined);
+
+/** A file in a sent message. Click downloads it (PDFs open in a new tab, rendered by the browser's viewer). */
+export function MessageFile({ name, detail, kind }: { name: string; detail: string; kind?: string }) {
+  const href = useContext(FileLinkContext)(name);
+  const body = <><FileIcon name={name} kind={kind}/><span className="file-text"><span className="file-name">{name}</span><span className="file-detail">{detail}</span></span>{href && <Download size={14} className="file-action" aria-hidden="true"/>}</>;
+  return href
+    ? <a className="file-chip msg-file" href={href} download={name} title={`Download ${name}`} aria-label={`Download ${name}, ${detail}`}>{body}</a>
+    : <span className="file-chip msg-file" title={name} aria-label={`${name}, ${detail}`}>{body}</span>;
 }
 
 /* ------------------------------------------------------------------ */

@@ -5,19 +5,21 @@ import { ArchiveRestore, ArrowDown, ArrowUp, Menu, Paperclip, Square, SquarePen,
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, observedParts, userContent, withTime } from './messages.js';
-import { api, errorCode, metadataError, setCsrf } from './api.js';
+import { historyMessages, observedParts, userContent, withTime, type FileChip } from './messages.js';
+import { api, errorCode, metadataError, setCsrf, uploadFile } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
-import { AttachmentError, IMAGE_LIMITS, ImageAttachmentAdapter, base64Bytes, checkBudget, dataUrlToImage, messages as attachmentMessages, pasteAttaches } from './attachments.js';
-import { ComposerImages, LightboxProvider } from './images.js';
+import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
+import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
 import './style.css';
 import './markdown.css';
 
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number }; status: string | null };
+type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['kind']; pages?: number; lines?: number };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[] }; status: string | null };
+const chip = (file: Pick<FileInfo, 'name' | 'kind' | 'label' | 'bytes' | 'pages' | 'lines'>): FileChip => ({ name: file.name, kind: file.kind, detail: fileDetail(file) });
 type Current = { id: string; draft: boolean };
 const SAVED = 'ai-sdk-letta-thread';
 const newDraft = (): Current => ({ id: crypto.randomUUID(), draft: true });
@@ -25,8 +27,9 @@ const blockedNotice = 'This conversation has an unfinished or uncertain turn, so
 
 function App() {
   const toast = useToast();
-  const [agent, setAgent] = useState<{ id: string; name: string; approvalTools: string[] }>({ id: '', name: 'Connecting…', approvalTools: [] });
+  const [agent, setAgent] = useState<{ id: string; name: string; approvalTools: string[]; files?: boolean }>({ id: '', name: 'Connecting…', approvalTools: [] });
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
+  const [filesEnabled, setFilesEnabled] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [current, setCurrent] = useState<Current>(newDraft);
@@ -60,14 +63,14 @@ function App() {
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = []) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = []) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id);
     const events: RuntimeEvent[] = [];
     let ended = false;
     let endedAt: string | undefined;
     const render = () => setMessages([...base,
-      withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images) }, startedAt),
+      withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt),
       withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt)]);
     render();
     try {
@@ -135,7 +138,7 @@ function App() {
       const failed = !!view.status && !['running', 'completed'].includes(view.status);
       setBlocked(failed ? blockedNotice : '');
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
-      if (view.live) void watch(view.live.id, view.live.input, base, undefined, Array.from({ length: view.live.images ?? 0 }, () => ''));
+      if (view.live) void watch(view.live.id, view.live.input, base, undefined, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip));
     } catch (e) {
       setCurrent(previous);
       toast(errorCode(e) === 'runtime_busy' ? 'Another reply is still running. Try again when it finishes.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
@@ -155,7 +158,7 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[] } }>('/session'); setCsrf(session.csrf); setAgent(session.agent);
+        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[]; files?: boolean } }>('/session'); setCsrf(session.csrf); setAgent(session.agent); setFilesEnabled(!!session.agent.files);
         const list = await api<ThreadSummary[]>('/v1/threads'); setThreads(list); setListLoading(false);
         const saved = localStorage.getItem(SAVED);
         const sorted = sortThreads(list);
@@ -217,20 +220,25 @@ function App() {
     // Anything that stops here hands text and images back to the composer (MessageNotSentError).
     if (operation.current || liveRun.current || blocked || selected?.archived) throw new MessageNotSentError();
     const text = message.content.filter(p => p.type === 'text').map(p => p.text).join('\n');
-    const urls = (message.attachments ?? []).flatMap(a => a.content.flatMap(p => p.type === 'image' ? [p.image] : []));
+    const imageAttachments = (message.attachments ?? []).flatMap(a => a.content.flatMap(p => p.type === 'image' ? [{ url: p.image, name: a.name }] : []));
+    const urls = imageAttachments.map(image => image.url);
     const images = urls.map(dataUrlToImage);
     if (images.some(image => !image)) { toast(attachmentMessages.unsupported, { tone: 'error' }); throw new MessageNotSentError(); }
-    const wire = images as { mediaType: string; data: string }[];
+    // Images keep their names so they are saved under them in the conversation's folder.
+    const wire = (images as { mediaType: string; data: string }[]).map((image, i) => ({ ...image, ...(filesEnabled && imageAttachments[i]!.name ? { name: imageAttachments[i]!.name } : {}) }));
     const budget = checkBudget(wire.map(image => base64Bytes(image.data)));
     if (budget) { toast(budget, { tone: 'error' }); throw new MessageNotSentError(); }
-    if (!text.trim() && !wire.length) throw new MessageNotSentError();
+    const uploads = (message.attachments ?? []).flatMap(a => a.content.flatMap(p => p.type === 'data' && p.name === 'upload' ? [p.data as FileInfo] : []));
+    if (uploads.length > FILE_LIMITS.maxFilesPerMessage) { toast(fileMessages.files_too_many!, { tone: 'error' }); throw new MessageNotSentError(); }
+    const files = uploads.map(chip);
+    if (!text.trim() && !wire.length && !uploads.length) throw new MessageNotSentError();
     if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); throw new MessageNotSentError(); }
     operation.current = true; setRunning(true);
     const startedAt = new Date().toISOString();
     const base = messagesRef.current;
     const first = !base.length;
     const optimisticId = `pending-${startedAt}`;
-    setMessages([...base, withTime({ id: `${optimisticId}-user`, role: 'user', content: userContent(text, urls) }, startedAt), { id: `${optimisticId}-assistant`, role: 'assistant', content: [], status: { type: 'running' } }]);
+    setMessages([...base, withTime({ id: `${optimisticId}-user`, role: 'user', content: userContent(text, urls, files) }, startedAt), { id: `${optimisticId}-assistant`, role: 'assistant', content: [], status: { type: 'running' } }]);
     try {
       if (target.draft) {
         try {
@@ -246,10 +254,10 @@ function App() {
         }
       }
       const id = crypto.randomUUID();
-      try { await api('/v1/runs', { id, threadId: target.id, text, parentRunId: lastRun.current, ...(wire.length ? { images: wire } : {}) }); }
+      try { await api('/v1/runs', { id, threadId: target.id, text, parentRunId: lastRun.current, ...(wire.length ? { images: wire } : {}), ...(uploads.length ? { files: uploads.map(upload => upload.id) } : {}) }); }
       catch (e) {
         const code = errorCode(e);
-        const rejected = imageRejection(code);
+        const rejected = imageRejection(code) ?? (code in fileMessages && code !== 'payload_too_large' ? fileMessage(code) : undefined);
         if (rejected) {
           // Validated and refused before delivery: safe to hand the draft back.
           setMessages(base); setRunning(false);
@@ -260,8 +268,8 @@ function App() {
         setBlocked(`Couldn’t confirm that your message was delivered (${code}). Refresh before doing anything else — it won’t be resent automatically.`);
         return;
       }
-      if (first) void autoTitle(target.id, text.trim() ? text : 'Image');
-      await watch(id, text, base, startedAt, urls);
+      if (first) void autoTitle(target.id, text.trim() ? text : uploads[0]?.name ?? 'Image');
+      await watch(id, text, base, startedAt, urls, files);
     } finally { operation.current = false; }
   }
   /**
@@ -286,7 +294,9 @@ function App() {
   const adapterArchived = useMemo<ExternalStoreThreadData<'archived'>[]>(() => archived.map(t => ({ status: 'archived', id: t.id, title: t.title, custom: { state: t.state } })), [archived]);
   const readOnly = !!selected?.archived;
   const runtimeRef = useRef<AssistantRuntime | undefined>(undefined);
-  const attachments = useMemo(() => new ImageAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? []), []);
+  const attachments = useMemo(() => new FileAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? [], filesEnabled ? uploadFile : undefined), [filesEnabled]);
+  // Sent files download from the conversation's folder (same origin, session cookie).
+  const fileLink = useCallback((name: string) => current.draft ? undefined : `/api/v1/threads/${encodeURIComponent(current.id)}/files/${encodeURIComponent(name)}`, [current]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages, convertMessage: m => m, isRunning: running, isLoading: loading,
     isDisabled: loading || !!blocked || readOnly || (!current.draft && selected?.state !== 'ready'),
@@ -326,6 +336,7 @@ function App() {
     setSentAnswer(value);
   };
   return <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer }}>
+    <FileLinkContext.Provider value={fileLink}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-loading={loading || listLoading || undefined} data-running={running || undefined}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar">
@@ -358,9 +369,9 @@ function App() {
                     ? <div className="readonly-bar"><span>This conversation is archived and read-only.</span><button type="button" className="btn primary small" onClick={() => void restore(current.id)}><ArchiveRestore size={15} aria-hidden="true"/>Restore</button></div>
                     : <ComposerPrimitive.Root className="composer" data-disabled={(!!blocked || loading) || undefined}>
                         <ComposerPrimitive.AttachmentDropzone className="dropzone" disabled={!!blocked || loading}>
-                          <ComposerImages/>
+                          <ComposerImages fileInfo={id => attachments.uploaded(id)}/>
                           <div className="composer-row">
-                            <ComposerPrimitive.AddAttachment className="icon-btn attach-btn" aria-label="Attach images" title={`Attach images (up to ${IMAGE_LIMITS.maxImages}) · or paste / drop`} disabled={!!blocked || loading}><Paperclip size={18} aria-hidden="true"/></ComposerPrimitive.AddAttachment>
+                            <ComposerPrimitive.AddAttachment className="icon-btn attach-btn" aria-label={filesEnabled ? 'Attach files' : 'Attach images'} title={filesEnabled ? `Attach files: PDF, text, CSV, code (up to ${FILE_LIMITS.maxFileBytes / 1024 / 1024} MB) or images · or paste / drop` : `Attach images (up to ${IMAGE_LIMITS.maxImages}) · or paste / drop`} disabled={!!blocked || loading}><Paperclip size={18} aria-hidden="true"/></ComposerPrimitive.AddAttachment>
                             <ComposerPrimitive.Input ref={composerRef} className="composer-input" aria-label="Message" rows={1} maxRows={10} maxLength={8000} autoFocus
                               addAttachmentOnPaste={false} onPaste={onPaste}
                               onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && running && !event.nativeEvent.isComposing) event.preventDefault(); }}
@@ -369,9 +380,9 @@ function App() {
                               ? <ComposerPrimitive.Cancel className="send-btn stop" aria-label="Stop generating" title="Stop (Esc)"><Square size={14} fill="currentColor" aria-hidden="true"/></ComposerPrimitive.Cancel>
                               : <ComposerPrimitive.Send className="send-btn" aria-label="Send message" title="Send (Enter)"><ArrowUp size={18} aria-hidden="true"/></ComposerPrimitive.Send>}
                           </div>
-                          <div className="drop-overlay" aria-hidden="true">Drop images to attach</div>
+                          <div className="drop-overlay" aria-hidden="true">{filesEnabled ? 'Drop files to attach' : 'Drop images to attach'}</div>
                         </ComposerPrimitive.AttachmentDropzone>
-                        <AttachmentErrors/>
+                        <AttachmentErrors files={filesEnabled}/>
                       </ComposerPrimitive.Root>}
                   {!readOnly && !blocked && <p className="hint-line" aria-hidden="true">Enter to send · Shift+Enter for a new line{running ? ' · Esc to stop' : ''}</p>}
                 </div>
@@ -381,6 +392,7 @@ function App() {
         </main>
       </div>
     </AssistantRuntimeProvider>
+    </FileLinkContext.Provider>
   </InteractionContext.Provider>;
 }
 
@@ -391,10 +403,10 @@ function imageRejection(code: string): string | undefined {
 }
 
 /** Attachment problems (wrong type, too large, too many) become the usual error toasts. */
-function AttachmentErrors() {
+function AttachmentErrors(accepts: { files: boolean }) {
   const toast = useToast();
   useAuiEvent('composer.attachmentAddError', ({ reason, error, message }: { reason: string; error?: Error; message: string }) => {
-    toast(error instanceof AttachmentError ? error.message : reason === 'not-accepted' ? attachmentMessages.unsupported : message || attachmentMessages.unreadable, { tone: 'error' });
+    toast(error instanceof AttachmentError ? error.message : reason === 'not-accepted' ? (accepts.files ? fileMessages.file_unsupported_type! : attachmentMessages.unsupported) : message || attachmentMessages.unreadable, { tone: 'error' });
   });
   return null;
 }
