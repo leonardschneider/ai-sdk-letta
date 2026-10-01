@@ -82,3 +82,20 @@ test('navigation listing scopes every page, rejects other agents and caps enumer
 test('snippet includes surrounding context with plain-text terminal control removal', () => {
   assert.equal(snippet('before\n\x1b[31mNEEDLE\x1b[0m after', 'needle'), 'before NEEDLE after');
 });
+
+test('/resources lists the tree with sizes and marks the current conversation\'s folder', async () => {
+  const { resourceLines } = await import('../src/index.js');
+  assert.equal(localCommandMatches('/resources'), true);
+  assert.deepEqual(parseLocalCommand('/resources'), { command: 'resources', query: '' });
+  const lines = resourceLines([
+    { name: 'Trip', path: 'Trip', type: 'folder', modifiedAt: '', conversationId: 'conv-1', children: [{ name: 'a.csv', path: 'Trip/a.csv', type: 'file', bytes: 2048, modifiedAt: '' }] },
+    { name: 'Budget', path: 'Budget', type: 'folder', modifiedAt: '', conversationId: 'conv-2', children: [] },
+    { name: 'Archive', path: 'Archive', type: 'folder', modifiedAt: '', children: [{ name: 'Old', path: 'Archive/Old', type: 'folder', modifiedAt: '', children: [{ name: 'x.pdf', path: 'Archive/Old/x.pdf', type: 'file', bytes: 3 * 1024 * 1024, modifiedAt: '' }] }] },
+  ], 'Trip');
+  assert.deepEqual(lines, ['Trip/  ← this conversation', '  a.csv  2 KB', 'Budget/  (conversation)', 'Archive/', '  Old/', '    x.pdf  3 MB']);
+  // Without resources, the command explains itself and returns to chat.
+  const shown: string[] = [];
+  const screen = { notice: async (text: string) => { shown.push(text); }, close() {} } as unknown as NavigationScreen;
+  assert.equal(await navigate('/resources', source(), screen), undefined);
+  assert.match(shown[0]!, /no resources/);
+});

@@ -114,7 +114,8 @@ try:
     sent = json.loads(plain()[plain().index('SENT=') + 5:].split('\n')[0].strip())
     assert sent == ['Budget? thanks\n\nAttached: Quarterly Report.pdf (PDF, 5 pages, 3 KB)\nAttached: team.csv (CSV, 2 lines, 19 bytes)'], sent
     assert 'OLDQUESTION' not in json.dumps(sent), 'restored history must never be replayed'
-    assert os.path.exists(os.path.join(root, 'agent-local-fixture', 'conv-fixture', 'Quarterly Report.pdf'))
+    # Stored in the conversation's folder of the agent's git-backed resources.
+    assert os.path.exists(os.path.join(root, 'agent-local-fixture', 'files', 'Conversation fixture', 'Quarterly Report.pdf'))
     assert process.returncode == 0
     print('PASS actual PTY files: dropped escaped/quoted PDF and CSV paths become [File N: name], Backspace removes one, unsupported files show a notice, the turn sends only the note, files are stored, restored [File: name] never replayed.')
 finally:

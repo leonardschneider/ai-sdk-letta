@@ -1,10 +1,10 @@
 import { emitKeypressEvents } from 'node:readline';
-import { sanitizeText, searchConversations, type ConversationEntry, type NavigationSource } from 'ai-sdk-letta';
+import { sanitizeText, searchConversations, type ConversationEntry, type NavigationSource, type ResourceNode, type ResourceStore } from 'ai-sdk-letta';
 
-/** True only for a leading `/resume`, `/search` or `/help` command. */
-export const localCommandMatches = (text: string) => /^\/(resume|search|help)(?:\s|$)/i.test(text.trim());
+/** True only for a leading `/resume`, `/search`, `/resources` or `/help` command. */
+export const localCommandMatches = (text: string) => /^\/(resume|search|resources|help)(?:\s|$)/i.test(text.trim());
 export function parseLocalCommand(text: string) {
-  const match = /^\/(resume|search|help)(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  const match = /^\/(resume|search|resources|help)(?:\s+([\s\S]*))?$/i.exec(text.trim());
   return match ? { command: match[1]!.toLowerCase(), query: match[2]?.trim() ?? '' } : undefined;
 }
 const plain = (text: string) => sanitizeText(text).replace(/\s+/g, ' ').trim();
@@ -34,6 +34,22 @@ export class NavigationScreen {
     this.show(['Local command', ...lines, '', 'Enter / Esc returns to chat']);
     await new Promise<void>(resolve => { this.onKey = (_text, key) => {
       if (key.name === 'return' || key.name === 'escape' || (key.ctrl && key.name === 'c')) { this.onKey = undefined; resolve(); }
+    }; });
+  }
+  /** A scrollable list of lines: ↑/↓ and PgUp/PgDn scroll, Enter or Esc returns. */
+  async page(title: string, lines: string[]) {
+    let top = 0;
+    const draw = () => {
+      const rows = Math.max(3, (process.stdout.rows || 24) - 4);
+      top = Math.max(0, Math.min(top, lines.length - rows));
+      this.show([title, '↑/↓ scroll · Enter / Esc returns to chat', '', ...lines.slice(top, top + rows)]);
+    };
+    draw();
+    await new Promise<void>(resolve => { this.onKey = (_text, key) => {
+      const rows = Math.max(3, (process.stdout.rows || 24) - 4);
+      if (key.name === 'return' || key.name === 'escape' || (key.ctrl && key.name === 'c')) { this.onKey = undefined; resolve(); }
+      else if (key.name === 'up' || key.name === 'down') { top += key.name === 'up' ? -1 : 1; draw(); }
+      else if (key.name === 'pageup' || key.name === 'pagedown') { top += key.name === 'pageup' ? -rows : rows; draw(); }
     }; });
   }
   async prompt(title: string): Promise<string | undefined> {
@@ -73,10 +89,37 @@ export class NavigationScreen {
   close() { this.onKey = undefined; process.stdin.off('keypress', this.key); process.stdout.off('resize', this.resize); process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write('\x1b[?25h\x1b[?1049l'); }
 }
 
-export async function navigate(text: string, source: NavigationSource, screen = new NavigationScreen()): Promise<string | undefined> {
+const size = (bytes = 0) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1).replace(/\.0$/, '')} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`;
+/**
+ * The resources tree as indented lines: folders end with `/`, files show
+ * their size, the current conversation's folder is marked. At most `limit` lines.
+ */
+export function resourceLines(nodes: readonly ResourceNode[], currentFolder?: string, limit = 2000): string[] {
+  const lines: string[] = [];
+  const add = (list: readonly ResourceNode[], depth: number) => {
+    for (const node of list) {
+      if (lines.length >= limit) return;
+      const indent = '  '.repeat(depth);
+      lines.push(node.type === 'folder' ? `${indent}${node.name}/${node.path === currentFolder ? '  ← this conversation' : node.conversationId ? '  (conversation)' : ''}` : `${indent}${node.name}  ${size(node.bytes)}`);
+      if (node.children) add(node.children, depth + 1);
+    }
+  };
+  add(nodes, 0);
+  return lines;
+}
+
+export async function navigate(text: string, source: NavigationSource, screen = new NavigationScreen(), resources?: { store: ResourceStore; conversationId: string }): Promise<string | undefined> {
   try {
     const command = parseLocalCommand(text);
-    if (!command || command.command === 'help') { await screen.notice('/resume [title or ID] · /search [text] · /help. Same agent only. Escape returns to chat.'); return; }
+    if (!command || command.command === 'help') { await screen.notice(`/resume [title or ID] · /search [text]${resources ? ' · /resources' : ''} · /help. Same agent only. Escape returns to chat.`); return; }
+    if (command.command === 'resources') {
+      if (!resources) { await screen.notice('This agent has no resources (no file tools or sandbox).'); return; }
+      const tree = resources.store.tree();
+      const lines = resourceLines(tree.children, resources.store.folderOf(resources.conversationId));
+      const files = lines.filter(line => !line.trimEnd().endsWith('/') && !/\/ {2}(←|\()/.test(line)).length;
+      await screen.page(`Resources · ${resources.store.files}\n${files} file${files === 1 ? '' : 's'}${tree.truncated ? ' · LIMITED' : ''} · versioned with git (history: git --git-dir="${resources.store.gitDir}" log)`, lines.length ? lines : ['(empty: attach files in a chat or ask the agent to create some)']);
+      return;
+    }
     let query = command.query;
     if (command.command === 'search' && !query) { const input = await screen.prompt('Search current agent’s conversation text'); if (!input) return; query = input; }
     const listing = await screen.busy(async signal => { const result = await source.list(signal); signal.throwIfAborted(); return result; });
