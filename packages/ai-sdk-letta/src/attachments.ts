@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { sniffImageType } from './images.js';
 import { extractPdfText, PdfError } from './pdf.js';
@@ -30,7 +30,10 @@ export type FileInputErrorCode =
   | 'file_not_found' // no such file in this conversation
   | 'file_name_invalid' // a name that is not a plain file name of this folder
   | 'file_range_invalid' // a page or line range that does not fit the file
-  | 'files_unavailable'; // this agent has no file tools, so it could not read an attachment
+  | 'files_unavailable' // this agent has no file tools, so it could not read an attachment
+  | 'file_exists' // a file or folder with that name is already there
+  | 'resources_busy' // another operation on the resources did not finish in time
+  | 'resources_full'; // the resources hold more files than can be listed or versioned
 
 /** A rejected file. `code` is stable; `message` is human-readable. */
 export class FileInputError extends Error {
@@ -222,16 +225,12 @@ export function parseAttachmentNote(text: string): { text: string; files: { name
 /* Store                                                               */
 /* ------------------------------------------------------------------ */
 
-const AGENT_ID = /^agent-[a-zA-Z0-9-]{1,100}$/;
-const CONVERSATION_ID = /^(?:default|(?:conv-|local-conv-)[a-zA-Z0-9-]{1,100})$/;
 const UPLOAD_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-const SHA = /^[a-f0-9]{64}$/;
 /** Staged uploads older than this are removed on the next upload. */
 export const STAGING_TTL_MS = 24 * 60 * 60 * 1000;
 
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 function syncDirectory(path: string) { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
-const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
 /** Write a private (0600) file atomically: a unique temporary file, fsync, then a no-clobber link. Throws EEXIST if `path` exists. */
 function writeNew(directory: string, path: string, data: Uint8Array | string) {
@@ -239,13 +238,6 @@ function writeNew(directory: string, path: string, data: Uint8Array | string) {
   const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
   try { linkSync(temporary, path); } finally { unlinkSync(temporary); }
-}
-/** Replace a private sidecar atomically (rename over it). */
-function writeReplace(directory: string, path: string, data: string) {
-  const temporary = join(directory, `.tmp-${randomUUID()}`);
-  const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, path);
 }
 /** Read a regular, singly-linked file without following symlinks. */
 function readPrivate(path: string, limit = Number.MAX_SAFE_INTEGER): Buffer {
@@ -273,7 +265,7 @@ function privateDirectory(path: string) {
 }
 
 /** A validated file, ready to store. */
-interface Prepared { name: string; kind: FileKind; mediaType: string; label: string; bytes: Uint8Array; sha256: string; pages?: string[]; lines?: number }
+export interface PreparedFile { name: string; kind: FileKind; mediaType: string; label: string; bytes: Uint8Array; sha256: string; pages?: string[]; lines?: number }
 
 /**
  * Validate a file by content and extract what reading it needs (PDF text,
@@ -281,12 +273,12 @@ interface Prepared { name: string; kind: FileKind; mediaType: string; label: str
  * content.
  * @throws {FileInputError}
  */
-export async function prepareFile(name: string, bytes: Uint8Array, options: { signal?: AbortSignal; limits?: Readonly<FileLimits> } = {}): Promise<Prepared> {
+export async function prepareFile(name: string, bytes: Uint8Array, options: { signal?: AbortSignal; limits?: Readonly<FileLimits> } = {}): Promise<PreparedFile> {
   const limits = options.limits ?? FILE_LIMITS;
   if (bytes.byteLength > limits.maxFileBytes) throw new FileInputError('file_too_large', `Each file can be up to ${formatBytes(limits.maxFileBytes)}`);
   const safe = sanitizeFileName(name);
   const type = detectFileType(bytes, safe);
-  const prepared: Prepared = { name: withExtension(safe, type), ...type, bytes, sha256: sha256(bytes) };
+  const prepared: PreparedFile = { name: withExtension(safe, type), ...type, bytes, sha256: sha256(bytes) };
   if (type.kind === 'text') prepared.lines = lineCount(decodeText(bytes));
   if (type.kind === 'pdf') {
     try { prepared.pages = await extractPdfText(bytes, { signal: options.signal }); }
@@ -298,163 +290,11 @@ export async function prepareFile(name: string, bytes: Uint8Array, options: { si
   return prepared;
 }
 
-const metadataOf = (p: Prepared, name = p.name): StoredFile => ({ name, kind: p.kind, mediaType: p.mediaType, label: p.label, bytes: p.bytes.byteLength, sha256: p.sha256,
+export const metadataOf = (p: PreparedFile, name = p.name): StoredFile => ({ name, kind: p.kind, mediaType: p.mediaType, label: p.label, bytes: p.bytes.byteLength, sha256: p.sha256,
   ...(p.pages ? { pages: p.pages.length } : {}), ...(p.lines !== undefined ? { lines: p.lines } : {}), createdAt: new Date().toISOString() });
 
-/**
- * One conversation's attachment folder, `<root>/<agentId>/<conversationId>/`
- * (directories 0700, files 0600).
- *
- * Every name resolves inside this folder only: names must be plain file
- * names exactly as stored (no separators, no leading dot), symlinks and
- * hard links are never followed, and the folder's real path must equal the
- * expected one. A store never sees another conversation's files.
- *
- * Besides the files, private sidecars live in `.meta/` (metadata) and
- * `.text/` (text extracted from PDFs).
- */
-export class AttachmentStore {
-  readonly directory: string;
-  constructor(readonly root: string, readonly agentId: string, readonly conversationId: string, readonly limits: Readonly<FileLimits> = FILE_LIMITS) {
-    if (!isAbsolute(root)) throw new FileInputError('file_name_invalid', 'Attachment root must be absolute');
-    if (!AGENT_ID.test(agentId)) throw new FileInputError('file_name_invalid', 'Invalid agent ID for attachments');
-    if (!CONVERSATION_ID.test(conversationId)) throw new FileInputError('file_name_invalid', 'Invalid conversation ID for attachments');
-    this.directory = join(root, agentId, conversationId);
-  }
-
-  /** Create (0700) and verify the folder; returns its real path. */
-  private ensure(): string {
-    privateDirectory(this.root);
-    privateDirectory(join(this.root, this.agentId));
-    privateDirectory(this.directory);
-    const real = realpathSync(this.directory);
-    if (real !== join(realpathSync(this.root), this.agentId, this.conversationId)) throw new FileInputError('file_name_invalid', 'Unsafe attachment directory');
-    for (const sub of ['.meta', '.text']) privateDirectory(join(real, sub));
-    return real;
-  }
-  /** Create the folder (0700) if needed and return its verified real path, for example to mount it in a sandbox. */
-  folder(): string { return this.ensure(); }
-
-  /** The folder's real path, or `undefined` if nothing was ever stored. */
-  private existing(): string | undefined {
-    try { lstatSync(this.directory); } catch (error) { if (missing(error)) return undefined; throw error; }
-    return this.ensure();
-  }
-
-  /** Every stored file, oldest first. A file added by hand is described from its content; links and odd names are skipped. */
-  list(): StoredFile[] {
-    const directory = this.existing();
-    if (!directory) return [];
-    const files: StoredFile[] = [];
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || !entry.isFile() || !isPlainFileName(entry.name)) continue;
-      let info;
-      try { info = lstatSync(join(directory, entry.name)); } catch { continue; }
-      if (!info.isFile() || info.nlink !== 1) continue;
-      let meta: StoredFile | undefined;
-      try { meta = JSON.parse(readPrivate(join(directory, '.meta', `${entry.name}.json`), 64 * 1024).toString('utf8')) as StoredFile; } catch { meta = undefined; }
-      if (!meta || meta.name !== entry.name || meta.bytes !== info.size || !SHA.test(meta.sha256)) {
-        if (info.size > this.limits.maxFileBytes) continue;
-        try {
-          const bytes = readPrivate(join(directory, entry.name), this.limits.maxFileBytes);
-          const type = detectFileType(bytes, entry.name);
-          meta = { name: entry.name, ...type, bytes: bytes.byteLength, sha256: sha256(bytes), ...(type.kind === 'text' ? { lines: lineCount(decodeText(bytes)) } : {}), createdAt: info.mtime.toISOString() };
-        } catch { continue; }
-      }
-      files.push(meta);
-    }
-    return files.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.name.localeCompare(b.name));
-  }
-
-  /** Metadata of one file by its exact name. @throws {FileInputError} `file_not_found` or `file_name_invalid` */
-  get(name: unknown): StoredFile {
-    if (!isPlainFileName(name)) throw new FileInputError('file_name_invalid', 'Use a file name exactly as listed by list_files');
-    const file = this.list().find(f => f.name === name);
-    if (!file) throw new FileInputError('file_not_found', `No file named "${name}" in this conversation`);
-    return file;
-  }
-
-  /** The bytes of one file, read without following links and checked against its recorded hash. */
-  read(name: unknown): { file: StoredFile; bytes: Buffer } {
-    const file = this.get(name);
-    const bytes = readPrivate(join(this.ensure(), file.name), this.limits.maxFileBytes);
-    if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) throw new FileInputError('file_invalid', `${file.name} changed on disk; attach it again`);
-    return { file, bytes };
-  }
-
-  /**
-   * Readable content: the text of a text file, or one string per PDF page
-   * (empty for pages without a text layer). PDF text is cached by content hash.
-   * @throws {FileInputError}
-   */
-  async content(name: unknown, signal?: AbortSignal): Promise<{ file: StoredFile; text: string } | { file: StoredFile; pages: string[] }> {
-    const { file, bytes } = this.read(name);
-    if (file.kind === 'text') return { file, text: decodeText(bytes) };
-    if (file.kind !== 'pdf') throw new FileInputError('file_unsupported_type', `${file.name} is an image; it has no text to read`);
-    const directory = this.ensure();
-    const cache = join(directory, '.text', `${file.sha256}.json`);
-    try {
-      const pages = JSON.parse(readPrivate(cache).toString('utf8')) as unknown;
-      if (Array.isArray(pages) && pages.every(p => typeof p === 'string')) return { file, pages };
-    } catch { /* extract below */ }
-    const prepared = await prepareFile(file.name, bytes, { signal, limits: this.limits });
-    writeReplace(join(directory, '.text'), cache, JSON.stringify(prepared.pages ?? []));
-    return { file, pages: prepared.pages ?? [] };
-  }
-
-  private budget(adding: readonly { bytes: number }[], existing: readonly StoredFile[]) {
-    if (existing.length + adding.length > this.limits.maxConversationFiles) throw new FileInputError('conversation_files_full', `A conversation can keep up to ${this.limits.maxConversationFiles} files`);
-    const total = existing.reduce((sum, f) => sum + f.bytes, 0) + adding.reduce((sum, f) => sum + f.bytes, 0);
-    if (total > this.limits.maxConversationBytes) throw new FileInputError('conversation_files_full', `A conversation's files can total up to ${formatBytes(this.limits.maxConversationBytes)}`);
-  }
-
-  /** A stored file with this content under this name (or a numbered variant of it), if any. */
-  private duplicate(p: Prepared, existing: readonly StoredFile[]) {
-    return existing.find(f => f.sha256 === p.sha256 && (f.name === p.name || Array.from({ length: 98 }, (_, i) => numberedName(p.name, i + 2)).includes(f.name)));
-  }
-
-  /** Write one prepared file under a free name ("report (2).pdf" on collision). */
-  private place(p: Prepared, existing: readonly StoredFile[]): StoredFile {
-    const same = this.duplicate(p, existing);
-    if (same) return same;
-    const directory = this.ensure();
-    for (let n = 1; n <= 100; n++) {
-      const name = n === 1 ? p.name : numberedName(p.name, n);
-      try { writeNew(directory, join(directory, name), p.bytes); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; throw error; }
-      const file = metadataOf(p, name);
-      if (p.pages) writeReplace(join(directory, '.text'), join(directory, '.text', `${p.sha256}.json`), JSON.stringify(p.pages));
-      writeReplace(join(directory, '.meta'), join(directory, '.meta', `${name}.json`), JSON.stringify(file));
-      syncDirectory(directory);
-      return file;
-    }
-    throw new FileInputError('file_name_invalid', 'Too many files with this name');
-  }
-
-  /**
-   * Store validated files: all are checked against the conversation's limits
-   * first, then written. An identical file already stored under the same name
-   * is reused rather than duplicated.
-   * @throws {FileInputError}
-   */
-  store(files: readonly Prepared[]): StoredFile[] {
-    const existing = this.list();
-    this.budget(files.filter(p => !this.duplicate(p, existing)).map(p => ({ bytes: p.bytes.byteLength })), existing);
-    const stored: StoredFile[] = [];
-    for (const p of files) stored.push(this.place(p, [...existing, ...stored]));
-    return stored;
-  }
-
-  /** Validate and store files (see {@link prepareFile} and {@link store}). */
-  async save(files: readonly { name: string; bytes: Uint8Array }[], options: { signal?: AbortSignal } = {}): Promise<StoredFile[]> {
-    const prepared: Prepared[] = [];
-    for (const file of files) prepared.push(await prepareFile(file.name, file.bytes, { ...options, limits: this.limits }));
-    return this.store(prepared);
-  }
-}
-
 /** Bytes of an uploaded file waiting to be sent, plus its validated metadata. */
-export interface StagedUpload { meta: StagedFile; prepared: Prepared }
+export interface StagedUpload { meta: StagedFile; prepared: PreparedFile }
 
 /**
  * Validated uploads waiting to be sent with a message (`<root>/.staging/`,

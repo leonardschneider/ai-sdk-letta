@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Experimental_SandboxSession } from 'ai';
@@ -265,7 +265,7 @@ test('lifecycle: created lazily on the first command, reused across commands, st
     assert.equal(provider.created, 1);
     const request = provider.requests[0]!;
     assert.equal(request.network, false, 'no network by default');
-    assert.deepEqual(request.mounts.map(m => [m.containerPath, !!m.readOnly]), [['/workspace', false], ['/workspace/.meta', true], ['/workspace/.text', true]]);
+    assert.deepEqual(request.mounts.map(m => [m.containerPath, !!m.readOnly]), [['/workspace', false]]);
     assert.equal(request.mounts[0]!.hostPath, dir);
     assert.equal(request.labels['ai-sdk-letta.sandbox'], '1');
     assert.equal(request.labels['ai-sdk-letta.sandbox.pid'], String(process.pid));
@@ -414,7 +414,7 @@ test('a project is mounted at /project with .git hooks read-only, and git settin
     assert.match(result.note ?? '', /git settings \(\.git\/commondir, \.git\/config\); they were restored/);
     assert.equal(readFileSync(join(project, '.git', 'config'), 'utf8'), config);
     assert.equal(existsSync(join(project, '.git', 'commondir')), false);
-    assert.deepEqual(requests[0]!.mounts.map(m => [m.containerPath, !!m.readOnly]), [['/workspace', false], ['/workspace/.meta', true], ['/workspace/.text', true], ['/project', false], ['/project/.git', false], ['/project/.git/hooks', true]]);
+    assert.deepEqual(requests[0]!.mounts.map(m => [m.containerPath, !!m.readOnly]), [['/workspace', false], ['/project', false], ['/project/.git', false], ['/project/.git/hooks', true]]);
     const clean = await manager.run({ command: 'true', cwd: '/project' });
     assert.equal(clean.note, undefined);
     await manager.close();
@@ -422,7 +422,7 @@ test('a project is mounted at /project with .git hooks read-only, and git settin
     requests.length = 0;
     const readOnly = new SandboxManager(resolveSandboxConfig({ provider: factory, project: { path: project, readOnly: true } }), { workspace: () => workspace });
     await readOnly.run({ command: 'true' });
-    assert.deepEqual(requests[0]!.mounts.slice(3).map(m => [m.containerPath, !!m.readOnly]), [['/project', true]]);
+    assert.deepEqual(requests[0]!.mounts.slice(1).map(m => [m.containerPath, !!m.readOnly]), [['/project', true]]);
     await readOnly.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -457,18 +457,24 @@ test('a repository created in a project without one keeps only plain settings an
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('the workspace is the conversation folder; its metadata sidecars are mounted read-only', async () => {
+test('the workspace is the whole resources work tree (never its git history); commands start in the conversation\'s folder', async () => {
   const root = tmp('ws');
   try {
     const store = new AttachmentStore(root, 'agent-local-1111', 'conv-a');
     await store.save([{ name: 'data.csv', bytes: new TextEncoder().encode('a,b\n1,2\n') }]);
     const provider = fakeProvider();
-    const manager = new SandboxManager(resolveSandboxConfig({ provider: provider.factory }), { workspace: () => store.folder() });
-    await manager.run({ command: 'true' });
+    const manager = new SandboxManager(resolveSandboxConfig({ provider: provider.factory }), { workspace: () => store.resources.workTree(), folder: () => store.path });
+    assert.equal(manager.workingDirectory, '/workspace/Conversation a');
+    await manager.run({ command: 'true', cwd: '/workspace' });
     const mounts = provider.requests[0]!.mounts;
-    assert.equal(mounts[0]!.hostPath, store.folder());
-    assert.ok(existsSync(join(mounts[0]!.hostPath, 'data.csv')));
-    assert.ok(mounts.slice(1).every(m => m.readOnly && m.hostPath.startsWith(store.folder())));
+    assert.deepEqual(mounts.map(m => m.hostPath), [realpathSync(store.resources.files)], 'only the work tree is mounted');
+    assert.ok(existsSync(join(mounts[0]!.hostPath, store.path, 'data.csv')));
+    assert.ok(!existsSync(join(mounts[0]!.hostPath, '.git')), 'the history lives outside the mount');
+    assert.ok(existsSync(join(store.resources.gitDir, 'HEAD')));
+    assert.equal(resolveWorkingDirectory(undefined, false, manager.workingDirectory), '/workspace/Conversation a');
+    assert.equal(resolveWorkingDirectory('out', false, manager.workingDirectory), '/workspace/Conversation a/out');
+    assert.equal(resolveWorkingDirectory('/workspace/Other', false, manager.workingDirectory), '/workspace/Other');
+    assert.throws(() => resolveWorkingDirectory('../../etc', false, manager.workingDirectory), (e: unknown) => e instanceof SandboxError && e.code === 'cwd_invalid');
     await manager.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

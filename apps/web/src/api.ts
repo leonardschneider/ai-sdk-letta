@@ -37,3 +37,16 @@ export async function uploadFile(file: File, signal?: AbortSignal): Promise<File
   if (!response.ok) throw new AttachmentError(['session_required', 'csrf_required'].includes(data.error ?? '') ? 'The local server restarted. Refresh the page, then attach the file again.' : fileMessage(data.error ?? `http_${response.status}`));
   return data as FileInfo;
 }
+
+/** Upload one file into a resources folder (`POST /api/v1/resources/upload`). One commit on the server. */
+export async function uploadResource(folder: string, file: File): Promise<{ path: string }> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1/resources/upload?folder=${encodeURIComponent(folder)}`, { method: 'POST', credentials: 'same-origin', body: file,
+      headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf, 'X-File-Name': encodeURIComponent(file.name || 'file') } });
+  } catch { throw new ApiError('network', 0); }
+  let data: { error?: string; path?: string } = {};
+  try { data = await response.json(); } catch { /* no body */ }
+  if (!response.ok) throw new ApiError(data.error ?? (response.status === 413 ? 'payload_too_large' : `http_${response.status}`), response.status);
+  return data as { path: string };
+}

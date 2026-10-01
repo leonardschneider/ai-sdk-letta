@@ -5,5 +5,5 @@
  * @packageDocumentation
  */
 export { ThreadRuntime, RuntimeFault, displayRun, toolFailureReason, fileFault, fileSummary, type RuntimeEvent, type Run, type RunImage, type RunFile, type RunInput, type RuntimeHost, type RuntimeSession } from './runtime.js';
-export { guiApp, tokenApiApp, runtimeRoutes, contentDisposition, BODY_LIMIT_BYTES, RUN_BODY_LIMIT_BYTES, UPLOAD_BODY_LIMIT_BYTES, type GuiAgentInfo } from './http.js';
+export { guiApp, tokenApiApp, runtimeRoutes, contentDisposition, previewType, BODY_LIMIT_BYTES, RUN_BODY_LIMIT_BYTES, UPLOAD_BODY_LIMIT_BYTES, PREVIEW_LIMIT_BYTES, PREVIEW_CSP, PDF_PREVIEW_CSP, type GuiAgentInfo } from './http.js';
 export { startGuiServer, startApiServer, closeOnSignals, DEFAULT_PORT, type ServeOptions, type RunningServer } from './serve.js';

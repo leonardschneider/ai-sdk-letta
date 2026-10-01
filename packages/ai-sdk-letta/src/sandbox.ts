@@ -23,11 +23,11 @@ export const SANDBOX_CONTEXT = 'ai-sdk-letta.sandbox';
 
 /** Where things are inside the sandbox. */
 export const SANDBOX_PATHS = Object.freeze({
-  /** The conversation's attachment folder (read-write, except its `.meta/` and `.text/` sidecars). */
+  /** All of the agent's resources (one folder per conversation), read-write. Commands start in the conversation's folder. */
   workspace: '/workspace',
   /** The optional project folder. */
   project: '/project',
-  /** Python virtual environment: packages installed with pip persist here, in the workspace. */
+  /** Python virtual environment, shared by all conversations: packages installed with pip persist here (not versioned). */
   venv: '/workspace/.venv',
   /** `HOME` for commands (caches, shell history), also in the workspace. */
   home: '/workspace/.home',
@@ -281,6 +281,36 @@ export function checkProjectFolder(path: string, home = homedir()): string {
   return real;
 }
 
+/**
+ * Make a repository created by a command safe for git on the host: keep only
+ * plain settings in its config (no hooks path, filters, fsmonitor, aliases,
+ * includes...), remove `commondir`/`config.worktree` and active hooks.
+ * Returns what was changed (empty if nothing).
+ */
+export function sanitizeRepository(git: string): string[] {
+  const notes: string[] = [];
+  let info;
+  try { info = lstatSync(git); } catch { return notes; }
+  if (info.isSymbolicLink()) { rmSync(git, { force: true }); return ['removed a .git link']; }
+  if (!info.isDirectory()) { rmSync(git, { force: true }); return ['removed a .git file']; }
+  const config = join(git, 'config');
+  try {
+    if (lstatSync(config).isFile()) {
+      const text = readFileSync(config, 'utf8');
+      const safe = gitConfigEntries(text).filter(e => (e.section === 'core' && SAFE_CORE_KEYS.has(e.key)) || (/^branch "/.test(e.section) && ['remote', 'merge'].includes(e.key)) || (/^remote "/.test(e.section) && ['url', 'fetch'].includes(e.key) && !urlHasCredentials(e.value)) || (e.section === 'init' && e.key === 'defaultbranch'));
+      const rebuilt = serializeGitConfig(safe);
+      if (rebuilt !== text) { writeFileSync(config, rebuilt); notes.push('kept only plain settings in .git/config'); }
+    } else { rmSync(config, { force: true, recursive: true }); notes.push('removed an unusual .git/config'); }
+  } catch { /* no config */ }
+  for (const name of ['commondir', 'config.worktree']) if (existsSync(join(git, name))) { rmSync(join(git, name), { force: true, recursive: true }); notes.push(`removed .git/${name}`); }
+  const hooks = join(git, 'hooks');
+  try {
+    if (lstatSync(hooks).isSymbolicLink()) { rmSync(hooks, { force: true }); notes.push('removed a hooks link'); }
+    else for (const entry of readdirSync(hooks)) if (!entry.endsWith('.sample')) { rmSync(join(hooks, entry), { force: true, recursive: true }); notes.push(`removed hook ${entry}`); }
+  } catch { /* no hooks folder */ }
+  return notes;
+}
+
 /* ------------------------------------------------------------------ */
 /* Commands                                                            */
 /* ------------------------------------------------------------------ */
@@ -299,17 +329,18 @@ export function sandboxEnvironment(config: Pick<ResolvedSandboxConfig, 'git'>): 
 }
 
 /**
- * Resolve a working directory given by the model: relative to `/workspace`,
- * or absolute under `/workspace` (or `/project` when one is mounted). `..`
- * segments are refused. This keeps commands where the user expects them; the
- * container itself is the security boundary.
+ * Resolve a working directory given by the model: relative to `base` (the
+ * conversation's folder, `/workspace` by default), or absolute under
+ * `/workspace` (or `/project` when one is mounted). `..` segments are
+ * refused. This keeps commands where the user expects them; the container
+ * itself is the security boundary.
  * @throws {SandboxError} `cwd_invalid`
  */
-export function resolveWorkingDirectory(cwd: string | undefined, project = false): string {
-  if (cwd === undefined || !cwd.trim() || cwd.trim() === '.') return SANDBOX_PATHS.workspace;
+export function resolveWorkingDirectory(cwd: string | undefined, project = false, base: string = SANDBOX_PATHS.workspace): string {
+  if (cwd === undefined || !cwd.trim() || cwd.trim() === '.') return base;
   const value = cwd.trim();
   if (value.length > 500 || /[\0-\x1f]/.test(value) || value.split('/').includes('..')) throw new SandboxError('cwd_invalid', 'Working directory must be a path inside /workspace without ".."');
-  const absolute = value.startsWith('/') ? posix.normalize(value) : posix.join(SANDBOX_PATHS.workspace, value);
+  const absolute = value.startsWith('/') ? posix.normalize(value) : posix.join(base, value);
   const roots = [SANDBOX_PATHS.workspace, ...(project ? [SANDBOX_PATHS.project] : [])];
   const clean = absolute.replace(/\/+$/, '') || '/';
   if (!roots.some(root => clean === root || clean.startsWith(`${root}/`))) throw new SandboxError('cwd_invalid', `Working directory must be inside ${roots.join(' or ')}`);
@@ -640,6 +671,7 @@ export class SandboxManager {
   /** Lazy AI SDK session; the container starts on its first use. */
   readonly session: Experimental_SandboxSession;
   private readonly workspace: () => string;
+  private readonly folder?: () => string | undefined;
   private readonly labels: Record<string, string>;
   private readonly project?: { path: string; readOnly: boolean; git: boolean; gitConfig: Buffer | null };
   private current?: Promise<SandboxHandle>;
@@ -650,12 +682,14 @@ export class SandboxManager {
   private queue: Promise<unknown> = Promise.resolve();
 
   /**
-   * @param workspace returns the host folder to mount at `/workspace` (created and checked by the caller).
+   * @param options.workspace returns the host folder to mount at `/workspace` (created and checked by the caller).
+   * @param options.folder returns the conversation's folder, relative to `/workspace`: commands start there.
    * @throws {SandboxError} if the project folder is unsafe or holds credentials
    */
-  constructor(config: ResolvedSandboxConfig, options: { workspace: () => string; owner?: string }) {
+  constructor(config: ResolvedSandboxConfig, options: { workspace: () => string; folder?: () => string | undefined; owner?: string }) {
     this.config = config;
     this.workspace = options.workspace;
+    this.folder = options.folder;
     this.labels = { [SANDBOX_LABEL]: '1', [`${SANDBOX_LABEL}.pid`]: String(process.pid), [`${SANDBOX_LABEL}.host`]: hostname(), ...(options.owner ? { [`${SANDBOX_LABEL}.owner`]: options.owner.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) } : {}) };
     if (config.project) {
       const path = checkProjectFolder(config.project.path);
@@ -669,7 +703,7 @@ export class SandboxManager {
       finally { this.release(); }
     })) as unknown as Experimental_SandboxSession[K];
     this.session = {
-      description: `Isolated Linux sandbox without network. ${SANDBOX_PATHS.workspace} holds this conversation's files${config.project ? ` and ${SANDBOX_PATHS.project} the project folder` : ''}.`,
+      description: `Isolated Linux sandbox without network. ${SANDBOX_PATHS.workspace} holds the agent's resources, one folder per conversation${config.project ? `, and ${SANDBOX_PATHS.project} the project folder` : ''}.`,
       readFile: lazy('readFile'), readBinaryFile: lazy('readBinaryFile'), readTextFile: lazy('readTextFile'),
       writeFile: lazy('writeFile'), writeBinaryFile: lazy('writeBinaryFile'), writeTextFile: lazy('writeTextFile'),
       spawn: lazy('spawn'), run: lazy('run'),
@@ -687,15 +721,19 @@ export class SandboxManager {
   get running(): boolean { return this.current !== undefined; }
   /** Does `/project` exist in this sandbox? */
   get hasProject(): boolean { return this.project !== undefined; }
+  /** Default working directory of commands: the conversation's folder. */
+  get workingDirectory(): string {
+    const folder = this.folder?.();
+    return folder ? posix.join(SANDBOX_PATHS.workspace, folder) : SANDBOX_PATHS.workspace;
+  }
   /** The exact environment of commands. */
   get environment(): Record<string, string> { return sandboxEnvironment(this.config); }
 
   private mounts(): SandboxMount[] {
     const workspace = this.workspace();
     if (MOUNT_UNSAFE.test(workspace)) throw new SandboxError('sandbox_unavailable', 'The workspace path contains characters that cannot be mounted');
+    // Only the work tree is mounted: the resources' git history and metadata live next to it, out of reach.
     const mounts: SandboxMount[] = [{ hostPath: workspace, containerPath: SANDBOX_PATHS.workspace }];
-    // The attachment store's own metadata stays read-only.
-    for (const sidecar of ['.meta', '.text']) { mkdirSync(join(workspace, sidecar), { recursive: true, mode: 0o700 }); mounts.push({ hostPath: join(workspace, sidecar), containerPath: `${SANDBOX_PATHS.workspace}/${sidecar}`, readOnly: true }); }
     if (this.project) {
       mounts.push({ hostPath: this.project.path, containerPath: SANDBOX_PATHS.project, readOnly: this.project.readOnly });
       if (!this.project.readOnly && this.project.git) {
@@ -767,7 +805,7 @@ export class SandboxManager {
   private guard(): string | undefined {
     if (!this.project || this.project.readOnly) return undefined;
     const git = join(this.project.path, '.git');
-    if (!this.project.git) return existsSync(git) ? this.sanitizeNewRepository(git) : undefined;
+    if (!this.project.git) { const notes = existsSync(git) ? sanitizeRepository(git) : []; return notes.length ? `[In the new repository in the project, ai-sdk-letta ${notes.join(', ')}, because git on the user's computer would obey them.]` : undefined; }
     const notes: string[] = [];
     for (const name of ['commondir', 'config.worktree']) {
       const path = join(git, name);
@@ -785,37 +823,12 @@ export class SandboxManager {
   }
 
   /**
-   * A repository the command created in a project that had none: keep only
-   * plain settings in its config (no hooks path, filters, fsmonitor,
-   * aliases, includes...) and remove active hooks.
-   */
-  private sanitizeNewRepository(git: string): string | undefined {
-    const notes: string[] = [];
-    let info;
-    try { info = lstatSync(git); } catch { return undefined; }
-    if (!info.isDirectory()) { rmSync(git, { force: true }); return '[The command created a .git file in the project; it was removed.]'; }
-    const config = join(git, 'config');
-    if (existsSync(config)) {
-      const text = readFileSync(config, 'utf8');
-      const safe = gitConfigEntries(text).filter(e => (e.section === 'core' && SAFE_CORE_KEYS.has(e.key)) || (/^branch "/.test(e.section) && ['remote', 'merge'].includes(e.key)) || (/^remote "/.test(e.section) && ['url', 'fetch'].includes(e.key) && !urlHasCredentials(e.value)) || (e.section === 'init' && e.key === 'defaultbranch'));
-      const rebuilt = serializeGitConfig(safe);
-      if (rebuilt !== text) { writeFileSync(config, rebuilt); notes.push('kept only plain settings in .git/config'); }
-    }
-    for (const name of ['commondir', 'config.worktree']) if (existsSync(join(git, name))) { rmSync(join(git, name), { force: true, recursive: true }); notes.push(`removed .git/${name}`); }
-    const hooks = join(git, 'hooks');
-    try {
-      for (const entry of readdirSync(hooks)) if (!entry.endsWith('.sample')) { rmSync(join(hooks, entry), { force: true, recursive: true }); notes.push(`removed hook ${entry}`); }
-    } catch { /* no hooks folder */ }
-    return notes.length ? `[In the new repository in the project, ai-sdk-letta ${notes.join(', ')}, because git on the user's computer would obey them.]` : undefined;
-  }
-
-  /**
    * Run one command in the conversation's sandbox (no network), or, with
    * `network: true`, in a new network-enabled sandbox on the same workspace
    * that is removed right after.
    */
   async run(input: { command: string; cwd?: string; network?: boolean; signal?: AbortSignal }): Promise<{ result: CommandResult; note?: string }> {
-    const cwd = resolveWorkingDirectory(input.cwd, this.hasProject);
+    const cwd = resolveWorkingDirectory(input.cwd, this.hasProject, this.workingDirectory);
     const options = { command: input.command, cwd, env: this.environment, timeoutMs: this.config.timeoutMs, signal: input.signal };
     if (!input.network) return this.exclusive(async () => {
       input.signal?.throwIfAborted();
@@ -847,7 +860,7 @@ export interface SandboxToolOutput { text: string; isError?: boolean; exitCode?:
 type CommandInput = { command: string; cwd?: string };
 const commandSchema = jsonSchema<CommandInput>({ type: 'object', properties: {
   command: { type: 'string', minLength: 1, maxLength: SANDBOX_LIMITS.maxCommandChars, description: 'Shell command (bash).' },
-  cwd: { type: 'string', maxLength: 500, description: 'Working directory relative to /workspace. Default: /workspace.' },
+  cwd: { type: 'string', maxLength: 500, description: 'Working directory, relative to this conversation\'s folder or absolute under /workspace. Default: this conversation\'s folder.' },
 }, required: ['command'], additionalProperties: false });
 
 const errorOutput = (error: unknown): SandboxToolOutput => {
@@ -883,7 +896,7 @@ const output = (result: CommandResult, timeoutMs: number, note?: string): Sandbo
  */
 export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>; run_command_online: Tool<CommandInput, SandboxToolOutput> } = {
   run_command: tool({
-    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds the conversation\'s attached files and persists across turns. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. Returns the exit code and output (long output is truncated).',
+    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds all resources, one folder per conversation; commands start in this conversation\'s folder. Files persist and are versioned. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. Returns the exit code and output (long output is truncated).',
     inputSchema: commandSchema,
     execute: async ({ command, cwd }, options) => {
       try {

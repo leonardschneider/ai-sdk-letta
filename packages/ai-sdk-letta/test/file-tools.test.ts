@@ -81,7 +81,7 @@ test('read_file returns only the requested PDF pages, marks the range, and shows
     assert.equal(sniffImageType(image), 'image/png');
     assert.equal(image.readUInt32BE(16), 528, 'the page image keeps the scan\'s resolution (within the limit)');
     await assert.rejects(readFile(s.files, 'quarterly-report.pdf', '9'), code('file_range_invalid'));
-    await assert.rejects(readFile(s.files, 'missing.pdf'), (e: unknown) => code('file_not_found')(e) && /Files here: "quarterly-report\.pdf"/.test((e as Error).message));
+    await assert.rejects(readFile(s.files, 'missing.pdf'), (e: unknown) => code('file_not_found')(e) && /Files in this conversation's folder: "quarterly-report\.pdf"\. Other folders: list_files with folder "\/"/.test((e as Error).message));
   } finally { s.cleanup(); }
 });
 
@@ -134,10 +134,10 @@ test('search_files finds passages with file and page or line, folds case and acc
 test('list_files describes every file; images can be read back as images', async () => {
   const s = await store();
   try {
-    assert.equal(listFiles(s.files).text, 'No files are attached to this conversation.');
+    assert.equal(listFiles(s.files).text, 'No files in this conversation\'s folder (/Conversation a). Other conversations\' files: list_files with folder "/".');
     await s.files.save([{ name: 'report.pdf', bytes: readFileSync(FIXTURE) }, { name: 'shot.png', bytes: png(4, 4) }, { name: 'a.md', bytes: enc('# A\n\nB\n') }]);
     const list = listFiles(s.files).text;
-    assert.match(list, /^3 files in this conversation \(\d+ KB\):\n- report\.pdf \(PDF, 5 pages, 3 KB\)\n- shot\.png \(PNG image, \d+ bytes\)\n- a\.md \(Markdown, 3 lines, 7 bytes\)/);
+    assert.match(list, /^3 files in this conversation's folder \(\/Conversation a\) \(\d+ KB\):\n- a\.md \(Markdown, 3 lines, 7 bytes\)\n- report\.pdf \(PDF, 5 pages, 3 KB\)\n- shot\.png \(PNG image, \d+ bytes\)/);
     const image = await readFile(s.files, 'shot.png');
     assert.equal(image.images?.[0]?.mediaType, 'image/png');
   } finally { s.cleanup(); }
@@ -230,7 +230,7 @@ test('a turn with files stores them and sends only a short note; images are stor
       { type: 'text', text: `\n\nAttached: report.pdf (PDF, 5 pages, 3 KB)\nAttached: team.csv (CSV, 1 line, 4 bytes)\nAttached: image.png (PNG image, ${image.byteLength} bytes)` },
     ]);
     assert.doesNotMatch(JSON.stringify(sent), /marketing budget for Q4/, 'file content is never inlined');
-    assert.deepEqual(s.files.list().map(f => f.name), ['report.pdf', 'team.csv', 'image.png']);
+    assert.deepEqual(s.files.list().map(f => f.name), ['image.png', 'report.pdf', 'team.csv']);
     // The transcript keeps references only; history must extend it exactly (no replay).
     const transcript = agent.transcript;
     assert.doesNotMatch(JSON.stringify(transcript), /JVBER|YSxiCg/, 'no file bytes in the transcript');

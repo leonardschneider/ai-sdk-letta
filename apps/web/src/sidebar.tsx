@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ThreadListPrimitive, ThreadListItemPrimitive, ThreadListItemMorePrimitive, useAui, useAuiState } from '@assistant-ui/react';
-import { Archive, ArchiveRestore, ChevronRight, Ellipsis, Pencil, Search, SquarePen, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, X } from 'lucide-react';
 import { groupByDate, matchesSearch, TITLE_LIMIT, validTitle, type ThreadSummary } from './thread-model.js';
 
 /** Row-level UI state shared by every ThreadListItem (the primitives render items by index). */
@@ -11,7 +11,7 @@ export type SidebarProps = {
   active: ThreadSummary[]; archived: ThreadSummary[]; times: Map<string, number | undefined>;
   query: string; onQuery(value: string): void; searchRef: React.RefObject<HTMLInputElement | null>;
   busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; isDraft: boolean;
-  onClose?(): void; agent: { id: string; name: string };
+  onClose?(): void; onCollapse?(): void; agent: { id: string; name: string };
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -37,6 +37,7 @@ export function Sidebar(props: SidebarProps) {
   return <Rows.Provider value={rows}>
     <div className="sidebar-head">
       <div className="brand"><span className="brand-mark" aria-hidden="true">✳︎</span><span>{props.agent.name}</span></div>
+      {props.onCollapse && <button type="button" className="icon-btn small collapse-btn" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true" title="Hide sidebar (⌘B)" onClick={props.onCollapse}><PanelLeftClose size={17}/></button>}
       {props.onClose && <button type="button" className="icon-btn drawer-close" aria-label="Close sidebar" onClick={props.onClose}><X size={18}/></button>}
     </div>
     <ThreadListPrimitive.Root className="thread-list" aria-label="Conversations">

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { ArchiveRestore, ArrowDown, ArrowUp, Menu, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
+import { ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
@@ -12,6 +12,8 @@ import { Sidebar } from './sidebar.js';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
+import { ResourcesPanel } from './resources.js';
+import { LAYOUT_KEY, RESOURCES_WIDTH, clampWidth, readLayout, type Layout } from './resources-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
 import './style.css';
@@ -42,6 +44,17 @@ function App() {
   const [sentAnswer, setSentAnswer] = useState<InteractionResponse>();
   const [query, setQuery] = useState('');
   const [drawer, setDrawer] = useState(false);
+  // Desktop layout (persisted): left sidebar shown or collapsed, Resources panel open or closed, its width.
+  const [layout, setLayoutState] = useState<Layout>(() => readLayout(localStorage.getItem(LAYOUT_KEY)));
+  const setLayout = useCallback((update: (previous: Layout) => Layout) => setLayoutState(previous => { const next = update(previous); localStorage.setItem(LAYOUT_KEY, JSON.stringify(next)); return next; }), []);
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+  useEffect(() => { const query = window.matchMedia('(max-width: 760px)'); const on = () => setNarrow(query.matches); query.addEventListener('change', on); return () => query.removeEventListener('change', on); }, []);
+  // On a phone, the Resources panel is a drawer like the sidebar (never persisted open).
+  const [resourcesDrawer, setResourcesDrawer] = useState(false);
+  const resourcesOpen = narrow ? resourcesDrawer : layout.resources;
+  const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
+  const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
+  const [turns, setTurns] = useState(0);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
@@ -113,6 +126,7 @@ function App() {
       if (!ended) throw new Error('Stream disconnected. Refresh to reconnect without replaying the turn.');
     } catch (e) { if (!control.signal.aborted) setBlocked(`${e instanceof Error ? e.message : String(e)}`); }
     finally {
+      setTurns(n => n + 1);
       if (stream.current === control) {
         setRunning(false);
         if (ended) { liveRun.current = undefined; setLiveThread(undefined); }
@@ -181,6 +195,8 @@ function App() {
   async function patch(id: string, body: { title?: string; archived?: boolean }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
+    // The conversation's folder follows its title: refresh the Resources panel now.
+    if (body.title !== undefined) setTurns(n => n + 1);
     return updated;
   }
   async function rename(id: string, title: string) {
@@ -295,7 +311,7 @@ function App() {
   const readOnly = !!selected?.archived;
   const runtimeRef = useRef<AssistantRuntime | undefined>(undefined);
   const attachments = useMemo(() => new FileAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? [], filesEnabled ? uploadFile : undefined), [filesEnabled]);
-  // Sent files download from the conversation's folder (same origin, session cookie).
+  // Sent files download from where they are now in the resources (the server follows moves and renames).
   const fileLink = useCallback((name: string) => current.draft ? undefined : `/api/v1/threads/${encodeURIComponent(current.id)}/files/${encodeURIComponent(name)}`, [current]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages, convertMessage: m => m, isRunning: running, isLoading: loading,
@@ -314,10 +330,14 @@ function App() {
     const onKey = (event: KeyboardEvent) => {
       const mod = event.metaKey || event.ctrlKey;
       if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'k') { event.preventDefault(); startDraft(); return; }
-      if (mod && !event.altKey && event.key === '/') { event.preventDefault(); setDrawer(true); requestAnimationFrame(() => { searchRef.current?.focus(); searchRef.current?.select(); }); return; }
+      if (mod && !event.altKey && event.key === '/') { event.preventDefault(); if (narrow) setDrawer(true); else setLayout(l => ({ ...l, sidebar: true })); requestAnimationFrame(() => { searchRef.current?.focus(); searchRef.current?.select(); }); return; }
+      // ⌘B / Ctrl+B: show or hide the conversations sidebar. ⌘⇧E / Ctrl+Shift+E: the Resources panel.
+      if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'b') { event.preventDefault(); toggleSidebar(); return; }
+      if (mod && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'e') { event.preventDefault(); toggleResources(); return; }
       if (event.key === 'Escape' && !event.defaultPrevented) {
-        if (document.querySelector('[role="menu"]')) return;
+        if (document.querySelector('[role="menu"], [role="dialog"]')) return;
         if (drawer) { setDrawer(false); return; }
+        if (narrow && resourcesDrawer) { setResourcesDrawer(false); return; }
         const target = event.target as HTMLElement | null;
         if (!running || target?.closest('.dock, input, .composer')) return;
         event.preventDefault(); void cancel();
@@ -338,15 +358,21 @@ function App() {
   return <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer }}>
     <FileLinkContext.Provider value={fileLink}>
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="layout" data-drawer={drawer || undefined} data-loading={loading || listLoading || undefined} data-running={running || undefined}>
-        <aside id="sidebar" className="sidebar" aria-label="Sidebar">
-          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} agent={agent}/>
+      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && filesEnabled) || undefined}
+        data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
+        <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
+          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent}/>
         </aside>
-        <div className="scrim" aria-hidden="true" onClick={() => setDrawer(false)}/>
+        <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
           <header className="topbar">
             <button type="button" className="icon-btn menu-btn" aria-label="Open sidebar" aria-controls="sidebar" aria-expanded={drawer} onClick={() => setDrawer(true)}><Menu size={18}/></button>
+            {!narrow && !layout.sidebar && <>
+              <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
+              <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
+            </>}
             <h1 className="topbar-title" title={title}>{title}</h1>
+            {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
           <ThreadPrimitive.Root className="thread">
@@ -390,10 +416,26 @@ function App() {
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
         </main>
+        {filesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
+          {!narrow && <Resizer width={layout.resourcesWidth} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
+          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
+            onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}/>
+        </aside>}
       </div>
     </AssistantRuntimeProvider>
     </FileLinkContext.Provider>
   </InteractionContext.Provider>;
+}
+
+/** Drag handle on the Resources panel's left edge; arrow keys resize too. The width is kept between visits. */
+function Resizer({ width, onWidth }: { width: number; onWidth(width: number): void }) {
+  const start = useRef<{ x: number; width: number } | undefined>(undefined);
+  return <div className="resizer" role="separator" aria-orientation="vertical" aria-label="Resize resources" aria-valuemin={RESOURCES_WIDTH.min} aria-valuemax={RESOURCES_WIDTH.max} aria-valuenow={width} tabIndex={0}
+    onPointerDown={event => { event.preventDefault(); (event.target as Element).setPointerCapture(event.pointerId); start.current = { x: event.clientX, width }; document.body.dataset.resizing = ''; }}
+    onPointerMove={event => { if (start.current) onWidth(clampWidth(start.current.width + start.current.x - event.clientX)); }}
+    onPointerUp={() => { start.current = undefined; delete document.body.dataset.resizing; }}
+    onDoubleClick={() => onWidth(320)}
+    onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onWidth(clampWidth(width + (event.key === 'ArrowLeft' ? 24 : -24))); } }}/>;
 }
 
 /** Fixed server codes that mean "refused before delivery" for images, with their toast text. */

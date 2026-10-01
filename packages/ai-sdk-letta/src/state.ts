@@ -35,7 +35,9 @@ export function statePaths(root: string) {
     traces: join(root, 'tool-traces'),
     /** Per-definition HTTP runtime state (threads, runs). */
     server: (definitionId: string) => join(root, 'server', definitionId),
-    /** Attached files: `<attachments>/<lettaAgentId>/<conversationId>/`, plus `.staging/` for uploads not yet sent. */
+    /** Attached files of earlier versions (`<attachments>/<lettaAgentId>/<conversationId>/`), migrated into `resources` on open. */
     attachments: join(root, 'attachments'),
+    /** Resources: `<resources>/<lettaAgentId>/` holds `files/` (one folder per conversation, git-versioned), `git/`, `cache/` and `state.json`. */
+    resources: join(root, 'resources'),
   };
 }

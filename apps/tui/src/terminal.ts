@@ -8,7 +8,7 @@ import { terminalAttachments } from './attachments.js';
 import { toolView } from './tool-view.js';
 
 const HELP_LINE = 'PgUp/PgDn scroll history · Esc exits · Ctrl+V or drop a file to attach an image · /resume · /search [text] · /help';
-const HELP_LINE_FILES = 'PgUp/PgDn scroll history · Esc exits · drop a file (PDF, text, CSV, code, image) or Ctrl+V an image to attach it · /resume · /search [text] · /help';
+const HELP_LINE_FILES = 'PgUp/PgDn scroll history · Esc exits · drop a file (PDF, text, CSV, code, image) or Ctrl+V an image to attach it · /resume · /search [text] · /resources · /help';
 
 /**
  * Restored user messages end with the "Attached: name (...)" note the agent
@@ -65,7 +65,7 @@ export async function runTerminal<TOOLS extends ToolSet>(definition: AgentDefini
       await runAgentTUI({ agent, title: `${definition.name} · ${presentation.title}`, tools: 'full', reasoning: 'hidden', initialMessages, interaction: agent.interactions, toolView,
         attachments: terminalAttachments({ files }),
         localCommand: { matches: localCommandMatches, run: async text => {
-          next = await navigate(text, navigation);
+          next = await navigate(text, navigation, undefined, runtime?.resources ? { store: runtime.resources, conversationId: presentation.conversationId } : undefined);
           return next ? 'exit' : undefined;
         } },
       });
