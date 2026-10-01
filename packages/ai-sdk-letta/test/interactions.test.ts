@@ -5,7 +5,7 @@ import { ToolInteractions, validateResponse, createToolBridge, defineAgent, type
 import { bridge as createBridge, registry } from './fixtures.js';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const approval = (toolCallId: string) => ({ toolCallId, tool: 'approval_demo', kind: 'approval' as const, title: 'Approve?' });
-const decode = (result: Awaited<ReturnType<ReturnType<typeof createToolBridge>['execute']>>) => JSON.parse(result.content[0]!.text);
+const decode = (result: Awaited<ReturnType<ReturnType<typeof createToolBridge>['execute']>>) => JSON.parse(result.content[0]!.text!);
 
 test('policy is fail-closed: every tool needs a permission; deny and unknown tools cannot prompt', async () => {
   assert.throws(() => defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: registry, permissions: { text_stats: 'allow' } }), /Missing permission/);

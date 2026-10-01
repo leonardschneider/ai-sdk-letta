@@ -27,6 +27,11 @@ Main exports:
 - `LettaAgent`: the AI SDK `Agent` (`generate`, `stream`, `interactions`, `presentation`, `transcript`, `close`).
   User turns may include images (`image`/`file` parts), sent as Letta `ImageContent`.
 - `IMAGE_LIMITS`, `ImageInputError`, `validateImages`, `decodeImagePart`: image validation (PNG, JPEG, GIF, WebP).
+- `fileTools`, `FILE_TOOL_PERMISSIONS`: opt-in `list_files`, `read_file`, `search_files`, bound to the
+  current conversation's attachment folder. With them, user turns may carry `file` parts (PDF, text,
+  Markdown, CSV, JSON, code), stored per conversation and announced by a short "Attached: ..." note.
+- `AttachmentStore`, `UploadStaging`, `FILE_LIMITS`, `FileInputError`, `detectFileType`, `extractPdfText`:
+  the storage, validation and PDF layer (unpdf, pure JavaScript).
 - `ToolInteractions`: the broker for approvals and `ask_user` questions.
 - `createToolBridge`, `askUserTool`, `fileTraceWriter`: the tool policy layer.
 - `resolveStateDirectory`, `acquireIdentity`, history and navigation helpers.

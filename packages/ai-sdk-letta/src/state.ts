@@ -35,5 +35,7 @@ export function statePaths(root: string) {
     traces: join(root, 'tool-traces'),
     /** Per-definition HTTP runtime state (threads, runs). */
     server: (definitionId: string) => join(root, 'server', definitionId),
+    /** Attached files: `<attachments>/<lettaAgentId>/<conversationId>/`, plus `.staging/` for uploads not yet sent. */
+    attachments: join(root, 'attachments'),
   };
 }
