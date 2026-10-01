@@ -1,7 +1,8 @@
 import type { ListMessagesOptions, ListMessagesResult, LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { loadHistory, projectHistory, sanitizeText } from './history.js';
+import { titleText } from './title.js';
 
-/** One row of a conversation picker. */
+/** One row of a conversation picker. `title` is plain text (a Markdown title shows its text). */
 export type ConversationEntry = { id: string; title: string; date: string };
 /** Read-only access to the current agent's conversations, used by pickers and search. */
 export type NavigationSource = {
@@ -27,7 +28,7 @@ export async function listNavigationEntries(list: (query: { agentId: string; lim
       if (row.agent_id !== agentId || seen.has(row.id)) throw new Error('Conversation listing escaped current agent or repeated cursor');
       seen.add(row.id);
       if (index === 2) { limited = true; continue; }
-      if (!row.archived) entries.push({ id: row.id, title: sanitizeText(row.summary || 'Untitled conversation'), date: row.last_message_at || row.updated_at || row.created_at || 'activity unavailable' });
+      if (!row.archived) entries.push({ id: row.id, title: titleText(sanitizeText(row.summary ?? '')) || 'Untitled conversation', date: row.last_message_at || row.updated_at || row.created_at || 'activity unavailable' });
     }
     if (limited) break;
     after = page.at(-1)!.id;

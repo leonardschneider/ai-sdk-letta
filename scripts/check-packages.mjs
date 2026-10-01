@@ -29,7 +29,9 @@ const forbidden = [
   [/\.tgz$/, 'tarball'],
   [/(^|\/)vitest[^/]*$|(^|\/)tsup\.config|(^|\/)tsconfig[^/]*\.json$/, 'build config'],
 ];
-const maxUnpacked = 1_000_000;
+// A guard against accidentally shipping large files, not a budget: ai-sdk-letta
+// ships src, dist and source maps (just over 1 MB since the title parser).
+const maxUnpacked = 1_250_000;
 const failures = [];
 const fail = (name, message) => failures.push(`${name}: ${message}`);
 

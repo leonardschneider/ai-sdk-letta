@@ -13,4 +13,12 @@ test('CLI supports explicit navigation, rejects contradictory flags, and shows t
   const result = conversationRows({ version: 2, definitionId: 'test-assistant', name: 'Test Assistant', backend: '/backend', agentId: 'agent-local-1', conversationId: 'default' }, [{ id: 'local-conv-2', agent_id: 'agent-local-1', summary: 'Work', last_message_at: 'today' } as LettaConversation]);
   assert.deepEqual(result[1], { id: 'local-conv-2', title: 'Work', activity: 'today' });
 });
+test('Markdown titles show as plain text in the terminal', () => {
+  const rows = conversationRows({ version: 2, definitionId: 'test-assistant', name: 'Test Assistant', backend: '/backend', agentId: 'agent-local-1', conversationId: 'default' }, [
+    { id: 'local-conv-2', agent_id: 'agent-local-1', summary: 'Review [Spec](https://example.com) **v2**', last_message_at: 'today' } as LettaConversation,
+    { id: 'local-conv-3', agent_id: 'agent-local-1', summary: '**\x1b[31m**', last_message_at: 'today' } as LettaConversation,
+  ]);
+  assert.equal(rows[1]!.title, 'Review Spec v2');
+  assert.equal(rows[2]!.title, '****', 'terminal controls are removed before parsing');
+});
 

@@ -1,6 +1,8 @@
-import { defineConfig } from 'vite';
+import { defineConfig, defaultClientConditions } from 'vite';
 
 export default defineConfig({
+  // Bundle workspace packages (ai-sdk-letta/title) from source, so the app builds without building them first.
+  resolve: { conditions: ['ai-sdk-letta-source', ...defaultClientConditions] },
   build: {
     outDir: 'dist', emptyOutDir: true,
     rollupOptions: {

@@ -38,6 +38,12 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./title": {
+      "ai-sdk-letta-source": "./src/title.ts",
+      "types": "./dist/title.d.ts",
+      "import": "./dist/title.js",
+      "default": "./dist/title.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
