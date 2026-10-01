@@ -3,7 +3,7 @@
  *
  * @packageDocumentation
  */
-export { runTerminal } from './terminal.js';
+export { runTerminal, withFileLabels } from './terminal.js';
 export { parseTerminalArgs, conversationRows, printConversations, pickConversation, type TerminalArgs } from './cli.js';
 export { localCommandMatches, parseLocalCommand, navigate, NavigationScreen } from './navigation.js';
-export { terminalAttachments, parsePastedPaths, readClipboard, readImagePaths, withinBudget, notices as attachmentNotices, MACOS_CLIPBOARD_SCRIPT, type ClipboardContent } from './attachments.js';
+export { terminalAttachments, parsePastedPaths, readClipboard, readImagePaths, readFilePath, withinBudget, notices as attachmentNotices, MACOS_CLIPBOARD_SCRIPT, type ClipboardContent } from './attachments.js';

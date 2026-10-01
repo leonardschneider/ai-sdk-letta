@@ -1,6 +1,8 @@
 /**
- * Image attachments for the terminal UI: Ctrl+V reads an image from the
- * system clipboard; pasting or dropping an image file path attaches the file.
+ * Attachments for the terminal UI: Ctrl+V reads an image from the system
+ * clipboard; pasting or dropping a file path attaches the file. Images
+ * always work; other files (PDF, text, Markdown, CSV, JSON, code) when the
+ * agent has the file tools (`files: true`). They show as `[File 1: name]`.
  *
  * Clipboard access uses only tools that ship with the OS or are commonly
  * installed; nothing is added as a dependency:
@@ -19,7 +21,7 @@ import { lstat, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { FileUIPart } from 'ai';
-import { IMAGE_LIMITS, ImageInputError, sniffImageType } from 'ai-sdk-letta';
+import { FILE_LIMITS, FileInputError, IMAGE_LIMITS, ImageInputError, detectFileType, formatBytes, sniffImageType } from 'ai-sdk-letta';
 import type { TerminalAttachmentResult, TerminalAttachments } from '@ai-sdk/tui';
 
 const MB = (bytes: number) => `${Math.round(bytes / 1024 / 1024)} MB`;
@@ -37,7 +39,24 @@ export const notices = {
   totalTooLarge: `Images too large together (max ${MB(IMAGE_LIMITS.maxTotalBytes)})`,
   unreadable: 'Could not read that image',
   clipboardFailed: 'Could not read the clipboard',
+  fileUnsupported: 'Unsupported file; attach PDF, text, Markdown, CSV, JSON, code or an image',
+  fileTooLarge: `File too large (max ${formatBytes(FILE_LIMITS.maxFileBytes)})`,
+  filesTooMany: `Up to ${FILE_LIMITS.maxFilesPerMessage} files per message`,
+  fileUnreadable: 'Could not read that file',
 };
+
+/** A non-image file read from disk: an AI SDK `file` part with its name. Validated by content; the agent validates again. */
+export async function readFilePath(raw: string, cwd = process.cwd()): Promise<FileUIPart> {
+  const path = resolve(cwd, raw);
+  const info = await stat(path);
+  if (!info.isFile()) throw new FileInputError('file_invalid', notices.fileUnreadable);
+  if (info.size > FILE_LIMITS.maxFileBytes) throw new FileInputError('file_too_large', notices.fileTooLarge);
+  const bytes = await readFile(path);
+  const filename = path.split(/[\\/]/).at(-1)!;
+  let type: ReturnType<typeof detectFileType>;
+  try { type = detectFileType(bytes, filename); } catch (error) { throw error instanceof FileInputError ? new FileInputError(error.code, error.code === 'file_unsupported_type' ? notices.fileUnsupported : notices.fileUnreadable) : error; }
+  return { type: 'file', mediaType: type.mediaType, filename, url: `data:${type.mediaType};base64,${bytes.toString('base64')}` };
+}
 
 /**
  * Split pasted or dropped text into file paths, as terminals produce them:
@@ -85,11 +104,15 @@ async function imageFile(bytes: Buffer, filename?: string): Promise<FileUIPart> 
 
 const bytesOf = (file: FileUIPart) => { const data = file.url.slice(file.url.indexOf(',') + 1); return Math.floor(data.length * 3 / 4); };
 
-/** Enforce per-message count and total size, given what is already attached. */
+const isImage = (file: FileUIPart) => /^image\//i.test(file.mediaType);
+/** Enforce per-message count and total size, given what is already attached: images and other files separately. */
 export function withinBudget(attached: readonly FileUIPart[], adding: readonly FileUIPart[]): string | undefined {
-  if (attached.length + adding.length > IMAGE_LIMITS.maxImages) return notices.tooMany;
-  const total = [...attached, ...adding].reduce((sum, file) => sum + bytesOf(file), 0);
-  return total > IMAGE_LIMITS.maxTotalBytes ? notices.totalTooLarge : undefined;
+  const images = [...attached, ...adding].filter(isImage);
+  const others = [...attached, ...adding].filter(file => !isImage(file));
+  if (images.length > IMAGE_LIMITS.maxImages) return notices.tooMany;
+  if (images.reduce((sum, file) => sum + bytesOf(file), 0) > IMAGE_LIMITS.maxTotalBytes) return notices.totalTooLarge;
+  if (others.length > FILE_LIMITS.maxFilesPerMessage) return notices.filesTooMany;
+  return undefined;
 }
 
 /** Read image files from absolute paths. Refuses non-files, symlink loops, oversized and unsupported files. */
@@ -192,14 +215,17 @@ export async function readClipboard(platform: NodeJS.Platform = process.platform
   return { none: notices.unsupportedPlatform };
 }
 
-const failure = (error: unknown): TerminalAttachmentResult => ({ notice: error instanceof ImageInputError ? error.message : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'File not found' : notices.unreadable });
+const failure = (error: unknown): TerminalAttachmentResult => ({ notice: error instanceof ImageInputError || error instanceof FileInputError ? error.message : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'File not found' : notices.unreadable });
+
+/** Extensions that make a pasted path an attachment rather than typed text (with `files`). */
+const FILE_EXTENSIONS = /\.(pdf|txt|text|md|markdown|mdx|csv|tsv|json|jsonl|ndjson|ya?ml|toml|xml|html?|css|log|ini|cfg|conf|rst|adoc|tex|diff|patch|[cm]?js|jsx|[cm]?ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|scala|sh|bash|zsh|sql|r|lua|vue|svelte|docx?|xlsx?|pptx?|odt|ods|odp|rtf|zip|bin|exe|dmg)$/i;
 
 /**
  * Attachment handlers for `runAgentTUI({ attachments })`: Ctrl+V reads an
  * image (or copied image files) from the clipboard; pasted or dropped image
  * paths attach those files. Other pasted text is inserted unchanged.
  */
-export function terminalAttachments(options: { platform?: NodeJS.Platform; exec?: Run; cwd?: string } = {}): TerminalAttachments {
+export function terminalAttachments(options: { platform?: NodeJS.Platform; exec?: Run; cwd?: string; files?: boolean } = {}): TerminalAttachments {
   return {
     fromClipboard: async ({ attached }) => {
       try {
@@ -212,11 +238,15 @@ export function terminalAttachments(options: { platform?: NodeJS.Platform; exec?
     },
     fromText: async (text, { attached }) => {
       const paths = parsePastedPaths(text);
-      // Only paths that name images are treated as attachments; everything else is typed text.
-      if (!paths?.every(path => IMAGE_EXTENSIONS.test(path))) return undefined;
-      if (!paths.every(path => SUPPORTED_EXTENSIONS.test(path))) return { notice: notices.unsupported };
+      if (!paths) return undefined;
+      const image = (path: string) => IMAGE_EXTENSIONS.test(path);
+      const file = (path: string) => !!options.files && FILE_EXTENSIONS.test(path);
+      // Only paths that name images (or, with files, other documents) are attachments; everything else is typed text.
+      if (!paths.every(path => image(path) || file(path))) return undefined;
+      if (!paths.every(path => !image(path) || SUPPORTED_EXTENSIONS.test(path))) return { notice: notices.unsupported };
       try {
-        const files = await readImagePaths(paths, options.cwd);
+        const files: FileUIPart[] = [];
+        for (const path of paths) files.push(...(image(path) ? await readImagePaths([path], options.cwd) : [await readFilePath(path, options.cwd)]));
         const over = withinBudget(attached, files);
         return over ? { notice: over } : { files };
       } catch (error) {

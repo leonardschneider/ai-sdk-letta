@@ -1,5 +1,5 @@
 diff --git a/node_modules/@ai-sdk/tui/dist/index.d.ts b/node_modules/@ai-sdk/tui/dist/index.d.ts
-index 1cab715..f4345d5 100644
+index 1cab715..ce9ff22 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.d.ts
 +++ b/node_modules/@ai-sdk/tui/dist/index.d.ts
 @@ -1,4 +1,4 @@
@@ -8,7 +8,7 @@ index 1cab715..f4345d5 100644
  
  /**
   * Controls how terminal UI sections for stream parts are displayed.
-@@ -24,7 +24,35 @@ type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -24,7 +24,37 @@ type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
@@ -18,10 +18,12 @@ index 1cab715..f4345d5 100644
 +type TerminalAttachmentResult = { files?: FileUIPart[]; notice?: string };
 +/**
 + * Prompt attachments. Attached files appear in the prompt as `[Image 1]`
-+ * (or `[File 1]`) markers; Backspace right after a marker removes it. On
-+ * Enter the markers are removed from the text and the files are sent as
-+ * `file` parts of the user message; sent and restored messages show
-+ * `[Image]` / `[File]`. The application reads and validates files.
++ * or `[File 1: report.pdf]` markers (the file part's `filename`);
++ * Backspace right after a marker removes it. On Enter the markers are
++ * removed from the text and the files are sent as `file` parts of the user
++ * message; sent and restored messages show `[Image]` / `[File: report.pdf]`
++ * (restored text parts that are exactly such a label display as one). The
++ * application reads and validates files.
 + */
 +type TerminalAttachments = {
 +    /** Ctrl+V while typing: read attachments from the system clipboard. */
@@ -44,14 +46,14 @@ index 1cab715..f4345d5 100644
      /**
       * The title shown in the terminal UI.
       */
-@@ -77,4 +105,4 @@ type RunAgentTUIOptions = {
+@@ -77,4 +107,4 @@ type RunAgentTUIOptions = {
   */
  declare function runAgentTUI(options: RunAgentTUIOptions): Promise<void>;
  
 -export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalPartDisplayMode, runAgentTUI };
 +export { type AgentTUIAgent, type ResponseStatisticsMode, type RunAgentTUIOptions, type TerminalAttachmentResult, type TerminalAttachments, type TerminalPartDisplayMode, runAgentTUI };
 diff --git a/node_modules/@ai-sdk/tui/dist/index.js b/node_modules/@ai-sdk/tui/dist/index.js
-index bdc31f9..83a0cb4 100644
+index bdc31f9..72062c0 100644
 --- a/node_modules/@ai-sdk/tui/dist/index.js
 +++ b/node_modules/@ai-sdk/tui/dist/index.js
 @@ -1,4 +1,4 @@
@@ -96,7 +98,7 @@ index bdc31f9..83a0cb4 100644
  var escape = "\x1B";
  var cursorHome = `${escape}[H`;
  var clearScreen = `${escape}[2J`;
-@@ -358,13 +358,28 @@ function diffFrame(previousFrame, nextFrame) {
+@@ -358,13 +358,35 @@ function diffFrame(previousFrame, nextFrame) {
    return output;
  }
  
@@ -108,16 +110,23 @@ index bdc31f9..83a0cb4 100644
    readUIMessageStream
  } from "ai";
  var defaultResponseStatistics = "outputTokensPerSecond";
-+function attachmentLabel(mediaType) {
-+  return /^image(\/|$)/i.test(mediaType) ? "[Image]" : "[File]";
++function attachmentLabel(mediaType, filename) {
++  if (/^image(\/|$)/i.test(mediaType)) return "[Image]";
++  const name = filename ? displayFileName(filename) : "";
++  return name ? `[File: ${name}]` : "[File]";
 +}
++function displayFileName(filename) {
++  const name = filename.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "").replace(/[[\]]/g, "_").trim();
++  return [...name].length > 60 ? `${[...name].slice(0, 59).join("")}\u2026` : name;
++}
++var escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 +function userDisplayText(parts) {
 +  const labels = [];
 +  let text = "";
 +  for (const part of parts) {
-+    if (part.type === "file") labels.push(attachmentLabel(part.mediaType));
++    if (part.type === "file") labels.push(attachmentLabel(part.mediaType, part.filename));
 +    else if (part.type === "text") {
-+      if (/^\[(Image|File)\]$/.test(part.text.trim())) labels.push(part.text.trim());
++      if (/^\[(Image|File)(: [^\]\n]+)?\]$/.test(part.text.trim())) labels.push(part.text.trim());
 +      else text += part.text;
 +    }
 +  }
@@ -126,7 +135,7 @@ index bdc31f9..83a0cb4 100644
  var colors = {
    reset: "\x1B[0m",
    dim: "\x1B[2m",
-@@ -399,8 +414,10 @@ var TerminalRenderer = class {
+@@ -399,8 +421,10 @@ var TerminalRenderer = class {
    #reasoning;
    #responseStatistics;
    #defaultContextSize;
@@ -137,7 +146,7 @@ index bdc31f9..83a0cb4 100644
    #inputActive = false;
    #scrollOffset = 0;
    #title = "";
-@@ -425,38 +442,141 @@ var TerminalRenderer = class {
+@@ -425,38 +449,142 @@ var TerminalRenderer = class {
      this.#responseStatistics = options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
@@ -167,7 +176,7 @@ index bdc31f9..83a0cb4 100644
 +      const images = attached.filter((a) => a.kind === "Image").length;
 +      const others = attached.length - images;
 +      const summary = [images ? `${images} image${images === 1 ? "" : "s"}` : "", others ? `${others} file${others === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
-+      this.#inputTitle = !source ? void 0 : busy && slow ? "Input \xB7 Reading attachment\u2026" : notice ? `Input \xB7 ${notice}` : summary ? `Input \xB7 ${summary} attached \xB7 Backspace removes` : source.fromClipboard ? "Input \xB7 Ctrl+V attaches an image" : void 0;
++      this.#inputTitle = !source ? void 0 : busy && slow ? "Input \xB7 Reading attachment\u2026" : notice ? `Input \xB7 ${notice}` : summary ? `Input \xB7 ${summary} attached \xB7 Backspace removes` : source.fromClipboard ? `Input \xB7 Ctrl+V attaches an image${source.fromText ? " \xB7 drop a file to attach it" : ""}` : void 0;
 +    };
 +    refreshTitle();
      this.#startInputCursorBlink();
@@ -181,7 +190,8 @@ index bdc31f9..83a0cb4 100644
 +        notice = result?.notice;
 +        for (const file of result?.files ?? []) {
 +          const kind = attachmentLabel(file.mediaType) === "[Image]" ? "Image" : "File";
-+          const marker = `[${kind} ${attached.filter((a) => a.kind === kind).length + 1}]`;
++          const name = kind === "File" && file.filename ? displayFileName(file.filename) : "";
++          const marker = `[${kind} ${attached.filter((a) => a.kind === kind).length + 1}${name ? `: ${name}` : ""}]`;
 +          this.#inputText += `${this.#inputText && !/\s$/.test(this.#inputText) ? " " : ""}${marker} `;
 +          attached.push({ marker, kind, file });
 +        }
@@ -262,7 +272,7 @@ index bdc31f9..83a0cb4 100644
            case "enter": {
 -            const prompt = this.#inputText;
 +            let prompt = this.#inputText;
-+            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${marker.replace(/[[\]]/g, "\\$&")} *`), " ");
++            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${escapeRegExp(marker)} *`), " ");
 +            if (attached.length) prompt = prompt.trim();
 +            const input = attached.length ? { text: prompt, files: files() } : prompt;
 +            finish();
@@ -285,7 +295,7 @@ index bdc31f9..83a0cb4 100644
              break;
            }
            case "up":
-@@ -472,6 +592,7 @@ var TerminalRenderer = class {
+@@ -472,6 +600,7 @@ var TerminalRenderer = class {
              break;
            case "escape":
            case "ctrl-c":
@@ -293,7 +303,7 @@ index bdc31f9..83a0cb4 100644
              this.#stopInputCursorBlink();
              this.#stop();
              reject(interruptedError());
-@@ -480,6 +601,7 @@ var TerminalRenderer = class {
+@@ -480,6 +609,7 @@ var TerminalRenderer = class {
              break;
          }
        };
@@ -301,7 +311,7 @@ index bdc31f9..83a0cb4 100644
        this.#attachInput();
      });
    }
-@@ -524,6 +646,7 @@ var TerminalRenderer = class {
+@@ -524,6 +654,7 @@ var TerminalRenderer = class {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -309,7 +319,7 @@ index bdc31f9..83a0cb4 100644
        this.#resolveStreamInterrupt = void 0;
        if (this.#interrupted) {
          result.abort?.();
-@@ -541,6 +664,102 @@ var TerminalRenderer = class {
+@@ -541,6 +672,102 @@ var TerminalRenderer = class {
      }
      return responseMessage;
    }
@@ -412,7 +422,7 @@ index bdc31f9..83a0cb4 100644
    async readToolApproval(request, options) {
      this.#start(options);
      this.#inputActive = false;
-@@ -636,6 +855,10 @@ var TerminalRenderer = class {
+@@ -636,6 +863,10 @@ var TerminalRenderer = class {
      }
    }
    #handleStreamingKey(chunk) {
@@ -423,7 +433,7 @@ index bdc31f9..83a0cb4 100644
      const key = parseKey(chunk);
      switch (key.type) {
        case "up":
-@@ -845,16 +1068,18 @@ var TerminalRenderer = class {
+@@ -845,16 +1076,18 @@ var TerminalRenderer = class {
      this.#paint();
    }
    #paint() {
@@ -446,7 +456,7 @@ index bdc31f9..83a0cb4 100644
      });
      this.#frameBuffer.present(frame);
    }
-@@ -1354,6 +1579,8 @@ function parseKey(chunk) {
+@@ -1354,6 +1587,8 @@ function parseKey(chunk) {
        return { type: "ctrl-l" };
      case "":
        return { type: "ctrl-c" };
@@ -455,7 +465,7 @@ index bdc31f9..83a0cb4 100644
      case "\x1B":
        return { type: "escape" };
      case "\r":
-@@ -1378,7 +1605,7 @@ function parseKey(chunk) {
+@@ -1378,7 +1613,7 @@ function parseKey(chunk) {
    }
  }
  
@@ -464,7 +474,7 @@ index bdc31f9..83a0cb4 100644
  import {
    convertToModelMessages,
    generateId,
-@@ -1387,8 +1614,23 @@ import {
+@@ -1387,8 +1622,23 @@ import {
  } from "ai";
  var defaultResponseStatistics2 = "outputTokensPerSecond";
  var AgentTUIRunner = class {
@@ -489,7 +499,7 @@ index bdc31f9..83a0cb4 100644
      this.agent = options.agent;
      this.transport = options.transport;
      this.renderer = createRenderer(options) ?? createDefaultRenderer(options);
-@@ -1400,11 +1642,23 @@ var AgentTUIRunner = class {
+@@ -1400,11 +1650,23 @@ var AgentTUIRunner = class {
      this.sandbox = options.sandbox;
    }
    async run() {
@@ -513,7 +523,7 @@ index bdc31f9..83a0cb4 100644
      let hasRunTurn = false;
      let streamWithoutPrompt = false;
      while (true) {
-@@ -1419,7 +1673,9 @@ var AgentTUIRunner = class {
+@@ -1419,7 +1681,9 @@ var AgentTUIRunner = class {
              );
            }
            try {
@@ -524,7 +534,7 @@ index bdc31f9..83a0cb4 100644
            } catch (error) {
              if (isInterruptedError(error)) {
                return;
-@@ -1430,7 +1686,12 @@ var AgentTUIRunner = class {
+@@ -1430,7 +1694,12 @@ var AgentTUIRunner = class {
              return;
            }
          }
@@ -538,7 +548,7 @@ index bdc31f9..83a0cb4 100644
          hasRunTurn = true;
        }
        const result = await this.streamMessages(
-@@ -1440,7 +1701,7 @@ var AgentTUIRunner = class {
+@@ -1440,7 +1709,7 @@ var AgentTUIRunner = class {
        try {
          const responseMessage = await this.renderer.renderStream(result, {
            title,
@@ -547,7 +557,7 @@ index bdc31f9..83a0cb4 100644
            continueSession: Boolean(this.renderer.readPrompt),
            tools: this.tools,
            reasoning: this.reasoning,
-@@ -1520,7 +1781,8 @@ var AgentTUIRunner = class {
+@@ -1520,7 +1789,8 @@ var AgentTUIRunner = class {
    }
  };
  function createDefaultRenderer(options) {
@@ -557,7 +567,7 @@ index bdc31f9..83a0cb4 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1535,6 +1797,7 @@ function createRenderer(options) {
+@@ -1535,6 +1805,7 @@ function createRenderer(options) {
      return void 0;
    }
    return new TerminalRenderer({
@@ -565,7 +575,7 @@ index bdc31f9..83a0cb4 100644
      tools: options.tools,
      reasoning: options.reasoning,
      responseStatistics: options.responseStatistics,
-@@ -1807,11 +2070,11 @@ function* closeOpenParts(textPartIds, reasoningPartIds) {
+@@ -1807,11 +2078,11 @@ function* closeOpenParts(textPartIds, reasoningPartIds) {
    }
    reasoningPartIds.clear();
  }
@@ -579,7 +589,7 @@ index bdc31f9..83a0cb4 100644
    };
  }
  function upsertResponseMessage(messages, responseMessage, replaceLast) {
-@@ -1874,11 +2137,10 @@ function isInterruptedError(error) {
+@@ -1874,11 +2145,10 @@ function isInterruptedError(error) {
    return error instanceof Error && error.message === "Interrupted";
  }
  
@@ -758,7 +768,7 @@ index 11607c4..ca3730d 100644
    TerminalPartDisplayMode,
  } from './run-agent-tui';
 diff --git a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
-index c26dfb9..a572d4d 100644
+index c26dfb9..8d84844 100644
 --- a/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
 +++ b/node_modules/@ai-sdk/tui/src/run-agent-tui.ts
 @@ -3,6 +3,7 @@ import type {
@@ -769,7 +779,7 @@ index c26dfb9..a572d4d 100644
    UIMessage,
  } from 'ai';
  
-@@ -39,7 +40,40 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
+@@ -39,7 +40,42 @@ export type AgentTUIAgent = Agent<any, any, any, any>;
  /**
   * Options for starting an agent in the default terminal UI.
   */
@@ -781,10 +791,12 @@ index c26dfb9..a572d4d 100644
 +
 +/**
 + * Prompt attachments. Attached files appear in the prompt as `[Image 1]`
-+ * (or `[File 1]`) markers; Backspace right after a marker removes it. On
-+ * Enter the markers are removed from the text and the files are sent as
-+ * `file` parts of the user message; sent and restored messages show
-+ * `[Image]` / `[File]`. The application reads and validates files.
++ * or `[File 1: report.pdf]` markers (the file part's `filename`);
++ * Backspace right after a marker removes it. On Enter the markers are
++ * removed from the text and the files are sent as `file` parts of the user
++ * message; sent and restored messages show `[Image]` / `[File: report.pdf]`
++ * (restored text parts that are exactly such a label display as one). The
++ * application reads and validates files.
 + */
 +export type TerminalAttachments = {
 +  /** Ctrl+V while typing: read attachments from the system clipboard. */
@@ -833,7 +845,7 @@ index 71a17a7..97fa313 100644
        state.inputActive
          ? `> ${state.input}${state.inputCursorVisible === false ? ' ' : '█'}`
 diff --git a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
-index cba32e1..eadc0a8 100644
+index cba32e1..25802d1 100644
 --- a/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
 +++ b/node_modules/@ai-sdk/tui/src/tui/terminal-renderer.ts
 @@ -5,6 +5,8 @@ import type {
@@ -871,30 +883,40 @@ index cba32e1..eadc0a8 100644
    title?: string;
    initialPrompt?: string;
    submittedPrompt?: string;
-@@ -67,8 +74,35 @@ export type TerminalSessionOptions = {
+@@ -67,8 +74,45 @@ export type TerminalSessionOptions = {
    contextSize?: number;
  };
  
 +/** A prompt with attached files, returned by `readPrompt` when files were attached. */
 +export type TerminalPromptInput = { text: string; files: FileUIPart[] };
 +
-+/** `[Image]` for images, `[File]` for anything else. */
-+export function attachmentLabel(mediaType: string): string {
-+  return /^image(\/|$)/i.test(mediaType) ? '[Image]' : '[File]';
++/** `[Image]` for images; `[File: name]` for other files with a name, else `[File]`. */
++export function attachmentLabel(mediaType: string, filename?: string): string {
++  if (/^image(\/|$)/i.test(mediaType)) return '[Image]';
++  const name = filename ? displayFileName(filename) : '';
++  return name ? `[File: ${name}]` : '[File]';
 +}
 +
++/** A file name safe to show inside a marker: no control characters or brackets, at most 60 characters. */
++function displayFileName(filename: string): string {
++  const name = filename.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').replace(/[[\]]/g, '_').trim();
++  return [...name].length > 60 ? `${[...name].slice(0, 59).join('')}…` : name;
++}
++
++const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++
 +/**
-+ * Display text of a user message: one `[Image]` / `[File]` label per file
-+ * part (and per text part that is exactly such a label, as display
++ * Display text of a user message: one `[Image]` / `[File: name]` label per
++ * file part (and per text part that is exactly such a label, as display
 + * placeholders are), then the text.
 + */
 +export function userDisplayText(parts: readonly UIMessage['parts'][number][]): string {
 +  const labels: string[] = [];
 +  let text = '';
 +  for (const part of parts) {
-+    if (part.type === 'file') labels.push(attachmentLabel(part.mediaType));
++    if (part.type === 'file') labels.push(attachmentLabel(part.mediaType, part.filename));
 +    else if (part.type === 'text') {
-+      if (/^\[(Image|File)\]$/.test(part.text.trim())) labels.push(part.text.trim());
++      if (/^\[(Image|File)(: [^\]\n]+)?\]$/.test(part.text.trim())) labels.push(part.text.trim());
 +      else text += part.text;
 +    }
 +  }
@@ -907,7 +929,7 @@ index cba32e1..eadc0a8 100644
    | { type: 'backspace' }
    | { type: 'enter' }
    | { type: 'up' }
-@@ -156,8 +190,10 @@ export class TerminalRenderer {
+@@ -156,8 +200,10 @@ export class TerminalRenderer {
    readonly #responseStatistics: ResponseStatisticsMode;
    readonly #defaultContextSize?: number;
  
@@ -918,7 +940,7 @@ index cba32e1..eadc0a8 100644
    #inputActive = false;
    #scrollOffset = 0;
    #title = '';
-@@ -185,41 +221,134 @@ export class TerminalRenderer {
+@@ -185,41 +231,135 @@ export class TerminalRenderer {
        options?.responseStatistics ?? defaultResponseStatistics;
      this.#defaultContextSize = options?.contextSize;
      this.#contextSize = options?.contextSize;
@@ -956,7 +978,7 @@ index cba32e1..eadc0a8 100644
 +        : busy && slow ? 'Input · Reading attachment…'
 +        : notice ? `Input · ${notice}`
 +        : summary ? `Input · ${summary} attached · Backspace removes`
-+        : source.fromClipboard ? 'Input · Ctrl+V attaches an image' : undefined;
++        : source.fromClipboard ? `Input · Ctrl+V attaches an image${source.fromText ? ' · drop a file to attach it' : ''}` : undefined;
 +    };
 +    refreshTitle();
      this.#startInputCursorBlink();
@@ -971,7 +993,8 @@ index cba32e1..eadc0a8 100644
 +        notice = result?.notice;
 +        for (const file of result?.files ?? []) {
 +          const kind = attachmentLabel(file.mediaType) === '[Image]' ? 'Image' as const : 'File' as const;
-+          const marker = `[${kind} ${attached.filter(a => a.kind === kind).length + 1}]`;
++          const name = kind === 'File' && file.filename ? displayFileName(file.filename) : '';
++          const marker = `[${kind} ${attached.filter(a => a.kind === kind).length + 1}${name ? `: ${name}` : ''}]`;
 +          this.#inputText += `${this.#inputText && !/\s$/.test(this.#inputText) ? ' ' : ''}${marker} `;
 +          attached.push({ marker, kind, file });
 +        }
@@ -1037,7 +1060,7 @@ index cba32e1..eadc0a8 100644
 +            // Markers leave the text; the files travel as parts of the message.
 +            let prompt = this.#inputText;
 +            // A marker and the spaces around it collapse to one space ("a [Image 1] b" → "a b").
-+            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${marker.replace(/[[\]]/g, '\\$&')} *`), ' ');
++            for (const { marker } of attached) prompt = prompt.replace(new RegExp(` *${escapeRegExp(marker)} *`), ' ');
 +            if (attached.length) prompt = prompt.trim();
 +            const input: string | TerminalPromptInput = attached.length ? { text: prompt, files: files() } : prompt;
 +            finish();
@@ -1060,7 +1083,7 @@ index cba32e1..eadc0a8 100644
              break;
            }
            case 'up':
-@@ -235,6 +364,7 @@ export class TerminalRenderer {
+@@ -235,6 +375,7 @@ export class TerminalRenderer {
              break;
            case 'escape':
            case 'ctrl-c':
@@ -1068,7 +1091,7 @@ index cba32e1..eadc0a8 100644
              this.#stopInputCursorBlink();
              this.#stop();
              reject(interruptedError());
-@@ -243,6 +373,7 @@ export class TerminalRenderer {
+@@ -243,6 +384,7 @@ export class TerminalRenderer {
              break;
          }
        };
@@ -1076,7 +1099,7 @@ index cba32e1..eadc0a8 100644
  
        this.#attachInput();
      });
-@@ -302,6 +433,7 @@ export class TerminalRenderer {
+@@ -302,6 +444,7 @@ export class TerminalRenderer {
          this.#renderAssistantMessage(responseMessage, displayModes);
        }
      } finally {
@@ -1084,7 +1107,7 @@ index cba32e1..eadc0a8 100644
        this.#resolveStreamInterrupt = undefined;
        if (this.#interrupted) {
          result.abort?.();
-@@ -327,6 +459,81 @@ export class TerminalRenderer {
+@@ -327,6 +470,81 @@ export class TerminalRenderer {
      return responseMessage;
    }
  
@@ -1166,7 +1189,7 @@ index cba32e1..eadc0a8 100644
    async readToolApproval(
      request: AgentTUIToolApprovalRequest,
      options?: TerminalSessionOptions,
-@@ -442,6 +649,7 @@ export class TerminalRenderer {
+@@ -442,6 +660,7 @@ export class TerminalRenderer {
    }
  
    #handleStreamingKey(chunk: Buffer) {
@@ -1174,7 +1197,7 @@ index cba32e1..eadc0a8 100644
      const key = parseKey(chunk);
  
      switch (key.type) {
-@@ -711,16 +919,18 @@ export class TerminalRenderer {
+@@ -711,16 +930,18 @@ export class TerminalRenderer {
    }
  
    #paint() {
@@ -1197,7 +1220,7 @@ index cba32e1..eadc0a8 100644
      });
  
      this.#frameBuffer.present(frame);
-@@ -1396,6 +1606,8 @@ export function parseKey(chunk: Buffer): TerminalKey {
+@@ -1396,6 +1617,8 @@ export function parseKey(chunk: Buffer): TerminalKey {
        return { type: 'ctrl-l' };
      case '\u0003':
        return { type: 'ctrl-c' };

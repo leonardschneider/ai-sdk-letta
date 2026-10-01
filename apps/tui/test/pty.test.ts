@@ -33,3 +33,7 @@ test('patched real TUI handles active-turn approvals and questions without repla
 test('patched real TUI attaches images via Ctrl+V and dropped paths, removes markers, sends only the new turn', { timeout: 40_000, skip }, async () => {
   assert.match((await run('images_pty.py', 35_000)).stdout, /PASS actual PTY images/);
 });
+
+test('patched real TUI attaches dropped PDF and CSV paths as [File N: name], removes markers, sends only the note', { timeout: 40_000, skip }, async () => {
+  assert.match((await run('files_pty.py', 35_000)).stdout, /PASS actual PTY files/);
+});

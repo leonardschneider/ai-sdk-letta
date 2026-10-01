@@ -1,11 +1,32 @@
 import { runAgentTUI } from '@ai-sdk/tui';
 import type { ToolSet } from 'ai';
-import { openLettaAgent, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import { filesEnabled, openLettaAgent, parseAttachmentNote, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import type { UIMessage } from 'ai';
 import { localCommandMatches, navigate, NavigationScreen } from './navigation.js';
 import { parseTerminalArgs, pickConversation, printConversations, type TerminalArgs } from './cli.js';
 import { terminalAttachments } from './attachments.js';
 
 const HELP_LINE = 'PgUp/PgDn scroll history · Esc exits · Ctrl+V or drop a file to attach an image · /resume · /search [text] · /help';
+const HELP_LINE_FILES = 'PgUp/PgDn scroll history · Esc exits · drop a file (PDF, text, CSV, code, image) or Ctrl+V an image to attach it · /resume · /search [text] · /help';
+
+/**
+ * Restored user messages end with the "Attached: name (...)" note the agent
+ * received; show it as `[File: name]` labels instead (images already show as `[Image]`).
+ */
+export function withFileLabels(messages: UIMessage[]): UIMessage[] {
+  return messages.map(message => {
+    if (message.role !== 'user') return message;
+    const parts = message.parts.flatMap((part): UIMessage['parts'] => {
+      if (part.type !== 'text') return [part];
+      const { text, files } = parseAttachmentNote(part.text);
+      if (!files.length) return [part];
+      const images = message.parts.filter(p => p.type === 'file' && /^image\//.test(p.mediaType)).length;
+      const labels = files.filter(file => !(images && / image$/.test(file.label))).map(file => ({ type: 'text' as const, text: `[File: ${file.name}]` }));
+      return [...labels, ...(text.trim() ? [{ type: 'text' as const, text }] : [])];
+    });
+    return { ...message, parts };
+  });
+}
 
 /**
  * Run the interactive terminal UI for an agent definition until the user exits.
@@ -38,9 +59,10 @@ export async function runTerminal<TOOLS extends ToolSet>(definition: AgentDefini
       const { agent, navigation } = runtime;
       const presentation = agent.presentation!;
       let next: string | undefined;
-      const initialMessages = [...presentation.initialMessages, { id: 'session-status', role: 'assistant' as const, parts: [{ type: 'text' as const, text: `${presentation.status}\n${HELP_LINE}` }] }];
+      const files = filesEnabled(definition);
+      const initialMessages = [...withFileLabels(presentation.initialMessages), { id: 'session-status', role: 'assistant' as const, parts: [{ type: 'text' as const, text: `${presentation.status}\n${files ? HELP_LINE_FILES : HELP_LINE}` }] }];
       await runAgentTUI({ agent, title: `${definition.name} · ${presentation.title}`, tools: 'full', reasoning: 'hidden', initialMessages, interaction: agent.interactions,
-        attachments: terminalAttachments(),
+        attachments: terminalAttachments({ files }),
         localCommand: { matches: localCommandMatches, run: async text => {
           next = await navigate(text, navigation);
           return next ? 'exit' : undefined;

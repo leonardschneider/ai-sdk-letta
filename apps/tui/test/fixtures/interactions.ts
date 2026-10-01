@@ -26,7 +26,7 @@ const agent = new LettaAgent({ id: 'interaction-fixture', tools: registry, inter
         for (const call of calls) yield { type: 'tool_call', toolCallId: call.id, toolName: 'approval_demo', toolInput: call.args, uuid: call.id } as SDKMessage;
         const outputs = await Promise.all(calls.map(call => bridge.execute('approval_demo', call.id, call.args, signal)));
         for (const [index, output] of outputs.entries()) {
-          results.push(JSON.parse(output.content[0].text));
+          results.push(JSON.parse(output.content[0].text!));
           yield { type: 'tool_result', toolCallId: calls[index].id, content: output.content[0].text, isError: output.isError, uuid: `return-${index}` } as SDKMessage;
         }
         yield { type: 'assistant', content: `TURNDONE${sent.length}`, uuid: 'parallel-done' } as SDKMessage;
@@ -37,7 +37,7 @@ const agent = new LettaAgent({ id: 'interaction-fixture', tools: registry, inter
         const id = `call-${sent.length}`;
         yield { type: 'tool_call', toolCallId: id, toolName: name, toolInput: args, uuid: `tool-${id}` } as SDKMessage;
         const result = await bridge.execute(name, id, args, signal);
-        results.push(JSON.parse(result.content[0].text));
+        results.push(JSON.parse(result.content[0].text!));
         yield { type: 'tool_result', toolCallId: id, content: result.content[0].text, isError: result.isError, uuid: `result-${id}` } as SDKMessage;
         yield { type: 'assistant', content: `TURNDONE${sent.length}`, uuid: `text-${id}` } as SDKMessage;
       }
