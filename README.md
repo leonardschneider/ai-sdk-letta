@@ -229,6 +229,63 @@ await support.generate({ messages: [...support.transcript, { role: 'user', conte
   shows `[Image]`. The HTTP runtime's own state files record only each
   image's type, size and hash.
 
+### Files
+
+Add the built-in file tools to a definition to let users attach files:
+
+```ts
+import { defineAgent, fileTools, FILE_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...fileTools, lookup_order },                         // list_files, read_file, search_files
+  permissions: { ...FILE_TOOL_PERMISSIONS, lookup_order: 'ask' }, // 'allow' by default; 'ask' or 'deny' work too
+});
+```
+
+They are opt-in, like every tool: a definition without them (or with
+`read_file: 'deny'`) accepts images only, exactly as before. The example
+agent includes them.
+
+- **How it works.** Attached files are stored in a folder that belongs to
+  the conversation. The user's message carries only a short note per file,
+  such as `Attached: report.pdf (PDF, 12 pages, 2.1 MB)`, never the content.
+  The agent then reads what it needs: `list_files` (name, type, size, page
+  or line count), `read_file(name, range)` (PDF pages such as `"3"` or
+  `"2-4"`, or text lines; about 12,000 characters per call, and the result
+  says when it is truncated and which range to read next) and
+  `search_files(query)` (passages with file name and page or line).
+- **One folder per conversation.** The runtime binds the tools to the
+  conversation it opened; nothing the model sends can point them elsewhere.
+  Names resolve only inside that folder (no paths, no hidden files,
+  symlinks or hard links are never followed, and the folder's real path is
+  checked). A second conversation cannot see the first one's files.
+- **Types, detected by content:** plain text, Markdown, CSV, JSON, code and
+  other UTF-8 text (binary content is refused whatever its name), PDF, and
+  the image types above. Office documents are refused with a hint to export
+  a PDF. Errors are `FileInputError`s with a fixed `code`:
+  `file_unsupported_type`, `file_invalid`, `file_too_large`,
+  `files_too_many`, `conversation_files_full`, `file_not_found`,
+  `file_name_invalid`, `file_range_invalid`.
+- **PDFs** are read with [unpdf](https://github.com/unjs/unpdf) (Mozilla's
+  PDF.js, pure JavaScript, no native modules) in a worker thread with a
+  memory cap and a deadline. Scripts in PDFs are never run. Text is
+  extracted once, when the file is attached. **Scanned pages** (no text
+  layer): `read_file` returns the page's own image to the model (decoded by
+  PDF.js and encoded as PNG, up to 1600 px), so the model can read it. A
+  page without text or a large image (a vector drawing) is reported as
+  having no extractable text. Password-protected PDFs are refused.
+- **Images** are still sent inline, as before, and are also saved to the
+  folder, so `list_files` shows them and `read_file` can show one again.
+- **Limits** (`FILE_LIMITS`): 25 MB per file, 8 files per message (images
+  keep their own limits), 100 files and 250 MB per conversation, the first
+  2,000 pages of a PDF.
+- **No replay.** The note is ordinary text in Letta history. In the
+  transcript, files are kept as SHA-256 references, like images; history
+  that changes a file is refused as an edit.
+- **From code**, pass AI SDK `file` parts in the new user turn
+  (`{ type: 'file', mediaType, filename, data }`, with bytes, base64 or a
+  `data:` URL; remote URLs are never fetched).
+
 What a definition controls, and when:
 
 | Field | Applied |
@@ -256,7 +313,10 @@ Approvals and questions appear as prompts during the turn that needs them.
 an image file into the terminal (or paste its path; shell-escaped, quoted
 and `file://` paths all work). Each attachment shows as `[Image 1]`,
 `[Image 2]`, ... in the prompt; Backspace right after a marker removes it.
-Sent and restored messages show `[Image]`. Clipboard access uses `osascript`
+Sent and restored messages show `[Image]`. With the file tools, dropping or
+pasting the path of a PDF, text, Markdown, CSV, JSON or code file attaches
+it as `[File 1: report.pdf]`; Backspace right after the marker removes it,
+and sent and restored messages show `[File: report.pdf]`. Clipboard access uses `osascript`
 on macOS (screenshots, copied images, or image files copied in Finder) and
 `wl-paste` or `xclip` on Linux when installed; without them, Ctrl+V shows a
 short notice and dropping a file still works. The terminal does not resize
@@ -292,7 +352,15 @@ larger than 2048 px are downscaled in the browser (and re-encoded if still
 over 5 MB). Sent images appear in your message, also after a reload, and
 open larger on click. Pasting text still pastes text, including rich text
 copied with a snapshot image (as Office apps do). Unsupported, oversized or
-too many images show a notice and are not attached. Use it from code with `startGuiServer(definition, assetsDir, options)`
+too many images show a notice and are not attached.
+
+**Files.** With the file tools, the same paperclip, drop and paste attach
+PDFs and text files (Markdown, CSV, JSON, code). Each is uploaded and
+checked by the server right away and appears as a chip with its name, type
+and size, removable before sending; refused files show a notice. In your
+message, file chips download the file on click, also after a reload. The
+agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
+"Searched files for “budget”"), collapsed like other tools. Use it from code with `startGuiServer(definition, assetsDir, options)`
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
 
@@ -324,8 +392,15 @@ token-authenticated server-to-server API with the same routes.
   applies (images: same origin, `data:` and `blob:` only, never remote),
   Markdown skips raw HTML and never loads remote images, and technical
   details stay collapsed by default. Only `POST /v1/runs` accepts a larger
-  body (about 13.4 MB, for images); every other route keeps a 24 KB limit.
-  Images are validated again on the server (type by content, size, count).
+  body (about 13.4 MB, for images) and only `POST /v1/uploads` accepts raw
+  file bytes (`application/octet-stream`, up to 25 MB, CSRF-protected like
+  every mutation); every other route keeps a 24 KB limit. Images and files
+  are validated again on the server (type by content, size, count). File
+  downloads are same-origin, need the session, and are always sent as
+  attachments (`Content-Disposition: attachment`, text as `text/plain`,
+  `nosniff`, a sandboxing CSP), so a file never runs as part of the app.
+- **Files are confined** to their conversation's folder (see
+  [Files](#files)); the file tools only read.
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
 - **Audit.** Tool activity is logged as metadata only (tool, status, duration,
@@ -349,7 +424,20 @@ State lives in one directory, resolved in this order:
     <id>.<conv>.turn.pending.json   a turn whose delivery is unconfirmed
   tool-traces/             metadata-only tool audit (NDJSON, per day)
   server/<id>/gui|api/     thread and run records for the HTTP runtime
+    uploads/.staging/      browser uploads not yet sent (removed after 24 hours)
+  attachments/<letta agent ID>/<conversation ID>/
+                           attached files (0600, folders 0700), plus .meta/ and .text/ sidecars
 ```
+
+**Attached files** stay in their conversation's folder, including after the
+conversation is archived; they are never sent anywhere except to the model
+through the file tools. To find a conversation's folder, list its files in
+the GUI (`GET /api/v1/threads/<id>/files`) or look under
+`<state>/attachments/` for the Letta agent ID (`agents/<id>.json`) and the
+conversation ID. To delete files, stop the app and remove the folder (or
+single files and their `.meta/<name>.json`); the agent then no longer sees
+them, while history still shows the note. Deleting from the app is not
+available yet.
 
 **Keeping an existing agent.** The mapping is what ties a logical ID to a
 Letta agent. To reuse an agent you already created with an earlier tool or
@@ -385,9 +473,12 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   (the provider package does support them).
 - **One process per agent.** The identity lock allows one open runtime per
   logical ID. The HTTP runtime runs one turn at a time.
-- **Text and images only.** Up to 8,000 characters and 4 images (PNG, JPEG,
-  GIF, WebP; 5 MB each, 10 MB total) per turn; no other file types. No
-  history edits, regeneration or retries by design.
+- **Text, images and files.** Up to 8,000 characters, 4 images (PNG, JPEG,
+  GIF, WebP; 5 MB each, 10 MB total) and, with the file tools, 8 files
+  (PDF or text, 25 MB each) per turn. No Office documents, no OCR (scanned
+  PDF pages are shown to the model as images, so reading them depends on
+  the model), and no file deletion from the app yet. No history edits,
+  regeneration or retries by design.
 - **Images in restored history** are shown when Letta returns them: the
   browser displays the newest 48 MB per conversation and `[Image]` for the
   rest; the terminal always shows `[Image]`. A reply that is still running
@@ -395,8 +486,8 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default).
-- **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22 and
-  `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
+- **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22,
+  `unpdf` at 1.8.1 and `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
   this repository tests 7.0.118). Some workarounds depend on SDK behaviour at
   these versions (for example, history for the default conversation is read
   through a protocol command).

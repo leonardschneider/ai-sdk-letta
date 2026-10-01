@@ -1,8 +1,10 @@
 import { generateText, streamText, stepCountIs, type Agent, type AgentCallParameters, type AgentStreamParameters, type ModelMessage, type ToolSet, type UIMessage } from 'ai';
 import type { JSONValue, LanguageModelV4, LanguageModelV4StreamPart, LanguageModelV4Usage } from '@ai-sdk/provider';
 import type { LettaCodeSession, MessageContentItem, SendMessage } from '@letta-ai/letta-agent-sdk';
+import { createHash } from 'node:crypto';
 import { ToolInteractions } from './interactions.js';
-import { assertImageBudget, compactImagePart, decodeImagePart, imagePartDigest, ImageInputError, isImagePart, toLettaImage, type DecodedImage } from './images.js';
+import { assertImageBudget, compactImagePart, decodeImagePart, IMAGE_REFERENCE_PROVIDER, imagePartDigest, ImageInputError, isImagePart, toLettaImage, type DecodedImage } from './images.js';
+import { attachmentNote, decodeFilePart, FileInputError, type AttachmentStore, type StoredFile } from './attachments.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -41,6 +43,13 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   presentation?: AgentPresentation;
   delivery?: DeliveryHooks;
   interactions?: ToolInteractions;
+  /**
+   * The conversation's attachment folder. With it, a user turn may carry
+   * files (`file` parts): they are stored there and the turn carries a short
+   * "Attached: ..." note instead of their content; images are stored too and
+   * still sent inline. Without it, only images are accepted.
+   */
+  attachments?: AttachmentStore;
 }
 
 type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS>;
@@ -66,6 +75,8 @@ export function historyKey(messages: ModelMessage[]): string {
       } else if (message.role === 'user' && isImagePart(part)) {
         // A boundary like text: an image between two texts is not the same turn as the joined text.
         parts.push({ role: message.role, text: null, image: imagePartDigest(part) });
+      } else if (message.role === 'user' && part.type === 'file') {
+        parts.push({ role: message.role, text: null, file: filePartDigest(part), name: part.filename ?? null });
       } else if (part.type === 'tool-call' && message.role === 'assistant') {
         parts.push({ call: part.toolCallId, name: part.toolName, input: part.input });
       } else if (part.type === 'tool-result' && (message.role === 'assistant' || message.role === 'tool')) {
@@ -77,7 +88,7 @@ export function historyKey(messages: ModelMessage[]): string {
           try { output = { ...output, value: JSON.parse(output.value) }; } catch { /* plain error text */ }
         }
         parts.push({ result: part.toolCallId, name: part.toolName, output });
-      } else throw new Error('Only text, user image and completed application tool history are supported');
+      } else throw new Error('Only text, user image and file, and completed application tool history are supported');
     }
   }
   // Parallel calls arrive call/call/result/result, while UI cards convert as
@@ -100,10 +111,27 @@ export function historyKey(messages: ModelMessage[]): string {
   return JSON.stringify(canonical);
 }
 
-/** Replace user image data with content-hash references so the retained transcript never duplicates image bytes. */
+type FilePartLike = { type: 'file'; data?: unknown; filename?: string; mediaType?: unknown };
+/** The content-hash reference in a file part, if it is one. */
+function fileReference(part: FilePartLike): string | undefined {
+  const data = part.data as { type?: unknown; reference?: Record<string, unknown> } | undefined;
+  const reference = data && typeof data === 'object' && data.type === 'reference' ? data.reference?.[IMAGE_REFERENCE_PROVIDER] : undefined;
+  return typeof reference === 'string' && /^[a-f0-9]{64}$/.test(reference) ? reference : undefined;
+}
+/** SHA-256 of a non-image file part's bytes (or its stored reference). */
+function filePartDigest(part: FilePartLike): string {
+  return fileReference(part) ?? createHash('sha256').update(decodeFilePart(part, Number.MAX_SAFE_INTEGER).bytes).digest('hex');
+}
+/** A file part as a content-hash reference (name and type kept), so transcripts never hold file bytes. */
+function compactFilePart(part: FilePartLike) {
+  return { type: 'file' as const, mediaType: typeof part.mediaType === 'string' ? part.mediaType : 'application/octet-stream', ...(part.filename ? { filename: part.filename } : {}),
+    data: { type: 'reference' as const, reference: { [IMAGE_REFERENCE_PROVIDER]: filePartDigest(part) } } };
+}
+
+/** Replace user image and file data with content-hash references so the retained transcript never duplicates their bytes. */
 function compactTranscript(messages: ModelMessage[]): ModelMessage[] {
   return messages.map(message => message.role === 'user' && typeof message.content !== 'string'
-    ? { ...message, content: message.content.map(part => isImagePart(part) ? compactImagePart(part) : part) }
+    ? { ...message, content: message.content.map(part => isImagePart(part) ? compactImagePart(part) : part.type === 'file' ? compactFilePart(part) : part) }
     : message);
 }
 
@@ -114,10 +142,37 @@ function compactTranscript(messages: ModelMessage[]): ModelMessage[] {
  * @throws {ImageInputError} for unsupported, invalid or oversized images
  */
 export function userTurnContent(content: ModelMessage['content']): { message: SendMessage; text: string; images: DecodedImage[] } {
+  const turn = parseUserTurn(content);
+  // Whitespace-only text next to images carries nothing; keep text-only turns byte-identical to before.
+  return { message: turn.images.length ? turn.items : turn.text, text: turn.text, images: turn.images };
+}
+
+const IMAGE_EXTENSION: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+
+/** A parsed user turn whose attachments are not stored yet. See {@link parseUserTurn}. */
+export interface ParsedTurn {
+  text: string;
+  images: DecodedImage[];
+  /** Text and inline images, in order (whitespace-only text dropped when there are images). */
+  items: MessageContentItem[];
+  /** Attachments to store, in order: new bytes, or a reference to a stored file by SHA-256 and name. */
+  attachments: { name: string; bytes?: Uint8Array; reference?: string }[];
+}
+
+/**
+ * Validate a new user turn without storing anything: text length, images
+ * (type by content, size, count) and, with `limits`, attached files (count,
+ * size; remote URLs are refused). Without `limits` (an agent without file
+ * tools), non-image files are refused with `image_unsupported_type`, as before.
+ * @throws {ImageInputError | FileInputError}
+ */
+export function parseUserTurn(content: ModelMessage['content'], limits?: AttachmentStore['limits']): ParsedTurn {
   const parts = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content;
   if (!Array.isArray(parts)) throw new Error('Expected a new user turn');
   const items: MessageContentItem[] = [];
   const images: DecodedImage[] = [];
+  const attachments: ParsedTurn['attachments'] = [];
+  let files = 0;
   for (const part of parts) {
     if (part.type === 'text') {
       const last = items.at(-1);
@@ -128,16 +183,50 @@ export function userTurnContent(content: ModelMessage['content']): { message: Se
       images.push(image);
       assertImageBudget(images);
       items.push(toLettaImage(image));
+      if (limits) {
+        const filename = part.type === 'file' && typeof part.filename === 'string' && part.filename.trim() ? part.filename : `image.${IMAGE_EXTENSION[image.mediaType]}`;
+        attachments.push({ name: filename, bytes: Buffer.from(image.base64, 'base64') });
+      }
     } else if (part.type === 'file') {
-      throw new ImageInputError('image_unsupported_type', `Unsupported attachment type ${String(part.mediaType) || 'unknown'}; only PNG, JPEG, GIF and WebP images are supported`);
-    } else throw new Error('Only text and image input is supported');
+      // Without file tools nothing could read the file: refuse it exactly as before files existed.
+      if (!limits) throw new ImageInputError('image_unsupported_type', `Unsupported attachment type ${String(part.mediaType) || 'unknown'}; only PNG, JPEG, GIF and WebP images are supported`);
+      if (++files > limits.maxFilesPerMessage) throw new FileInputError('files_too_many', `Attach up to ${limits.maxFilesPerMessage} files per message`);
+      const reference = fileReference(part);
+      attachments.push(reference ? { name: part.filename ?? '', reference } : decodeFilePart(part, limits.maxFileBytes));
+    } else throw new Error(limits ? 'Only text, image and file input is supported' : 'Only text and image input is supported');
   }
   const text = items.map(item => item.type === 'text' ? item.text : '').join('');
   if (text.length > MAX_INPUT_CHARACTERS) throw new Error(`Input text can be up to ${MAX_INPUT_CHARACTERS} characters`);
-  if (!text.trim() && !images.length) throw new Error('Input must contain text or an image');
-  // Whitespace-only text next to images carries nothing; keep text-only turns byte-identical to before.
-  const message: SendMessage = images.length ? items.filter(item => item.type !== 'text' || item.text.trim()) : text;
-  return { message, text, images };
+  if (!text.trim() && !images.length && !attachments.length) throw new Error(limits ? 'Input must contain text, an image or a file' : 'Input must contain text or an image');
+  return { text, images, items: images.length ? items.filter(item => item.type !== 'text' || item.text.trim()) : items, attachments };
+}
+
+/**
+ * Store a parsed turn's attachments in the conversation's folder and build
+ * the single Letta message: the user's text and inline images, followed by
+ * a short note per attachment such as "Attached: report.pdf (PDF, 12 pages,
+ * 2.1 MB)". File content is never inlined; the model reads it with the file
+ * tools. Without `store` (or attachments), the message is exactly what
+ * {@link userTurnContent} builds.
+ * @throws {FileInputError}
+ */
+export async function storeUserTurn(turn: ParsedTurn, store?: AttachmentStore, signal?: AbortSignal): Promise<{ message: SendMessage; files: StoredFile[] }> {
+  if (!store || !turn.attachments.length) return { message: turn.images.length ? turn.items : turn.text, files: [] };
+  const existing = turn.attachments.some(a => a.reference) ? store.list() : [];
+  const files: (StoredFile | undefined)[] = turn.attachments.map(a => {
+    if (!a.reference) return undefined;
+    const file = existing.find(f => f.sha256 === a.reference && f.name === a.name);
+    if (!file) throw new FileInputError('file_not_found', `${a.name || 'A referenced file'} is not stored in this conversation`);
+    return file;
+  });
+  const fresh = turn.attachments.flatMap((a, i) => a.reference ? [] : [{ i, name: a.name, bytes: a.bytes! }]);
+  const stored = fresh.length ? await store.save(fresh, { signal }) : [];
+  fresh.forEach(({ i }, n) => { files[i] = stored[n]; });
+  const note = attachmentNote(files as StoredFile[]);
+  const message: SendMessage = turn.images.length
+    ? [...turn.items, { type: 'text', text: `${turn.items.some(item => item.type === 'text') ? '\n\n' : ''}${note}` }]
+    : `${turn.text.trimEnd()}${turn.text.trim() ? '\n\n' : ''}${note}`;
+  return { message, files: files as StoredFile[] };
 }
 
 /**
@@ -161,6 +250,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   readonly presentation?: AgentPresentation;
   /** Broker for approvals and `ask_user` questions; connect a renderer to it. */
   readonly interactions: ToolInteractions;
+  /** This conversation's attachment folder, when the agent accepts files. */
+  readonly attachments?: AttachmentStore;
   private readonly open: (signal: AbortSignal) => TurnSession;
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
@@ -180,6 +271,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.delivery = options.delivery;
     this.interactions = options.interactions ?? new ToolInteractions();
     this.modelId = options.modelId ?? 'letta';
+    this.attachments = options.attachments;
   }
 
   /**
@@ -192,7 +284,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Abort any running turn, cancel pending prompts, and refuse further turns. */
   close(): void { this.unusable = true; this.active?.abort(); this.interactions.close(); }
 
-  private prepare(options: Call<TOOLS>) {
+  private async prepare(options: Call<TOOLS>) {
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
@@ -203,17 +295,21 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (!Array.isArray(messages) || !messages.length) throw new Error('Expected a new user turn');
     const last = messages.at(-1)!;
     if (last.role !== 'user') throw new Error('History edits, replay, and regeneration are not supported');
-    // Validate the new turn first, so an oversized or unsupported image is reported as such.
-    const turn = userTurnContent(last.content);
+    // Validate the new turn first, so an oversized or unsupported image or file is reported as such.
+    const parsed = parseUserTurn(last.content, this.attachments?.limits);
     if (historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
     options.abortSignal?.throwIfAborted();
     this.busy = true;
+    // Attachments are stored before delivery; a turn that then fails leaves them in the folder (harmless, and listed).
+    let turn: Awaited<ReturnType<typeof storeUserTurn>>;
+    try { turn = await storeUserTurn(parsed, this.attachments, options.abortSignal); options.abortSignal?.throwIfAborted(); }
+    catch (error) { this.busy = false; throw error; }
     const control = new AbortController();
     this.active = control;
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;
     // The retained transcript keeps images as hashes only; Letta already holds the bytes.
     // (Compact before cloning: URL objects in image parts are not cloneable.)
-    return { messages: structuredClone(compactTranscript(messages)), message: turn.message, prompt: turn.text.trim() ? turn.text : '[Image]', signal };
+    return { messages: structuredClone(compactTranscript(messages)), message: turn.message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files };
   }
 
   private model(message: SendMessage, signal: AbortSignal): LanguageModelV4 {
@@ -307,7 +403,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
 
   /** Run one turn and wait for the full result. */
   async generate(options: Call<TOOLS>) {
-    const turn = this.prepare(options);
+    const turn = await this.prepare(options);
     try {
       const result = await generateText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
@@ -319,7 +415,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
 
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS>) {
-    const turn = this.prepare(options);
+    const turn = await this.prepare(options);
     return streamText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; },
       onAbort: () => { this.close(); this.busy = false; },

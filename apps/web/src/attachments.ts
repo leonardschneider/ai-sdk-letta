@@ -19,6 +19,43 @@ export const IMAGE_PLACEHOLDER = '[Image]';
 /** A user-facing attachment problem; `message` is shown as a toast. */
 export class AttachmentError extends Error { override readonly name = 'AttachmentError'; }
 
+/** Mirrors `FILE_LIMITS` in ai-sdk-letta (a test keeps them equal). */
+export const FILE_LIMITS = { maxFileBytes: 25 * 1024 * 1024, maxFilesPerMessage: 8, maxConversationFiles: 100, maxConversationBytes: 250 * 1024 * 1024 } as const;
+/** Extensions offered by the file picker for non-image files. The server decides by content. */
+export const FILE_EXTENSIONS = ['.pdf', '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.xml', '.html', '.css', '.log',
+  '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.sh', '.sql', '.r', '.lua', '.ini', '.cfg', '.conf', '.tex', '.diff', '.patch'] as const;
+
+/** "2.1 MB", "340 KB", "512 bytes" (same as the server's note). */
+export function formatBytes(bytes: number): string {
+  const MB = 1024 * 1024;
+  if (bytes >= MB) return `${(bytes / MB).toFixed(1).replace(/\.0$/, '')} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} byte${bytes === 1 ? '' : 's'}`;
+}
+
+/** Metadata the server returns for an uploaded or stored file. */
+export type FileInfo = { id?: string; name: string; kind: 'text' | 'pdf' | 'image'; mediaType: string; label: string; bytes: number; pages?: number; lines?: number };
+/** "PDF · 12 pages · 2.1 MB" */
+export function fileDetail(file: Pick<FileInfo, 'label' | 'bytes' | 'pages' | 'lines'>): string {
+  const count = file.pages !== undefined ? `${file.pages} page${file.pages === 1 ? '' : 's'}` : file.lines !== undefined ? `${file.lines.toLocaleString()} line${file.lines === 1 ? '' : 's'}` : '';
+  return [file.label, count, formatBytes(file.bytes)].filter(Boolean).join(' · ');
+}
+
+/** Toast text for a refused file, by the server's fixed code. */
+export const fileMessages: Record<string, string> = {
+  file_unsupported_type: 'That file type isn’t supported. Attach PDF, text, Markdown, CSV, JSON, code or an image. Office files: export as PDF first.',
+  file_invalid: 'That file couldn’t be read. It may be damaged, password-protected or not what its name says.',
+  file_too_large: `That file is too large. Each file can be up to ${FILE_LIMITS.maxFileBytes / 1024 / 1024} MB.`,
+  payload_too_large: `That file is too large. Each file can be up to ${FILE_LIMITS.maxFileBytes / 1024 / 1024} MB.`,
+  files_too_many: `You can attach up to ${FILE_LIMITS.maxFilesPerMessage} files per message.`,
+  conversation_files_full: 'This conversation has reached its file limit. Start a new chat to attach more.',
+  file_not_found: 'An attached file expired before it was sent. Remove it and attach it again.',
+  file_name_invalid: 'That file name can’t be used. Rename the file and try again.',
+  files_unavailable: 'This agent can’t read files. Only images can be attached.',
+  uploads_busy: 'Still reading other files. Try again in a moment.',
+};
+export const fileMessage = (code: string) => fileMessages[code] ?? 'Couldn’t attach that file. Try again.';
+
 export const messages = {
   unsupported: 'Only PNG, JPEG, GIF and WebP images can be attached.',
   tooMany: `You can attach up to ${IMAGE_LIMITS.maxImages} images per message.`,
@@ -144,6 +181,57 @@ export function attachmentBytes(attachment: Attachment): number {
   const image = attachment.content?.find(part => part.type === 'image');
   const parsed = image?.type === 'image' ? dataUrlToImage(image.image) : undefined;
   return parsed ? base64Bytes(parsed.data) : 0;
+}
+
+/** Upload one file's raw bytes; resolves to the server's metadata, or throws {@link AttachmentError} with toast text. */
+export type Uploader = (file: File, signal?: AbortSignal) => Promise<FileInfo>;
+
+/** Is this a file the browser should treat as an image (thumbnail, downscaling)? Decided by content. */
+export async function isImageFile(file: Blob): Promise<boolean> {
+  return !!sniffImageType(new Uint8Array(await file.slice(0, 16).arrayBuffer()));
+}
+
+/**
+ * Attachment adapter for images and files. Images behave as before
+ * ({@link ImageAttachmentAdapter}). Other files are uploaded as soon as they
+ * are added, so the server validates them (type by content, size, PDF text)
+ * and problems show right away; the composer shows a chip with the name,
+ * type and size. The uploaded file's ID travels with the message.
+ */
+export class FileAttachmentAdapter implements AttachmentAdapter {
+  accept: string;
+  private readonly images: ImageAttachmentAdapter;
+  private reserved = 0;
+  private readonly uploads = new Map<string, FileInfo>();
+  constructor(private readonly current: () => readonly Attachment[], private readonly upload: Uploader | undefined) {
+    this.images = new ImageAttachmentAdapter(() => current().filter(a => a.type === 'image'));
+    this.accept = upload ? [...IMAGE_TYPES, ...FILE_EXTENSIONS, 'application/pdf', 'text/*', 'application/json'].join(',') : this.images.accept;
+  }
+
+  async add({ file }: { file: File }): Promise<PendingAttachment> {
+    if (await isImageFile(file) || !this.upload) return this.images.add({ file });
+    if (file.size > FILE_LIMITS.maxFileBytes) throw new AttachmentError(fileMessages.file_too_large!);
+    if (this.current().filter(a => a.type !== 'image').length + this.reserved >= FILE_LIMITS.maxFilesPerMessage) throw new AttachmentError(fileMessages.files_too_many!);
+    this.reserved++;
+    try {
+      const info = await this.upload(file);
+      const id = crypto.randomUUID();
+      this.uploads.set(id, info);
+      return { id, type: 'document', name: info.name, contentType: info.mediaType, file, status: { type: 'requires-action', reason: 'composer-send' } };
+    } finally { this.reserved--; }
+  }
+
+  /** The upload behind a composer attachment. */
+  uploaded(id: string): FileInfo | undefined { return this.uploads.get(id); }
+
+  async send(attachment: PendingAttachment, options?: { signal?: AbortSignal }): Promise<CompleteAttachment> {
+    if (attachment.type === 'image') return this.images.send(attachment, options);
+    const info = this.uploads.get(attachment.id);
+    if (!info?.id) throw new AttachmentError(fileMessages.file_not_found!);
+    return { ...attachment, status: { type: 'complete' }, content: [{ type: 'data', name: 'upload', data: info }] };
+  }
+
+  async remove(attachment: Attachment): Promise<void> { this.uploads.delete(attachment.id); }
 }
 
 /**

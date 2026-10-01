@@ -1,5 +1,5 @@
 import { tool, jsonSchema } from 'ai';
-import { askUserTool, defineAgent } from 'ai-sdk-letta';
+import { askUserTool, defineAgent, fileTools, FILE_TOOL_PERMISSIONS } from 'ai-sdk-letta';
 
 /**
  * One custom tool: pure, no side effects. It runs in this process when the
@@ -32,9 +32,11 @@ export const agent = defineAgent({
   id: process.env.AGENT_ID ?? 'example-assistant',
   name: process.env.AGENT_NAME ?? 'Example Assistant',
   model: process.env.LETTA_MODEL ?? 'openai-codex/gpt-5.5',
-  instructions: 'You are a helpful, concise assistant. Use text_stats when asked to count text. When a decision needs the user\'s input, you may call ask_user with clear options.',
-  tools: { text_stats: textStats, ask_user: askUserTool },
+  instructions: 'You are a helpful, concise assistant. Use text_stats when asked to count text. When a decision needs the user\'s input, you may call ask_user with clear options. '
+    + 'The user can attach files; a message then ends with lines like "Attached: report.pdf (PDF, 12 pages, 2.1 MB)". Use list_files, search_files and read_file to work with them, reading only the pages or lines you need, and cite the page or line you used.',
+  // fileTools adds list_files, read_file and search_files, restricted to the current conversation's attachments.
+  tools: { text_stats: textStats, ask_user: askUserTool, ...fileTools },
   // Fail-closed: every tool is listed. Try 'ask' to require approval per call.
-  permissions: { text_stats: process.env.TEXT_STATS_PERMISSION === 'ask' ? 'ask' : 'allow', ask_user: 'allow' },
+  permissions: { text_stats: process.env.TEXT_STATS_PERMISSION === 'ask' ? 'ask' : 'allow', ask_user: 'allow', ...FILE_TOOL_PERMISSIONS },
   dreaming: { trigger: 'step-count', stepCount: 25 },
 });

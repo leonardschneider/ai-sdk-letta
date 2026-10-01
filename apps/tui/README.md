@@ -11,8 +11,11 @@ process.exitCode = await runTerminal(definition, process.argv.slice(2));
 Options: `--list`, `--resume`, `--new [title]`, `--conversation ID`,
 `--state-dir PATH`. In the UI: `/resume`, `/search`, `/help`, PgUp/PgDn, Esc,
 and **Ctrl+V** or a dropped image path to attach images (shown as
-`[Image 1]`; Backspace removes). Clipboard images need `osascript` (macOS)
-or `wl-paste`/`xclip` (Linux); dropping a file works everywhere.
+`[Image 1]`; Backspace removes). With the file tools, a dropped or pasted
+PDF, text, Markdown, CSV, JSON or code file path attaches it as
+`[File 1: report.pdf]`; sent and restored messages show `[File: report.pdf]`.
+Clipboard images need `osascript` (macOS) or `wl-paste`/`xclip` (Linux);
+dropping a file works everywhere.
 
 **Not on npm yet.** This package is `"private": true`. Its `@ai-sdk/tui`
 dependency is patched by the repository's `postinstall` (below), and a patch
@@ -27,7 +30,12 @@ install by `patch-package` ([patches/](patches)): display-only restored
 history (`initialMessages`), idle-only local slash commands (`localCommand`),
 an interaction renderer for approvals and questions (`interaction`), and
 generic prompt attachments (`attachments`: `fromClipboard` for Ctrl+V and
-`fromText` for pasted or dropped text; files are sent as `file` parts). These
+`fromText` for pasted or dropped text; files are sent as `file` parts and
+named in their markers). To change the patch, edit
+`node_modules/@ai-sdk/tui/src`, rebuild `dist/index.js` with
+`npx esbuild node_modules/@ai-sdk/tui/src/index.ts --bundle --platform=node --format=esm --external:ai --outfile=node_modules/@ai-sdk/tui/dist/index.js`
+(it reproduces the patched `dist` exactly), mirror any type changes in
+`dist/index.d.ts`, then run `npx patch-package @ai-sdk/tui --patch-dir apps/tui/patches`. These
 changes are being upstreamed through a fork of `vercel/ai`. The PTY tests in
 `test/` exercise the patched renderer offline.
 

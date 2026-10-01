@@ -1,7 +1,10 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
-import { IMAGE_PLACEHOLDER, ImageInputError, MAX_INPUT_CHARACTERS, validateImages, validateResponse, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent } from 'ai-sdk-letta';
+import {
+  AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, UploadStaging, attachmentNote, validateImages, validateResponse,
+  type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type StagedFile, type StoredFile,
+} from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
 export type RuntimeEvent = { sequence: number; type: string; data: Record<string, unknown> };
@@ -10,9 +13,15 @@ type Thread = { id: string; owner: string; conversationId?: string; agentId?: st
 /** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
 export type RunImage = { mediaType: string; bytes: number; sha256: string };
 /** A single user turn and the events observed while it ran. */
-export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; parentRunId: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string };
-/** Input of `POST /v1/runs`. `images` carry base64 data (no data: prefix) and are validated against `IMAGE_LIMITS`. */
-export type RunInput = { id: string; threadId: string; text: string; parentRunId: string | null; images?: { mediaType: string; data: string }[] };
+export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; files?: RunFile[]; uploads?: string[]; parentRunId: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string };
+/** Metadata of a file sent with a run (as stored in the conversation's folder). */
+export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
+/**
+ * Input of `POST /v1/runs`. `images` carry base64 data (no data: prefix) and
+ * are validated against `IMAGE_LIMITS`. `files` are upload IDs returned by
+ * `POST /v1/uploads` (at most `FILE_LIMITS.maxFilesPerMessage`).
+ */
+export type RunInput = { id: string; threadId: string; text: string; parentRunId: string | null; images?: { mediaType: string; data: string; name?: string }[]; files?: string[] };
 type State = { version: 1; threads: Thread[]; runs: Run[] };
 /** An opened agent conversation as seen by the runtime. */
 export interface RuntimeSession {
@@ -20,12 +29,18 @@ export interface RuntimeSession {
   conversationId: string;
   history: UIMessage[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'>;
+  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'> & { attachments?: AttachmentStore };
 }
 /** Opens and closes the single agent session the runtime drives. */
 export interface RuntimeHost {
   open(options: { conversationId: string } | { newTitle: string }): Promise<RuntimeSession>;
   close(): Promise<void>;
+  /**
+   * Root of the per-conversation attachment folders, when the agent accepts
+   * files (its definition includes the file tools). Without it, uploads and
+   * file lists are refused with `files_unavailable`.
+   */
+  attachmentsRoot?: string;
 }
 /** A client-visible failure with a fixed code and HTTP status. */
 export class RuntimeFault extends Error {
@@ -34,6 +49,13 @@ export class RuntimeFault extends Error {
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 /** Only app-defined, fixed failure codes (e.g. user_denied) are surfaced; never free-form error text. */
 const failureReasons = new Set(['user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
+/** HTTP status for a refused file. */
+const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : code === 'conversation_files_full' || code === 'files_too_many' ? 409 : 400;
+/** A FileInputError as a fixed-code RuntimeFault; anything else unchanged. */
+export const fileFault = (error: unknown) => error instanceof FileInputError ? new RuntimeFault(error.code, fileStatus(error.code)) : error;
+/** Public metadata of a stored file (what list and upload return). */
+export const fileSummary = (file: StoredFile | StagedFile) => ({ ...('id' in file ? { id: file.id } : {}), name: file.name, kind: file.kind, mediaType: file.mediaType, label: file.label, bytes: file.bytes,
+  ...(file.pages !== undefined ? { pages: file.pages } : {}), ...(file.lines !== undefined ? { lines: file.lines } : {}), createdAt: file.createdAt });
 export function toolFailureReason(error: unknown): { reason?: string } {
   let value = error;
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return {}; } }
@@ -65,11 +87,15 @@ export function displayRun(run: Run): UIMessage[] {
   }
   const metadata = run.startedAt ? { metadata: { createdAt: run.startedAt } } : {};
   // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
-  const user: UIMessage['parts'] = [...(run.input.trim() ? [{ type: 'text' as const, text: run.input }] : []), ...(run.images ?? []).map(() => ({ type: 'text' as const, text: IMAGE_PLACEHOLDER }))];
+  // Files are shown by the same "Attached: ..." note the agent received.
+  const note = run.files?.length ? attachmentNote(run.files) : '';
+  const text = note ? `${run.input.trimEnd()}${run.input.trim() ? '\n\n' : ''}${note}` : run.input;
+  const user: UIMessage['parts'] = [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...(run.images ?? []).map(() => ({ type: 'text' as const, text: IMAGE_PLACEHOLDER }))];
   return [{ id: `${run.id}-user`, role: 'user', parts: user, ...metadata }, { id: `${run.id}-assistant`, role: 'assistant', parts }];
 }
 
 const sameImages = (a: RunImage[] = [], b: RunImage[] = []) => a.length === b.length && a.every((image, index) => image.sha256 === b[index]!.sha256);
+const sameUploads = (a: string[] = [], b: string[] = []) => a.length === b.length && a.every((id, index) => id === b[index]);
 
 /**
  * Single-owner, single-turn thread service over one agent.
@@ -86,7 +112,10 @@ export class ThreadRuntime {
   private active?: { run: Run; control: AbortController };
   private pending?: { runId: string; request: InteractionRequest; resolve(value: InteractionResponse): void };
   private listeners = new Map<string, Set<(event: RuntimeEvent) => void>>();
+  /** Validated uploads waiting to be sent, next to this runtime's state (`<dir>/uploads/.staging`). */
+  readonly uploads?: UploadStaging;
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, private readonly deadlineMs = 180_000, private readonly humanWaitMs = 4 * 60_000) {
+    if (host.attachmentsRoot) this.uploads = new UploadStaging(join(dirname(filename), 'uploads'));
     this.state = existsSync(filename) ? JSON.parse(readFileSync(filename, 'utf8')) as State : { version: 1, threads: [], runs: [] };
     if (this.state.version !== 1 || !Array.isArray(this.state.threads) || !Array.isArray(this.state.runs)) throw new Error('Invalid runtime state');
     for (const thread of this.state.threads) thread.archived ??= false;
@@ -196,7 +225,7 @@ export class ThreadRuntime {
     if (this.active?.run.threadId === id && this.current) return {
       messages: this.current.history.filter(m => m.id !== 'session-status'),
       lastRunId: latest?.id ?? null,
-      live: { id: this.active.run.id, input: this.active.run.input, ...(this.active.run.images?.length ? { images: this.active.run.images.length } : {}) },
+      live: { id: this.active.run.id, input: this.active.run.input, ...(this.active.run.images?.length ? { images: this.active.run.images.length } : {}), ...(this.active.run.files?.length ? { files: this.active.run.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
       status: 'running',
     };
     if (latest && !['running', 'completed'].includes(latest.status)) return {
@@ -210,6 +239,38 @@ export class ThreadRuntime {
     run.events.push(event); this.save();
     for (const listener of this.listeners.get(run.id) ?? []) listener(event);
   }
+  /** The thread's attachment folder (no session is opened). */
+  private store(owner: string, id: string) {
+    const thread = this.thread(owner, id);
+    if (!this.host.attachmentsRoot) throw new RuntimeFault('files_unavailable', 404);
+    if (!thread.agentId || !thread.conversationId) throw new RuntimeFault('not_found', 404);
+    return new AttachmentStore(this.host.attachmentsRoot, thread.agentId, thread.conversationId);
+  }
+  /** Files attached to a thread's conversation, oldest first. Archived threads keep their files. */
+  files(owner: string, id: string) {
+    try { return this.store(owner, id).list().map(fileSummary); } catch (error) { throw fileFault(error); }
+  }
+  /** One attached file's metadata and bytes, by its exact stored name. */
+  file(owner: string, id: string, name: string) {
+    try { return this.store(owner, id).read(name); } catch (error) { throw fileFault(error); }
+  }
+  /**
+   * Validate an upload (type by content, size, PDF text) and stage it until a
+   * run sends it. Not tied to a thread yet: a new chat uploads before it exists.
+   */
+  async upload(owner: string, name: unknown, bytes: Uint8Array, signal?: AbortSignal) {
+    this.authorize(owner);
+    if (!this.uploads) throw new RuntimeFault('files_unavailable', 404);
+    if (typeof name !== 'string' || !name.trim() || name.length > 1024) throw new RuntimeFault('file_name_invalid', 400);
+    // Each upload may parse a PDF in a worker; bound how many run at once.
+    if (this.uploading >= ThreadRuntime.MAX_CONCURRENT_UPLOADS) throw new RuntimeFault('uploads_busy', 429);
+    this.uploading++;
+    try { return fileSummary(await this.uploads.stage(name, bytes, { signal })); } catch (error) { throw fileFault(error); }
+    finally { this.uploading--; }
+  }
+  /** Uploads validated at the same time; more are refused with `uploads_busy` (429). */
+  static readonly MAX_CONCURRENT_UPLOADS = 3;
+  private uploading = 0;
   /**
    * Start one turn. Text, images or both; images are validated (type by
    * content, size, count, total) and fail with a fixed `image_*` code.
@@ -217,16 +278,20 @@ export class ThreadRuntime {
    */
   async start(owner: string, input: RunInput) {
     this.authorize(owner);
-    if (!input || typeof input !== 'object' || !uuid.test(input.id) || typeof input.text !== 'string' || input.text.length > MAX_INPUT_CHARACTERS || (input.parentRunId !== null && !uuid.test(input.parentRunId)) || (input.images !== undefined && !Array.isArray(input.images))) throw new RuntimeFault('invalid_input', 400);
+    if (!input || typeof input !== 'object' || !uuid.test(input.id) || typeof input.text !== 'string' || input.text.length > MAX_INPUT_CHARACTERS || (input.parentRunId !== null && !uuid.test(input.parentRunId)) || (input.images !== undefined && !Array.isArray(input.images))
+      || (input.files !== undefined && (!Array.isArray(input.files) || input.files.some(id => typeof id !== 'string' || !uuid.test(id))))) throw new RuntimeFault('invalid_input', 400);
     let images: DecodedImage[] = [];
     try { images = validateImages(input.images ?? []); }
     catch (error) { throw error instanceof ImageInputError ? new RuntimeFault(error.code, error.code === 'image_too_large' || error.code === 'images_too_large' ? 413 : 400) : error; }
-    if (!input.text.trim() && !images.length) throw new RuntimeFault('invalid_input', 400);
+    const uploadIds = input.files ?? [];
+    if (uploadIds.length && !this.uploads) throw new RuntimeFault('files_unavailable', 400);
+    if (uploadIds.length > FILE_LIMITS.maxFilesPerMessage) throw new RuntimeFault('files_too_many', 400);
+    if (!input.text.trim() && !images.length && !uploadIds.length) throw new RuntimeFault('invalid_input', 400);
     const imageMetadata: RunImage[] = images.map(({ mediaType, bytes, sha256 }) => ({ mediaType, bytes, sha256 }));
     const thread = this.thread(owner, input.threadId);
     const previous = this.state.runs.find(r => r.id === input.id);
     if (previous) {
-      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || previous.parentRunId !== input.parentRunId) throw new RuntimeFault('id_conflict');
+      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || !sameUploads(previous.uploads, uploadIds) || previous.parentRunId !== input.parentRunId) throw new RuntimeFault('id_conflict');
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
@@ -234,16 +299,35 @@ export class ThreadRuntime {
     if (input.parentRunId !== (latest?.id ?? null)) throw new RuntimeFault('history_conflict');
     if (latest && latest.status !== 'completed') throw new RuntimeFault('delivery_uncertain');
     if (this.state.runs.length >= 200) throw new RuntimeFault('capacity_reached');
+    // Re-validate staged uploads (exist, unchanged, within the per-message count) before opening anything.
+    let staged: ReturnType<UploadStaging['load']> = [];
+    try { staged = uploadIds.length ? this.uploads!.load(uploadIds) : []; } catch (error) { throw fileFault(error); }
     return this.exclusive(async () => {
       const session = await this.open(thread);
+      // Move the uploads into this conversation's folder (all or none, within its limits) before recording the run.
+      let files: StoredFile[] = [];
+      if (staged.length) {
+        if (!session.agent.attachments) throw new RuntimeFault('files_unavailable', 400);
+        try { files = session.agent.attachments.store(staged.map(upload => upload.prepared)); } catch (error) { throw fileFault(error); }
+        this.uploads!.discard(uploadIds);
+      }
+      const fileMetadata: RunFile[] = files.map(({ name, kind, mediaType, label, bytes, sha256, pages, lines }) => ({ name, kind, mediaType, label, bytes, sha256, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) }));
       const startedAt = new Date().toISOString();
-      const run: Run = { id: input.id, threadId: input.threadId, input: input.text, ...(imageMetadata.length ? { images: imageMetadata } : {}), parentRunId: input.parentRunId, status: 'running', events: [], startedAt };
+      const run: Run = { id: input.id, threadId: input.threadId, input: input.text, ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), parentRunId: input.parentRunId, status: 'running', events: [], startedAt };
       thread.lastActivityAt = startedAt;
       this.state.runs.push(run); this.save();
       const control = new AbortController(); this.active = { run, control };
-      // Exactly the new turn: text (if any) followed by the images, in the order given.
-      const content: UserContent = images.length
-        ? [...(input.text.trim() ? [{ type: 'text' as const, text: input.text }] : []), ...images.map(image => ({ type: 'image' as const, image: image.base64, mediaType: image.mediaType }))]
+      // Exactly the new turn: text (if any), the images, then the stored files by reference, in the order given.
+      const content: UserContent = images.length || files.length
+        ? [...(input.text.trim() ? [{ type: 'text' as const, text: input.text }] : []),
+          // With attachments, images are also saved to the folder under their (sanitized) name.
+          ...images.map((image, index) => {
+            const name = input.images?.[index]?.name;
+            return typeof name === 'string' && name.trim() && name.length <= 1024 && session.agent.attachments
+              ? { type: 'file' as const, data: image.base64, mediaType: image.mediaType, filename: name }
+              : { type: 'image' as const, image: image.base64, mediaType: image.mediaType };
+          }),
+          ...files.map(file => ({ type: 'file' as const, mediaType: file.mediaType, filename: file.name, data: { type: 'reference' as const, reference: { [IMAGE_REFERENCE_PROVIDER]: file.sha256 } } }))]
         : input.text;
       void this.drive(session, run, control, content);
       return { id: run.id, status: run.status };

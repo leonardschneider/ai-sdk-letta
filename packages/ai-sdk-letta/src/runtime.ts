@@ -11,6 +11,8 @@ import { listNavigationEntries, type NavigationSource } from './navigation.js';
 import { ToolInteractions } from './interactions.js';
 import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge } from './tools.js';
 import { resolveStateDirectory, statePaths } from './state.js';
+import { AttachmentStore } from './attachments.js';
+import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
 
 /** Which conversation to open. `null` means "open nothing" (for example, the user quit a picker). */
 export type ConversationChoice = { conversationId: string } | { newTitle: string } | null;
@@ -162,11 +164,16 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     assertNoPendingTurn(conversationId);
     let turnSignal: AbortSignal | undefined;
     const broker = interactions = new ToolInteractions();
+    // Files: one folder per conversation, bound here from the conversation this
+    // runtime opened (never from tool arguments). Tools see only this store.
+    const attachments = filesEnabled(definition) ? new AttachmentStore(paths.attachments, identity.agentId, conversationId) : undefined;
+    const toolContext = Object.freeze(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {});
     const persist = options.traces === false ? undefined : typeof options.traces === 'function' ? options.traces : fileTraceWriter(paths.traces);
     // Background harness work must never open a prompt over an idle chat input.
     const bridge = createToolBridge({
       tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist,
       get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
+      context: () => toolContext,
     });
     let memoryRoot: string | undefined;
     session = client.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
@@ -230,7 +237,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     // Keep one session alive between turns so background dreaming can progress.
     // LettaAgent closes only its per-turn wrapper, not this shared session.
     const agent = new LettaAgent<TOOLS>({
-      id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker,
+      id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
       open: signal => {
         turnSignal = signal;
         return { send: message => live.send(message), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) turnSignal = undefined; } };

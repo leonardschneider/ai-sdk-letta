@@ -1,6 +1,6 @@
 import { tool, jsonSchema, asSchema, type Tool, type ToolSet } from 'ai';
 import { Ajv } from 'ajv';
-import type { AnyAgentTool } from '@letta-ai/letta-agent-sdk';
+import type { AgentToolResultContent, AnyAgentTool } from '@letta-ai/letta-agent-sdk';
 import { appendFileSync, mkdirSync, chmodSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -59,9 +59,51 @@ export interface ToolBridgeOptions {
   persist?: (event: ToolActivity) => void;
   /** Observer for audit events. */
   onTool?: (event: ToolActivity) => void;
+  /**
+   * Context passed to every tool as `options.context`, read at call time.
+   * The runtime uses it to bind the active conversation's attachment folder;
+   * it never comes from the model.
+   */
+  context?: () => Readonly<Record<string, unknown>> | undefined;
 }
 
-type ToolOutput = { content: { type: 'text'; text: string }[]; isError: boolean };
+/** One item of a tool result as sent to Letta (the Agent SDK's `AgentToolResultContent`): text, or a base64 image. */
+type ToolOutput = { content: AgentToolResultContent[]; isError: boolean };
+/** Most characters of text a tool may return. */
+export const TOOL_OUTPUT_LIMIT = 16_000;
+/** Most images (and their combined base64 size) a tool may return. */
+export const TOOL_IMAGE_LIMITS = Object.freeze({ maxImages: 4, maxTotalBase64: 12 * 1024 * 1024 });
+const TOOL_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/**
+ * Letta tool-result content for a tool's output. Tools with `toModelOutput`
+ * decide what the model sees (text, or text and images); others are sent as
+ * JSON. Images must be base64 PNG, JPEG, GIF or WebP.
+ */
+async function modelContent(definition: { toModelOutput?: (options: { toolCallId: string; input: unknown; output: unknown }) => unknown }, id: string, input: unknown, output: unknown): Promise<ToolOutput> {
+  const converted = definition.toModelOutput ? await definition.toModelOutput({ toolCallId: id, input, output }) as { type: string; value: unknown } : undefined;
+  const text = (value: string, isError = false): ToolOutput => {
+    if (typeof value !== 'string' || value.length > TOOL_OUTPUT_LIMIT) throw new Error('tool_output_limit');
+    return { content: [{ type: 'text', text: value }], isError };
+  };
+  if (!converted) return text(JSON.stringify(output));
+  if (converted.type === 'text') return text(converted.value as string);
+  if (converted.type === 'json') return text(JSON.stringify(converted.value));
+  if (converted.type === 'error-text') return text(converted.value as string, true);
+  if (converted.type === 'error-json') return text(JSON.stringify(converted.value), true);
+  if (converted.type !== 'content' || !Array.isArray(converted.value)) throw new Error('tool_output_limit');
+  const content: AgentToolResultContent[] = [];
+  let chars = 0; let images = 0; let base64 = 0;
+  for (const part of converted.value as { type: string; text?: string; mediaType?: string; data?: unknown }[]) {
+    if (part.type === 'text' && typeof part.text === 'string') { chars += part.text.length; content.push({ type: 'text', text: part.text }); continue; }
+    const data = part.type === 'file' && part.data && typeof part.data === 'object' && (part.data as { type?: unknown }).type === 'data' ? (part.data as { data?: unknown }).data : part.type === 'image-data' || part.type === 'file-data' ? part.data : undefined;
+    if (typeof data !== 'string' || !TOOL_IMAGE_TYPES.has(String(part.mediaType)) || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error('tool_output_limit');
+    images++; base64 += data.length;
+    content.push({ type: 'image', data, mimeType: part.mediaType! });
+  }
+  if (chars > TOOL_OUTPUT_LIMIT || images > TOOL_IMAGE_LIMITS.maxImages || base64 > TOOL_IMAGE_LIMITS.maxTotalBase64) throw new Error('tool_output_limit');
+  return { content, isError: false };
+}
 
 /**
  * Map AI SDK tools onto Letta client-side tools with a fail-closed policy:
@@ -70,7 +112,7 @@ type ToolOutput = { content: { type: 'text'; text: string }[]; isError: boolean 
  * cancellation, bounded output and sanitized errors.
  */
 export function createToolBridge(options: ToolBridgeOptions) {
-  const definitions = options.tools as Record<string, { description?: string; inputSchema: Parameters<typeof asSchema>[0]; execute?: (args: unknown, context: { toolCallId: string; messages: []; abortSignal: AbortSignal }) => unknown }>;
+  const definitions = options.tools as Record<string, { description?: string; inputSchema: Parameters<typeof asSchema>[0]; execute?: (args: unknown, context: { toolCallId: string; messages: []; abortSignal: AbortSignal; context: Readonly<Record<string, unknown>> }) => unknown; toModelOutput?: (options: { toolCallId: string; input: unknown; output: unknown }) => unknown }>;
   const permissions = options.permissions;
   const restrict = options.allowedTools ? new Set(options.allowedTools) : undefined;
   const allowed = new Set(Object.keys(definitions).filter(n => (!restrict || restrict.has(n)) && Object.hasOwn(permissions, n) && (permissions[n] === 'allow' || permissions[n] === 'ask') && (n === ASK_USER_TOOL || typeof definitions[n]?.execute === 'function')));
@@ -134,11 +176,11 @@ export function createToolBridge(options: ToolBridgeOptions) {
         signal.addEventListener('abort', abort, { once: true });
         timer = setTimeout(() => control.abort(), options.timeoutMs ?? 5000);
       });
-      const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal }); }), interrupted]);
-      const text = JSON.stringify(output);
-      if (typeof text !== 'string' || text.length > 16000) throw new Error('tool_output_limit');
-      emit(name, id, 'completion', started);
-      return { content: [{ type: 'text', text }], isError: false };
+      const context = options.context?.() ?? {};
+      const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal, context }); }), interrupted]);
+      const result = await modelContent(definition, id, args, output);
+      emit(name, id, result.isError ? 'error' : 'completion', started, result.isError ? 'tool_reported_error' : undefined);
+      return result;
     } catch {
       const code = signal.aborted ? (control.signal.aborted ? 'tool_timeout' : 'tool_cancelled') : 'tool_failed';
       emit(name, id, 'error', started, code);

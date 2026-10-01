@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { createLettaAgent, resolveStateDirectory, statePaths, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import { createLettaAgent, filesEnabled, resolveStateDirectory, statePaths, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, tokenApiApp } from './http.js';
 
@@ -31,6 +31,7 @@ export interface RunningServer {
 function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
+    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).attachments } : {}),
     open: async options => {
       runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true });
       const { agent } = runtime;
@@ -86,7 +87,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
     const runtime = new ThreadRuntime(host(definition, stateDirectory), join(directory, 'state.json'), owner);
-    const server = guiApp(runtime, owner, port, assets, { id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask') }).listen(port, '127.0.0.1');
+    const server = guiApp(runtime, owner, port, assets, { id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition) }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
     log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);

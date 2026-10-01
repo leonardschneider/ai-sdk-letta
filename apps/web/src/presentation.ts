@@ -43,12 +43,59 @@ export function failureReason(result: unknown): string | undefined {
   const error = value && typeof value === 'object' && !Array.isArray(value) ? (value as { error?: unknown }).error : undefined;
   return typeof error === 'string' && /^[a-z_]{1,40}$/.test(error) ? error : undefined;
 }
-export function toolLabel(name: string, phase: ToolPhase, result?: unknown): string {
+/** Page or line part of a file-tool label: "pages 1–3", "page 5", "lines 10–40". */
+function rangeLabel(range: unknown, pdf: boolean): string {
+  if (typeof range !== 'string' || !range.trim()) return '';
+  const clean = range.trim().toLowerCase().replace(/^(pages?|lines?|pp?\.?|l\.?)\s*/, '');
+  const match = /^(\d+)\s*(?:(?:-|–|—|\.\.|to)\s*(\d+)?)?$/.exec(clean);
+  const unit = pdf ? 'page' : 'line';
+  if (!match) return `${unit}s ${range.trim()}`;
+  if (match[2] && match[2] !== match[1]) return `${unit}s ${match[1]}–${match[2]}`;
+  if (/(-|–|—|\.\.|to)\s*$/.test(clean)) return `${unit}s ${match[1]}–end`;
+  return `${unit} ${match[1]}`;
+}
+const quoted = (value: string) => `“${value.length > 60 ? `${value.slice(0, 59)}…` : value}”`;
+/** Natural label for the built-in file tools: "Read report.pdf, pages 1–3", "Searched files for “budget”". */
+function fileToolLabel(name: string, phase: ToolPhase, args: Record<string, unknown>): string | undefined {
+  const file = typeof args.name === 'string' ? args.name : '';
+  if (name === 'list_files') return phase === 'running' ? 'Listing files…' : phase === 'done' ? 'Listed files' : 'Couldn’t list files';
+  if (name === 'read_file' && file) {
+    const range = rangeLabel(args.range, /\.pdf$/i.test(file));
+    const target = `${file}${range ? `, ${range}` : ''}`;
+    return phase === 'running' ? `Reading ${target}…` : phase === 'done' ? `Read ${target}` : `Couldn’t read ${target}`;
+  }
+  if (name === 'search_files' && typeof args.query === 'string') {
+    const where = file ? file : 'files';
+    return phase === 'running' ? `Searching ${where} for ${quoted(args.query)}…` : phase === 'done' ? `Searched ${where} for ${quoted(args.query)}` : `Couldn’t search ${where} for ${quoted(args.query)}`;
+  }
+  return undefined;
+}
+export function toolLabel(name: string, phase: ToolPhase, result?: unknown, args: Record<string, unknown> = {}): string {
   const reason = phase === 'error' ? failureReason(result) : undefined;
   if (reason === 'user_denied') return `Denied: ${friendlyName(name)}`;
   if (reason === 'approval_cancelled') return `Cancelled: ${friendlyName(name)}`;
+  const file = fileToolLabel(name, phase, args);
+  if (file) return file;
   const tool = friendlyName(name);
   return phase === 'running' ? `Using ${tool}…` : phase === 'done' ? `Used ${tool}` : `${tool} didn’t complete`;
+}
+
+/** Built-in file tools return text for the model; summarize it in one line for the expanded view. */
+export function fileToolSummary(name: string, result: unknown): string | undefined {
+  if (!['list_files', 'read_file', 'search_files'].includes(name) || typeof result !== 'string') return undefined;
+  const first = result.split('\n', 1)[0]!.trim();
+  if (name === 'read_file') {
+    const range = /: ((?:pages|lines) [\d,–]+ of [\d,]+)$/.exec(first)?.[1];
+    const truncated = /\[Truncated/.test(result) ? ' · truncated' : '';
+    const image = /attached below/.test(result) ? ' · with page image' : '';
+    return range ? `${range.replace(/^(pages|lines) (\d+) of/, (_, unit: string, n: string) => `${unit.slice(0, -1)} ${n} of`)}${truncated}${image}` : first.slice(0, 160);
+  }
+  if (name === 'search_files') {
+    const found = /^Found [\d,]+ passages? for ".*?" in [\d,]+ files?/.exec(first)?.[0];
+    if (found) return found;
+  }
+  const line = first.replace(/:$/, '');
+  return line.length > 200 ? `${line.slice(0, 199).replace(/\s+\S*$/, '')}…` : line;
 }
 const reasonText: Record<string, string> = {
   user_denied: 'You denied this action, so it did not run.',
@@ -74,6 +121,8 @@ export function failureText(result: unknown): string {
 export function toolSummary(name: string, result: unknown, args: Record<string, unknown> = {}): { metrics?: Field[]; fields: Field[] } {
   let data = result;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { /* text */ } }
+  const fileSummary = fileToolSummary(name, result);
+  if (fileSummary) return { fields: [{ label: 'Result', value: fileSummary }] };
   if (name !== 'ask_user' && data && typeof data === 'object' && !Array.isArray(data)) {
     const entries = Object.entries(data as Record<string, unknown>);
     if (entries.length && entries.length <= 6 && entries.every(([, value]) => typeof value === 'number')) {

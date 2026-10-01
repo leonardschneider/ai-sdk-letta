@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-export { LettaAgent, historyKey, userTurnContent, MAX_INPUT_CHARACTERS, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession } from './agent.js';
+export { LettaAgent, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession } from './agent.js';
 export {
   IMAGE_LIMITS, IMAGE_MEDIA_TYPES, IMAGE_REFERENCE_PROVIDER, ImageInputError, validateImages, decodeImagePart, assertImageBudget, isImagePart, sniffImageType, toLettaImage, imagePartDigest, compactImagePart,
   type ImageInputErrorCode, type ImageMediaType, type ImageLimits, type DecodedImage,
@@ -18,6 +18,13 @@ export { acquireIdentity, validConversationId, type Identity, type IdentityBacke
 export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
 export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler } from './interactions.js';
-export { createToolBridge, askUserTool, fileTraceWriter, ASK_USER_TOOL, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions } from './tools.js';
+export {
+  AttachmentStore, UploadStaging, FileInputError, FILE_LIMITS, STAGING_TTL_MS, MAX_NAME_LENGTH, TEXT_EXTENSIONS, prepareFile, detectFileType, isText, decodeText, sanitizeFileName, isPlainFileName, numberedName,
+  formatBytes, describeFile, attachmentNote, withAttachmentNote, parseAttachmentNote, decodeFilePart,
+  type FileLimits, type FileInputErrorCode, type FileKind, type StoredFile, type StagedFile, type StagedUpload,
+} from './attachments.js';
+export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
+export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
+export { createToolBridge, askUserTool, fileTraceWriter, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions } from './tools.js';
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';

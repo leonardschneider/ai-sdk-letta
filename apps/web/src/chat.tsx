@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
-import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, LoaderCircle, MessageCircleQuestion, ShieldAlert, ShieldCheck, ShieldX, Wrench } from 'lucide-react';
+import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, FileText, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { answerLine, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
-import { MessageImage } from './images.js';
+import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 
 /* ------------------------------------------------------------------ */
@@ -54,13 +54,21 @@ export function Message() {
   </MessagePrimitive.Root>;
 }
 
-/** Images sit above the text bubble, like the composer shows them; `[Image]` placeholders stay with the images. */
+type FilePart = { type: 'data'; name: string; data: { name: string; detail: string; kind?: string } };
+const isFilePart = (part: { type: string; name?: string }): part is FilePart => part.type === 'data' && part.name === 'file';
+
+/** Images sit above the text bubble, like the composer shows them; `[Image]` placeholders stay with the images. Files follow as chips. */
 function UserBubble() {
   const images = useAuiState(s => s.message.parts.filter(p => p.type === 'image' || (p.type === 'text' && p.text === IMAGE_PLACEHOLDER)).length);
+  // Saved images are also listed in the note; the thumbnail already shows them.
+  const files = useAuiState(s => s.message.parts.filter(p => isFilePart(p) && !(images > 0 && p.data.kind === 'image')).length);
   const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text !== IMAGE_PLACEHOLDER && p.text.trim()));
   return <div className="user-turn">
     {images > 0 && <div className="bubble-images">
       <MessagePrimitive.Parts>{({ part }) => part.type === 'image' ? <MessageImage src={part.image} name={part.filename}/> : part.type === 'text' && part.text === IMAGE_PLACEHOLDER ? <span className="image-placeholder">{IMAGE_PLACEHOLDER}</span> : <></>}</MessagePrimitive.Parts>
+    </div>}
+    {files > 0 && <div className="bubble-files">
+      <MessagePrimitive.Parts>{({ part }) => isFilePart(part) && !(images > 0 && part.data.kind === 'image') ? <MessageFile {...part.data}/> : <></>}</MessagePrimitive.Parts>
     </div>}
     {hasText && <div className="bubble">
       <MessagePrimitive.Parts>{({ part }) => part.type === 'text' && part.text !== IMAGE_PLACEHOLDER ? <p className="user-text">{part.text}</p> : <></>}</MessagePrimitive.Parts>
@@ -144,10 +152,11 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
   const decided = pendingApproval && active.sent?.id === active.request?.id ? active.sent : undefined;
   const label = pendingApproval
     ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : `Waiting for your permission: ${friendlyName(toolName)}`
-    : toolLabel(toolName, phase, result);
+    : toolLabel(toolName, phase, result, args);
   const summary = phase === 'done' ? toolSummary(toolName, result, args) : { fields: [] };
   const approval = active.approvalTools.has(toolName) || pendingApproval;
-  const Icon = phase === 'running' ? LoaderCircle : denied ? ShieldX : phase === 'error' ? CircleAlert : approval ? ShieldCheck : Wrench;
+  const fileTool = ['list_files', 'read_file', 'search_files'].includes(toolName);
+  const Icon = phase === 'running' ? LoaderCircle : denied ? ShieldX : phase === 'error' ? CircleAlert : approval ? ShieldCheck : toolName === 'search_files' ? Search : fileTool ? FileText : Wrench;
   return <Disclosure className="tool-line" tone={phase === 'running' ? 'running' : denied ? 'denied' : phase} label={label}
     summary={<><Icon size={14} className={`line-icon ${phase === 'running' ? 'spin' : ''}`} aria-hidden="true"/><span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{label}</span>
       {phase === 'done' && summary.metrics && <span className="line-meta">{metricsLine(summary.metrics)}</span>}</>}>
@@ -164,7 +173,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
 function ToolGroup({ count, running, children }: { count: number; running: boolean; indices: readonly number[]; children: React.ReactNode }) {
   const runningLabel = useAuiState(s => {
     const part = [...s.message.parts].reverse().find(p => p.type === 'tool-call' && p.result === undefined);
-    return part?.type === 'tool-call' ? toolLabel(part.toolName, 'running') : undefined;
+    return part?.type === 'tool-call' ? toolLabel(part.toolName, 'running', undefined, parseArgs(part.argsText)) : undefined;
   });
   const label = running ? runningLabel ?? `Using ${count} tools…` : `Used ${count} tools`;
   return <Disclosure className="tool-group" tone={running ? 'running' : 'done'} label={label}

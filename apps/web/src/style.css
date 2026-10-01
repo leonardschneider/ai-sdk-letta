@@ -179,6 +179,20 @@ kbd { font-family: inherit; font-size: 11px; color: var(--text-3); border: 1px s
 .msg-image { display: block; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); overflow: hidden; cursor: zoom-in; max-width: min(240px, 100%); }
 .msg-image img { display: block; max-width: 100%; max-height: 240px; width: auto; height: auto; object-fit: contain; }
 .msg-image:disabled { cursor: default; min-width: 64px; min-height: 64px; }
+/* File chips: icon, name, type and size. Same look in the composer and in sent messages. */
+.bubble-files { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 100%; }
+.file-chip { position: relative; display: inline-flex; align-items: center; gap: 10px; min-width: 0; max-width: min(300px, 100%); padding: 8px 12px 8px 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); color: var(--text); text-align: left; text-decoration: none; }
+.file-icon { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
+.file-icon[data-kind="pdf"] { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.file-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.file-name { font-size: 13.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-detail { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-action { flex-shrink: 0; color: var(--text-3); margin-left: 2px; }
+a.msg-file { cursor: pointer; }
+a.msg-file:hover { border-color: var(--border-strong); background: var(--hover); }
+a.msg-file:hover .file-action { color: var(--text); }
+a.msg-file:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.composer-file { height: 64px; max-width: min(260px, 100%); overflow: visible; }
 .bubble .image-placeholder, .bubble-images .image-placeholder { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 8px; border: 1px dashed var(--border-strong); color: var(--text-2); font-size: 13px; }
 .lightbox { position: fixed; inset: 0; z-index: 90; background: rgba(8, 10, 9, .88); animation: fade .12s ease-out; }
 /* Fit the viewport (small images are enlarged), keeping the aspect ratio. */

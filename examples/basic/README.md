@@ -1,7 +1,8 @@
 # Example: basic
 
 A minimal agent ([src/agent.ts](src/agent.ts)) with one custom tool,
-`text_stats`, plus the built-in `ask_user` question tool.
+`text_stats`, plus the built-in `ask_user` question tool and the file tools
+(`list_files`, `read_file`, `search_files`) for attached files.
 
 From the repository root, after `npm ci` and `npm run build`:
 
@@ -13,4 +14,4 @@ AGENT_ID=my-sandbox LETTA_MODEL=anthropic/claude-sonnet-4-5 npm run tui
 ```
 
 Try: "Count the words in 'the quick brown fox'", or "Ask me which colour I
-prefer, with three options".
+prefer, with three options", or attach a PDF and ask about one of its pages.

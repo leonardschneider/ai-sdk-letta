@@ -1,6 +1,6 @@
 import express from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { IMAGE_LIMITS, IMAGE_MEDIA_TYPES } from 'ai-sdk-letta';
+import { FILE_LIMITS, IMAGE_LIMITS, IMAGE_MEDIA_TYPES, TEXT_EXTENSIONS } from 'ai-sdk-letta';
 import type { RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault } from './runtime.js';
 
@@ -29,14 +29,56 @@ export const BODY_LIMIT_BYTES = 24 * 1024;
  * enforced again on the decoded bytes.
  */
 export const RUN_BODY_LIMIT_BYTES = Math.ceil(IMAGE_LIMITS.maxTotalBytes / 3) * 4 + 64 * 1024;
+/**
+ * Body limit for `POST /v1/uploads` only: one file's raw bytes
+ * (`application/octet-stream`, not base64), at most `FILE_LIMITS.maxFileBytes`.
+ */
+export const UPLOAD_BODY_LIMIT_BYTES = FILE_LIMITS.maxFileBytes;
+
+/**
+ * `Content-Disposition` for a download: always `attachment`, with an ASCII
+ * fallback name and the exact UTF-8 name (RFC 6266 / 5987). Quotes, control
+ * characters and path separators never reach the header.
+ */
+export function contentDisposition(name: string): string {
+  const fallback = name.normalize('NFKD').replace(/[^\x20-\x7e]/g, '').replace(/["\\/;%]/g, '_').trim() || 'download';
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+/** Content type for a download: text is always served as plain text, never as HTML or script. */
+const downloadType = (file: { kind: string; mediaType: string }) => file.kind === 'pdf' ? 'application/pdf' : file.kind === 'image' ? file.mediaType : file.mediaType === 'text/csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8';
 
 /** Shared routes; the caller must install its transport-specific authentication first. */
 export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owner: string, shutdown?: () => Promise<void>) {
   const small = express.json({ limit: BODY_LIMIT_BYTES });
   const runs = express.json({ limit: RUN_BODY_LIMIT_BYTES });
-  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : small)(req, res, next));
+  // Raw bytes, only on the upload route, only as application/octet-stream, bounded by the per-file limit.
+  const upload = express.raw({ limit: UPLOAD_BODY_LIMIT_BYTES, type: 'application/octet-stream' });
+  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && req.path === '/v1/uploads' ? upload : small)(req, res, next));
   app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: 1, edits: false,
-    images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes } }));
+    images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes },
+    files: runtime.uploads ? { types: ['text', 'pdf', 'image'], textExtensions: [...TEXT_EXTENSIONS], maxFileBytes: FILE_LIMITS.maxFileBytes, maxFilesPerMessage: FILE_LIMITS.maxFilesPerMessage, maxConversationFiles: FILE_LIMITS.maxConversationFiles, maxConversationBytes: FILE_LIMITS.maxConversationBytes } : null }));
+  /**
+   * Stage one file for the next run: raw bytes as `application/octet-stream`,
+   * the name URL-encoded in `X-File-Name`. Validated by content (type, size,
+   * PDF text) before anything is kept. Returns `{ id, name, kind, ... }`.
+   */
+  app.post('/v1/uploads', async (req, res) => {
+    if (!req.is('application/octet-stream') || !Buffer.isBuffer(req.body)) throw new RuntimeFault('invalid_input', 415);
+    let name: string;
+    try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? '')); } catch { throw new RuntimeFault('file_name_invalid', 400); }
+    const control = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) control.abort(); });
+    res.status(201).json(await runtime.upload(owner, name, req.body, control.signal));
+  });
+  app.get('/v1/threads/:id/files', (req, res) => res.json(runtime.files(owner, req.params.id)));
+  /** Download one attached file. Always as an attachment, never rendered by the app's origin. */
+  app.get('/v1/threads/:id/files/:name', (req, res) => {
+    const { file, bytes } = runtime.file(owner, req.params.id, req.params.name);
+    res.set({ 'Content-Type': downloadType(file), 'Content-Disposition': contentDisposition(file.name), 'Content-Length': String(bytes.byteLength),
+      'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store' });
+    res.end(bytes);
+  });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title)));
   app.patch('/v1/threads/:id', (req, res) => res.json(runtime.updateMetadata(owner, req.params.id, req.body)));
@@ -61,6 +103,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     if (res.headersSent) return res.end();
     // Body parser rejections: fixed codes, never parser messages.
     if ((error as { type?: unknown } | undefined)?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
+    if ((error as { type?: unknown } | undefined)?.type === 'request.aborted') return res.end();
     res.status(error instanceof RuntimeFault ? error.status : error instanceof SyntaxError ? 400 : 503).json({ error: error instanceof RuntimeFault ? error.code : 'runtime_unavailable' });
   });
   return app;
@@ -72,6 +115,8 @@ export interface GuiAgentInfo {
   name: string;
   /** Tools whose calls always ask for approval (used for display only). */
   approvalTools?: readonly string[];
+  /** Whether the agent accepts file attachments (it has the file tools). */
+  files?: boolean;
 }
 
 /**
@@ -95,7 +140,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])] } });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files } });
   });
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
