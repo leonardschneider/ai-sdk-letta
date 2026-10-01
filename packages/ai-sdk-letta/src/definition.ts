@@ -75,7 +75,8 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120) throw new Error('Agent name must contain 1–120 characters');
   if (typeof input.model !== 'string' || !input.model.includes('/')) throw new Error('Agent model must be a Letta model handle such as "provider/model"');
   if (typeof input.instructions !== 'string' || !input.instructions.trim()) throw new Error('Agent instructions are required');
-  const names = Object.keys(input.tools ?? {});
+  if (input.tools === null || typeof input.tools !== 'object' || Array.isArray(input.tools)) throw new Error('Agent tools must be an object of AI SDK tools; use {} for none');
+  const names = Object.keys(input.tools);
   for (const name of names) {
     if ((INTERNAL_MEMORY_TOOLS as readonly string[]).includes(name)) throw new Error(`Tool name "${name}" is reserved for memory operations`);
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) throw new Error(`Invalid tool name "${name}"`);
