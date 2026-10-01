@@ -11,7 +11,7 @@ import { listNavigationEntries, type NavigationSource } from './navigation.js';
 import { ToolInteractions } from './interactions.js';
 import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge } from './tools.js';
 import { resolveStateDirectory, statePaths } from './state.js';
-import { AttachmentStore } from './attachments.js';
+import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
 import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout } from './sandbox.js';
 
@@ -44,6 +44,8 @@ export interface LettaRuntime<TOOLS extends ToolSet = ToolSet> {
   identity: Identity;
   /** Read-only conversation listing and search for the same agent. */
   navigation: NavigationSource;
+  /** The agent's resources (all conversations' files, git-backed), when it has file tools or a sandbox. */
+  resources?: ResourceStore;
   /** Close the session and SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
@@ -88,6 +90,18 @@ export function foregroundToolsCommand(bridge: Pick<ToolBridge, 'tools'>, agentI
     runtimes: [{ agent_id: agentId, conversation_id: conversationId }],
     external_tools: [{ tools: bridge.tools.map(tool => ({ name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters, auto_background: false, timeout_ms: 300_000 })) }],
   }] };
+}
+
+/**
+ * Open the agent's resources (git-backed, `<stateDir>/resources/<agentId>/`)
+ * and move files from the earlier per-conversation attachment layout into it
+ * (once, idempotently). `titles` names the folders of migrated conversations.
+ */
+export async function openResources(paths: ReturnType<typeof statePaths>, agentId: string, titles: Record<string, string | undefined> = {}): Promise<ResourceStore> {
+  const resources = ResourceStore.open(paths.resources, agentId);
+  await resources.init();
+  if (resources.pendingMigration(paths.attachments).length) await resources.migrate(paths.attachments, id => titles[id]);
+  return resources;
 }
 
 /** Open an agent, or throw if no conversation was selected. */
@@ -143,7 +157,12 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     const manager = managementClient();
     let conversationId = identity.conversationId;
     let conversationTitle = 'Default conversation';
+    // Files of earlier versions are moved into the resources once; their folders are named after the conversations' titles.
+    let titles: Record<string, string> = {};
     try {
+      if ((filesEnabled(definition) || sandboxEnabled(definition)) && ResourceStore.open(paths.resources, identity.agentId).pendingMigration(paths.attachments).length) {
+        titles = Object.fromEntries((await listConversations(query => manager.conversations.list(query), identity.agentId)).map(c => [c.id, sanitizeText(c.summary ?? '')]));
+      }
       const choice: ConversationChoice = options.choose
         ? await options.choose(identity, await listConversations(query => manager.conversations.list(query), identity.agentId))
         : options.newTitle !== undefined ? { newTitle: options.newTitle } : { conversationId: options.conversationId ?? identity.conversationId };
@@ -166,14 +185,22 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     assertNoPendingTurn(conversationId);
     let turnSignal: AbortSignal | undefined;
     const broker = interactions = new ToolInteractions();
-    // Files: one folder per conversation, bound here from the conversation this
-    // runtime opened (never from tool arguments). Tools see only this store.
-    const attachments = filesEnabled(definition) ? new AttachmentStore(paths.attachments, identity.agentId, conversationId) : undefined;
-    // Shell commands: one sandbox per conversation, created on the first
-    // command, with the conversation's folder mounted at /workspace.
-    if (sandboxEnabled(definition)) {
-      const workspace = attachments ?? new AttachmentStore(paths.attachments, identity.agentId, conversationId);
-      sandbox = new SandboxManager(definition.sandbox!, { workspace: () => workspace.folder(), owner: `${identity.agentId}.${conversationId}` });
+    // Resources: every file of the agent in one git-backed folder, one folder
+    // per conversation. The current conversation is bound here (never from
+    // tool arguments); tools may read other conversations' folders too.
+    let resources: ResourceStore | undefined;
+    let attachments: AttachmentStore | undefined;
+    if (filesEnabled(definition) || sandboxEnabled(definition)) {
+      resources = await openResources(paths, identity.agentId, { ...titles, [conversationId]: conversationTitle });
+      const workspace = new AttachmentStore(resources, conversationId, { title: conversationTitle });
+      workspace.path; // create the conversation's folder now, named after its title
+      if (filesEnabled(definition)) attachments = workspace;
+      // Shell commands: one sandbox per conversation, created on the first
+      // command, with all resources at /workspace and the conversation's folder as the working directory.
+      if (sandboxEnabled(definition)) {
+        const store = resources;
+        sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}` });
+      }
     }
     const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
     // Without a sandbox, the shell tools are never exposed.
@@ -259,7 +286,9 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       },
       presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
       delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
+      // Whatever the agent changed in the resources during the turn becomes one commit.
+      ...(resources ? { afterTurn: async () => { await resources!.commitAgentChanges(conversationId); } } : {}),
     });
-    return { agent, identity, navigation, close: async () => { agent.close(); await close(); } };
+    return { agent, identity, navigation, ...(resources ? { resources } : {}), close: async () => { agent.close(); await agent.idle(); await close(); } };
   } catch (error) { await close(); throw error; }
 }

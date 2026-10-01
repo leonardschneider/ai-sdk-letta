@@ -1,5 +1,6 @@
 import { tool, jsonSchema, type Tool } from 'ai';
-import { AttachmentStore, FileInputError, describeFile, formatBytes, type StoredFile } from './attachments.js';
+import { FileInputError, describeFile, formatBytes, type StoredFile } from './attachments.js';
+import { AttachmentStore, RESOURCE_LIMITS } from './resources.js';
 import { pdfPageImages } from './pdf.js';
 import type { ToolPermission } from './definition.js';
 
@@ -10,8 +11,9 @@ export type FileToolName = typeof FILE_TOOL_NAMES[number];
 /**
  * Key under which the tool bridge passes the active conversation's
  * {@link AttachmentStore} to tools (`options.context[ATTACHMENTS_CONTEXT]`).
- * The runtime binds it when it opens a conversation; nothing the model sends
- * can change which folder a tool reads.
+ * The runtime binds it when it opens a conversation: names resolve in that
+ * conversation's folder, or from the agent's resources root with a leading
+ * `/`; nothing the model sends can reach outside the root.
  */
 export const ATTACHMENTS_CONTEXT = 'ai-sdk-letta.attachments';
 
@@ -49,8 +51,8 @@ const errorOutput = (error: unknown): FileToolOutput => {
 /** Add the available names to a not-found error, so the model can correct itself. */
 function notFound(store: AttachmentStore, error: unknown): never {
   if (error instanceof FileInputError && (error.code === 'file_not_found' || error.code === 'file_name_invalid')) {
-    const names = store.list().map(f => f.name);
-    throw new FileInputError(error.code, `${error.message}. ${names.length ? `Files here: ${names.map(quote).join(', ')}.` : 'No files are attached to this conversation.'}`);
+    const names = store.list().map(f => f.name).slice(0, 30);
+    throw new FileInputError(error.code, `${error.message}. ${names.length ? `Files in this conversation's folder: ${names.map(quote).join(', ')}.` : 'This conversation\'s folder is empty.'} Other folders: list_files with folder "/".`);
   }
   throw error;
 }
@@ -99,12 +101,23 @@ const rangeArg = (start: number, end: number) => start === end ? String(start) :
 
 function listLine(file: StoredFile) { return `- ${file.name} (${describeFile(file)})`; }
 
-/** Text of `list_files`: one line per file with its type, size and page or line count. */
-export function listFiles(store: AttachmentStore): FileToolOutput {
-  const files = store.list();
-  if (!files.length) return { text: 'No files are attached to this conversation.' };
-  const total = files.reduce((sum, f) => sum + f.bytes, 0);
-  return { text: `${plural(files.length, 'file')} in this conversation (${formatBytes(total)}):\n${files.map(listLine).join('\n')}\n\nRead one with read_file (use a page or line range); find passages with search_files.` };
+/**
+ * Text of `list_files`: one line per file with its type, size and page or
+ * line count, in this conversation's folder (default) or another folder
+ * (`"/"` lists every conversation's folder).
+ */
+export function listFiles(store: AttachmentStore, folder?: string): FileToolOutput {
+  const all = folder !== undefined && folder.trim() !== '' && folder.trim() !== '.';
+  const scope = all ? `/${store.resolvePath(folder!)}`.replace(/\/$/, '') || '/' : 'this conversation\'s folder';
+  const scanned = store.scan(all ? folder : undefined);
+  const files = scanned.files.slice(0, RESOURCE_LIMITS.maxListed);
+  const where = all ? scope : `this conversation's folder (/${store.path})`;
+  if (!files.length && !scanned.others.length) return { text: all ? `No files in ${scope}.` : `No files in ${where}. Other conversations' files: list_files with folder "/".` };
+  const total = scanned.files.reduce((sum, f) => sum + f.bytes, 0);
+  const more = scanned.files.length > files.length || scanned.truncated ? `\n[Showing ${files.length} of ${scanned.files.length}${scanned.truncated ? '+' : ''} files; pass a folder to narrow.]` : '';
+  const others = scanned.others.length ? `\nOther files (not readable as text, PDF or image): ${scanned.others.slice(0, 30).map(quote).join(', ')}${scanned.others.length > 30 ? ', …' : ''}` : '';
+  const hint = all ? '' : '\nOther conversations\' files: list_files with folder "/".';
+  return { text: `${plural(scanned.files.length, 'file')} in ${where} (${formatBytes(total)}):\n${files.map(listLine).join('\n')}${more}${others}\n\nRead with read_file (use a page or line range); find passages with search_files.${hint}` };
 }
 
 /* ------------------------------------------------------------------ */
@@ -128,6 +141,7 @@ export async function readFile(store: AttachmentStore, name: string, range?: str
     return { text: `${file.name} (${describeFile(file)}). The image is attached below.`, images: [{ mediaType: file.mediaType as 'image/png', data: bytes.toString('base64') }] };
   }
   content = await store.content(file.name, signal);
+  file = content.file;
   const limit = READ_LIMITS.maxChars;
   if ('text' in content) {
     const lines = splitLines(content.text);
@@ -226,15 +240,15 @@ function snippet(line: string, index: number, size = READ_LIMITS.snippetChars): 
  * of its words, with the file name and page or line number. Case- and
  * accent-insensitive. Images are not searched.
  */
-export async function searchFiles(store: AttachmentStore, query: string, name?: string, signal?: AbortSignal): Promise<FileToolOutput> {
+export async function searchFiles(store: AttachmentStore, query: string, name?: string, signal?: AbortSignal, folder?: string): Promise<FileToolOutput> {
   const phrase = fold(query.trim().replace(/\s+/g, ' '));
   const words = terms(query);
   if (!phrase) throw new FileInputError('file_range_invalid', 'Search for at least one word');
   let files: StoredFile[];
   if (name !== undefined) { try { files = [store.get(name)]; } catch (error) { notFound(store, error); } }
-  else files = store.list();
-  const searchable = files.filter(f => f.kind !== 'image');
-  if (!searchable.length) return { text: files.length ? 'Only images are attached; they cannot be searched. Use read_file to look at one.' : 'No files are attached to this conversation.' };
+  else files = store.list(folder);
+  const searchable = files.filter(f => f.kind !== 'image').slice(0, 500);
+  if (!searchable.length) return { text: files.length ? 'Only images here; they cannot be searched. Use read_file to look at one.' : 'No files here. Other conversations\' files: search_files with folder "/".' };
   type Hit = { file: string; where: string; text: string; score: number; order: number };
   const hits: Hit[] = [];
   let order = 0;
@@ -275,42 +289,45 @@ export async function searchFiles(store: AttachmentStore, query: string, name?: 
 /* Tools                                                               */
 /* ------------------------------------------------------------------ */
 
+type ListInput = { folder?: string };
 type ReadInput = { name: string; range?: string };
-type SearchInput = { query: string; name?: string };
-const nameSchema = { type: 'string', minLength: 1, maxLength: 200, description: 'The file name exactly as list_files shows it.' } as const;
+type SearchInput = { query: string; name?: string; folder?: string };
+const nameSchema = { type: 'string', minLength: 1, maxLength: 1024, description: 'File path as list_files shows it: relative to this conversation\'s folder, or from the root with a leading "/".' } as const;
+const folderSchema = { type: 'string', maxLength: 1024, description: 'Folder to list instead of this conversation\'s: "/" for all resources, or a path like "/Other chat".' } as const;
 
 /**
- * Built-in tools to work with files the user attached to the current
- * conversation. They only ever see that conversation's folder: the runtime
- * binds it, and names are resolved inside it (no paths, no links).
+ * Built-in tools to read the agent's resources: the files the user attached
+ * or uploaded, and files the agent made, one folder per conversation. Names
+ * resolve in the current conversation's folder (bound by the runtime) or from
+ * the resources root with a leading `/`; never outside it, never through links.
  *
  * Add them to a definition, with permissions, to accept file attachments:
  * ```ts
  * tools: { ...fileTools, my_tool }, permissions: { ...FILE_TOOL_PERMISSIONS, my_tool: 'ask' }
  * ```
  */
-export const fileTools: { list_files: Tool<Record<string, never>, FileToolOutput>; read_file: Tool<ReadInput, FileToolOutput>; search_files: Tool<SearchInput, FileToolOutput> } = {
+export const fileTools: { list_files: Tool<ListInput, FileToolOutput>; read_file: Tool<ReadInput, FileToolOutput>; search_files: Tool<SearchInput, FileToolOutput> } = {
   list_files: tool({
-    description: 'List the files the user attached to this conversation, with their type, size and page or line count.',
-    inputSchema: jsonSchema<Record<string, never>>({ type: 'object', properties: {}, additionalProperties: false }),
-    execute: async (_input, options) => { try { return listFiles(storeOf(options.context as Context)); } catch (error) { return errorOutput(error); } },
+    description: 'List files with type, size and page or line count: this conversation\'s folder by default; folder "/" lists all resources (one folder per conversation).',
+    inputSchema: jsonSchema<ListInput>({ type: 'object', properties: { folder: folderSchema }, additionalProperties: false }),
+    execute: async ({ folder } = {}, options) => { try { return listFiles(storeOf(options.context as Context), folder); } catch (error) { return errorOutput(error); } },
     toModelOutput,
   }),
   read_file: tool({
-    description: `Read a file attached to this conversation. For PDFs, pass the pages you need as range (e.g. "3" or "2-4"; up to ${READ_LIMITS.maxPages} per call); for text files, a line range (e.g. "1-200"). Read only what you need: list_files shows page and line counts, and search_files finds where something is. Results are limited to about ${READ_LIMITS.maxChars.toLocaleString('en-US')} characters and say how to read more. Pages without text (scans) come back as images. Images attached earlier can be viewed again.`,
+    description: `Read a file (path as list_files shows it; "/" starts at the root, for other conversations' folders). For PDFs, pass the pages you need as range (e.g. "3" or "2-4"; up to ${READ_LIMITS.maxPages} per call); for text files, a line range (e.g. "1-200"). Read only what you need: list_files shows page and line counts, and search_files finds where something is. Results are limited to about ${READ_LIMITS.maxChars.toLocaleString('en-US')} characters and say how to read more. Pages without text (scans) come back as images, and images can be viewed.`,
     inputSchema: jsonSchema<ReadInput>({ type: 'object', properties: { name: nameSchema, range: { type: 'string', maxLength: 40, description: 'Pages for a PDF ("3", "2-5", "10-") or lines for a text file ("1-200"). Omit to start at the beginning.' } }, required: ['name'], additionalProperties: false }),
     execute: async ({ name, range }, options) => { try { return await readFile(storeOf(options.context as Context), name, range, options.abortSignal); } catch (error) { return errorOutput(error); } },
     toModelOutput,
   }),
   search_files: tool({
-    description: 'Search the text of the files attached to this conversation (PDFs, text, CSV, JSON, code). Returns matching passages with the file name and page or line, to read further with read_file.',
-    inputSchema: jsonSchema<SearchInput>({ type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 200, description: 'Words or a phrase to find (case- and accent-insensitive).' }, name: { ...nameSchema, description: 'Optional: search only this file.' } }, required: ['query'], additionalProperties: false }),
-    execute: async ({ query, name }, options) => { try { return await searchFiles(storeOf(options.context as Context), query, name, options.abortSignal); } catch (error) { return errorOutput(error); } },
+    description: 'Search the text of files (PDFs, text, CSV, JSON, code) in this conversation\'s folder, or in folder (e.g. "/" for all). Returns passages with file and page or line, to read further with read_file.',
+    inputSchema: jsonSchema<SearchInput>({ type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 200, description: 'Words or a phrase to find (case- and accent-insensitive).' }, name: { ...nameSchema, description: 'Optional: search only this file.' }, folder: { ...folderSchema, description: 'Optional: search this folder instead ("/" for all resources).' } }, required: ['query'], additionalProperties: false }),
+    execute: async ({ query, name, folder }, options) => { try { return await searchFiles(storeOf(options.context as Context), query, name, options.abortSignal, folder); } catch (error) { return errorOutput(error); } },
     toModelOutput,
   }),
 };
 
-/** Default policy for the file tools: they only read this conversation's own files. */
+/** Default policy for the file tools: they only read the agent's own resources. */
 export const FILE_TOOL_PERMISSIONS: Readonly<Record<FileToolName, ToolPermission>> = Object.freeze({ list_files: 'allow', read_file: 'allow', search_files: 'allow' });
 
 /** Does a definition accept file attachments? True when it includes the built-in `read_file` tool and does not deny it. */

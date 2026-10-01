@@ -13,20 +13,24 @@ export {
   defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, INTERNAL_MEMORY_TOOLS,
   type AgentDefinition, type AgentDefinitionInput, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { openLettaAgent, createLettaAgent, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice } from './runtime.js';
+export { openLettaAgent, createLettaAgent, openResources, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice } from './runtime.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
 export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
 export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler } from './interactions.js';
 export {
-  AttachmentStore, UploadStaging, FileInputError, FILE_LIMITS, STAGING_TTL_MS, MAX_NAME_LENGTH, TEXT_EXTENSIONS, prepareFile, detectFileType, isText, decodeText, sanitizeFileName, isPlainFileName, numberedName,
+  UploadStaging, FileInputError, FILE_LIMITS, STAGING_TTL_MS, MAX_NAME_LENGTH, TEXT_EXTENSIONS, prepareFile, detectFileType, isText, decodeText, sanitizeFileName, isPlainFileName, numberedName,
   formatBytes, describeFile, attachmentNote, withAttachmentNote, parseAttachmentNote, decodeFilePart,
-  type FileLimits, type FileInputErrorCode, type FileKind, type StoredFile, type StagedFile, type StagedUpload,
+  type FileLimits, type FileInputErrorCode, type FileKind, type StoredFile, type StagedFile, type StagedUpload, type PreparedFile,
 } from './attachments.js';
+export {
+  ResourceStore, AttachmentStore, RESOURCE_LIMITS, RESOURCES_GITIGNORE, splitResourcePath, joinResourcePath, folderNameFromTitle, readRegularFile,
+  type ResourceNode, type ResourceTree, type ResourceFile, type ResourceCommit,
+} from './resources.js';
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
 export {
   sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT,
-  SandboxManager, SandboxError, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
+  SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
   commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';

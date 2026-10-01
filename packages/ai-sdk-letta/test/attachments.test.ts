@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttachmentStore, FILE_LIMITS, FileInputError, UploadStaging, attachmentNote, decodeFilePart, describeFile, detectFileType, isPlainFileName, isText, parseAttachmentNote, sanitizeFileName, STAGING_TTL_MS } from '../src/index.js';
@@ -56,6 +56,7 @@ test('stores files privately and atomically, with collision-safe names and the d
     assert.equal(statSync(store.directory).mode & 0o777, 0o700);
     assert.equal(statSync(join(store.directory, 'report.pdf')).mode & 0o777, 0o600);
     assert.equal(statSync(join(dir, AGENT)).mode & 0o777, 0o700);
+    assert.equal(store.directory, join(realpathSync(dir), AGENT, 'files', 'Conversation a'), 'the folder is named for people, inside the git work tree');
     assert.equal(readdirSync(store.directory).filter(n => n.startsWith('.tmp-')).length, 0, 'no temporary files remain');
     // Same name and same content: reused, not duplicated. Same name, other content: numbered.
     const [again] = await store.save([{ name: 'report.pdf', bytes: quarterlyReport() }]);
@@ -68,7 +69,7 @@ test('stores files privately and atomically, with collision-safe names and the d
     assert.equal(csv!.lines, 2); assert.equal(csv2!.lines, 3);
     const [renamed] = await store.save([{ name: 'scan', bytes: quarterlyReport() }]);
     assert.equal(renamed!.name, 'scan.pdf', 'the extension follows the content');
-    assert.deepEqual(store.list().map(f => f.name), ['report.pdf', 'data.csv', 'data (2).csv', 'scan.pdf']);
+    assert.deepEqual(store.list().map(f => f.name), ['data (2).csv', 'data.csv', 'report.pdf', 'scan.pdf'], 'listed by name');
     assert.equal(describeFile(first!), 'PDF, 5 pages, 3 KB');
     assert.equal(attachmentNote([first!, csv!]), 'Attached: report.pdf (PDF, 5 pages, 3 KB)\nAttached: data.csv (CSV, 2 lines, 8 bytes)');
     assert.deepEqual(parseAttachmentNote(`Summarize these\n\n${attachmentNote([first!, csv!])}`), { text: 'Summarize these', files: [
@@ -84,19 +85,22 @@ test('names resolve only inside the folder: traversal, hidden sidecars, symlinks
     const store = new AttachmentStore(dir, AGENT, 'conv-a');
     await store.save([{ name: 'notes.txt', bytes: text('inside') }]);
     writeFileSync(join(outside, 'secret.txt'), 'TOP SECRET');
-    for (const name of ['../../../etc/passwd', '../conv-b/notes.txt', '/etc/passwd', '.meta/notes.txt.json', 'notes.txt/..', '..', '.', 'sub/notes.txt']) {
+    for (const name of ['../../../etc/passwd', '../conv-b/notes.txt', '.meta/notes.txt.json', 'notes.txt/..', '..', '.', '/../x', '/workspace/../etc', '.git/config', 'a\\b']) {
       assert.throws(() => store.read(name), code('file_name_invalid'), name);
     }
+    // A leading slash starts at the resources root, never at the host's root.
+    assert.throws(() => store.read('/etc/passwd'), code('file_not_found'));
+    assert.throws(() => store.read('sub/notes.txt'), code('file_not_found'));
     symlinkSync(join(outside, 'secret.txt'), join(store.directory, 'link.txt'));
     assert.equal(store.list().some(f => f.name === 'link.txt'), false, 'symlinks are not listed');
-    assert.throws(() => store.read('link.txt'), code('file_not_found'));
+    assert.throws(() => store.read('link.txt'), code('file_name_invalid'), 'symlinks are never followed');
     linkSync(join(outside, 'secret.txt'), join(store.directory, 'hard.txt'));
     assert.equal(store.list().some(f => f.name === 'hard.txt'), false, 'hard links are not listed');
     // A symlinked conversation folder is refused outright.
     mkdirSync(join(dir, AGENT), { recursive: true });
-    symlinkSync(outside, join(dir, AGENT, 'conv-evil'));
-    assert.throws(() => new AttachmentStore(dir, AGENT, 'conv-evil').list(), code('file_name_invalid'));
-    // A symlinked agent folder too.
+    symlinkSync(outside, join(store.resources.files, 'Linked'));
+    assert.throws(() => store.read('/Linked/secret.txt'), code('file_name_invalid'), 'a symlinked folder is never followed');
+    // A symlinked agent folder is refused outright.
     symlinkSync(join(dir, AGENT), join(dir, 'agent-local-2222'));
     assert.throws(() => new AttachmentStore(dir, 'agent-local-2222', 'conv-a').list(), code('file_name_invalid'));
     // IDs are validated before any path is built.
@@ -107,7 +111,7 @@ test('names resolve only inside the folder: traversal, hidden sidecars, symlinks
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });
 
-test('conversations are isolated: one store never lists or reads another conversation\'s files', async () => {
+test('conversations have their own folders; other folders are reached from the root, never another agent\'s', async () => {
   const dir = root();
   try {
     const a = new AttachmentStore(dir, AGENT, 'conv-a');
@@ -118,7 +122,12 @@ test('conversations are isolated: one store never lists or reads another convers
     assert.deepEqual(a.list().map(f => f.name), ['a-only.txt']);
     assert.deepEqual(b.list().map(f => f.name), ['b-only.txt']);
     assert.deepEqual(otherAgent.list(), [], 'same conversation ID under another agent is a different folder');
-    assert.throws(() => b.read('a-only.txt'), code('file_not_found'));
+    assert.throws(() => b.read('a-only.txt'), code('file_not_found'), 'plain names resolve in the conversation\'s own folder');
+    // Other conversations' folders are reachable from the root (one agent, one set of resources)...
+    assert.equal(b.read(`/${a.path}/a-only.txt`).bytes.toString(), 'alpha');
+    assert.equal(b.get(`/${a.path}/a-only.txt`).name, '/Conversation a/a-only.txt');
+    // ...but never another agent's.
+    assert.throws(() => otherAgent.read(`/${a.path}/a-only.txt`), code('file_not_found'));
     assert.equal(new AttachmentStore(dir, AGENT, 'conv-empty').list().length, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -142,7 +151,7 @@ test('limits: per file, per message, per conversation count and size, all before
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('files added or changed by hand: described from content, or refused when they no longer match', async () => {
+test('files added or changed by hand (or by the agent) are described from their content', async () => {
   const dir = root();
   try {
     const store = new AttachmentStore(dir, AGENT, 'conv-a');
@@ -153,10 +162,8 @@ test('files added or changed by hand: described from content, or refused when th
     assert.deepEqual(listed.map(f => f.name).sort(), ['manual.md', 'notes.txt']);
     assert.equal(listed.find(f => f.name === 'manual.md')!.label, 'Markdown');
     writeFileSync(join(store.directory, 'notes.txt'), 'six!\n!!');
-    assert.equal(store.read('notes.txt').bytes.toString(), 'six!\n!!', 'a resized edit is re-described from content');
-    await store.save([{ name: 'same.txt', bytes: text('abc') }]);
-    writeFileSync(join(store.directory, 'same.txt'), 'xyz');
-    assert.throws(() => store.read('same.txt'), code('file_invalid'), 'a same-size edit no longer matches its recorded hash');
+    assert.equal(store.read('notes.txt').bytes.toString(), 'six!\n!!', 'an edit is re-described from content');
+    assert.equal(store.get('notes.txt').lines, 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -178,7 +185,7 @@ test('upload staging validates by content, survives until committed, expires, an
     assert.throws(() => staging.load([csv.id]), code('file_not_found'));
     // Commit into a conversation, then discard.
     const store = new AttachmentStore(dir, AGENT, 'conv-a');
-    store.store([loaded!.prepared]);
+    await store.store([loaded!.prepared]);
     staging.discard([pdf.id]);
     assert.throws(() => staging.load([pdf.id]), code('file_not_found'));
     assert.equal(store.list()[0]!.name, 'report.pdf');

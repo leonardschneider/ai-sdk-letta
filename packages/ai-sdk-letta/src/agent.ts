@@ -4,7 +4,8 @@ import type { LettaCodeSession, MessageContentItem, SendMessage } from '@letta-a
 import { createHash } from 'node:crypto';
 import { ToolInteractions } from './interactions.js';
 import { assertImageBudget, compactImagePart, decodeImagePart, IMAGE_REFERENCE_PROVIDER, imagePartDigest, ImageInputError, isImagePart, toLettaImage, type DecodedImage } from './images.js';
-import { attachmentNote, decodeFilePart, FileInputError, type AttachmentStore, type StoredFile } from './attachments.js';
+import { attachmentNote, decodeFilePart, FileInputError, type StoredFile } from './attachments.js';
+import type { AttachmentStore } from './resources.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -50,6 +51,11 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
    * still sent inline. Without it, only images are accepted.
    */
   attachments?: AttachmentStore;
+  /**
+   * Runs after every turn, finished or not (for example, to commit what the
+   * agent changed in its resources). Errors are ignored.
+   */
+  afterTurn?: () => Promise<void>;
 }
 
 type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS>;
@@ -212,7 +218,7 @@ export function parseUserTurn(content: ModelMessage['content'], limits?: Attachm
  */
 export async function storeUserTurn(turn: ParsedTurn, store?: AttachmentStore, signal?: AbortSignal): Promise<{ message: SendMessage; files: StoredFile[] }> {
   if (!store || !turn.attachments.length) return { message: turn.images.length ? turn.items : turn.text, files: [] };
-  const existing = turn.attachments.some(a => a.reference) ? store.list() : [];
+  const existing = turn.attachments.some(a => a.reference) ? store.list().filter(f => !f.name.includes('/')) : [];
   const files: (StoredFile | undefined)[] = turn.attachments.map(a => {
     if (!a.reference) return undefined;
     const file = existing.find(f => f.sha256 === a.reference && f.name === a.name);
@@ -255,6 +261,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private readonly open: (signal: AbortSignal) => TurnSession;
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
+  private readonly afterTurn?: () => Promise<void>;
   private readonly modelId: string;
   private history: ModelMessage[] = [];
   private busy = false;
@@ -272,7 +279,12 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.interactions = options.interactions ?? new ToolInteractions();
     this.modelId = options.modelId ?? 'letta';
     this.attachments = options.attachments;
+    this.afterTurn = options.afterTurn;
   }
+  private settled?: Promise<void>;
+  /** Resolves when the work after the last turn (see `afterTurn`) is done. */
+  idle(): Promise<void> { return this.settled ?? Promise.resolve(); }
+  private finishTurn() { if (this.afterTurn) this.settled = (this.settled ?? Promise.resolve()).then(() => this.afterTurn!()).catch(() => {}); }
 
   /**
    * A copy of the transcript this instance has sent and received (images as
@@ -410,19 +422,19 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       this.history = [...turn.messages, ...result.response.messages];
       return result;
     } catch (error) { this.unusable = true; throw error; }
-    finally { this.busy = false; this.active = undefined; }
+    finally { this.busy = false; this.active = undefined; this.finishTurn(); }
   }
 
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS>) {
     const turn = await this.prepare(options);
     return streamText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
-      onError: () => { this.unusable = true; this.busy = false; },
-      onAbort: () => { this.close(); this.busy = false; },
+      onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
+      onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
       onFinish: result => {
         try { if (!this.unusable && result.finishReason === 'stop') this.delivery?.complete(); }
         catch (error) { this.unusable = true; throw error; }
-        finally { this.busy = false; this.active = undefined; }
+        finally { this.busy = false; this.active = undefined; this.finishTurn(); }
         this.history = [...turn.messages, ...result.response.messages];
       },
     });
