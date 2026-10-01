@@ -6,6 +6,8 @@ import { latexChoices } from './latex-menu.js';
 import type { LatexOverride } from './latex.js';
 import { groupByDate, matchesSearch, TITLE_LIMIT, validTitle, type ThreadSummary } from './thread-model.js';
 import { TitleView } from './title.js';
+import { VersionInfo } from './version-info.js';
+import type { Versions } from './versions.js';
 
 /** Row-level UI state shared by every ThreadListItem (the primitives render items by index). */
 type RowContext = { editingId?: string; setEditingId(id?: string): void; busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; latex: ReadonlyMap<string, LatexOverride>; agentLatex: boolean; onLatex(id: string, value: LatexOverride): void };
@@ -16,6 +18,8 @@ export type SidebarProps = {
   query: string; onQuery(value: string): void; searchRef: React.RefObject<HTMLInputElement | null>;
   busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; isDraft: boolean;
   onClose?(): void; onCollapse?(): void; agent: { id: string; name: string };
+  /** Installed package versions from the server (About section). */
+  versions?: Versions;
   /** The agent's LaTeX setting, and changing a conversation's override (⋯ menu). */
   agentLatex: boolean; onLatex(id: string, value: LatexOverride): void;
 };
@@ -73,7 +77,7 @@ export function Sidebar(props: SidebarProps) {
         </section>}
       </nav>
     </ThreadListPrimitive.Root>
-    <details className="about"><summary>About this space</summary><p>Built with assistant-ui and ai-sdk-letta. Letta runs the agent; its tools run in the local server process.</p><p className="mono">{props.agent.id}</p></details>
+    <details className="about"><summary>About this space</summary><p>Built with assistant-ui and ai-sdk-letta. Letta runs the agent; its tools run in the local server process.</p><p className="mono">{props.agent.id}</p><VersionInfo versions={props.versions}/></details>
   </Rows.Provider>;
 }
 

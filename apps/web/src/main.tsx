@@ -9,6 +9,7 @@ import { historyMessages, observedParts, userContent, withTime, type FileChip } 
 import { api, errorCode, metadataError, setCsrf, uploadFile } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
+import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
@@ -35,6 +36,7 @@ const blockedNotice = 'This conversation has an unfinished or uncertain turn, so
 function App() {
   const toast = useToast();
   const [agent, setAgent] = useState<{ id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean } }>({ id: '', name: 'Connecting…', approvalTools: [] });
+  const [versions, setVersions] = useState<Versions>();
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const [filesEnabled, setFilesEnabled] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
@@ -177,7 +179,7 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean } } }>('/session'); setCsrf(session.csrf); setAgent(session.agent); setFilesEnabled(!!session.agent.files);
+        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean } }; versions?: Versions }>('/session'); setCsrf(session.csrf); setAgent(session.agent); setVersions(session.versions); setFilesEnabled(!!session.agent.files);
         const list = await api<ThreadSummary[]>('/v1/threads'); setThreads(list); setListLoading(false);
         const saved = localStorage.getItem(SAVED);
         const sorted = sortThreads(list);
@@ -374,7 +376,7 @@ function App() {
       <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && filesEnabled) || undefined}
         data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
-          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent}
+          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>

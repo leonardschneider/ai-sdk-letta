@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { FILE_LIMITS, IMAGE_LIMITS, IMAGE_MEDIA_TYPES, TEXT_EXTENSIONS } from 'ai-sdk-letta';
 import type { RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault } from './runtime.js';
+import { runtimeVersions } from './versions.js';
 
 /**
  * Server-to-server API: bearer token (256-bit hex) plus an owner header, on
@@ -188,9 +189,14 @@ export interface GuiAgentInfo {
  * reads, and every mutation also needs the exact Origin and an in-memory CSRF
  * token. Requests with a foreign Host, Origin or cross-site fetch metadata are
  * rejected. Static assets are served with a strict CSP.
+ *
+ * `GET /api/session` also returns `versions`: the installed `ai-sdk-letta`,
+ * `@ai-sdk-letta/server` and Letta SDK versions, read once here from their
+ * `package.json` ({@link runtimeVersions}).
  */
 export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo) {
   const app = express();
+  const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
   const csrf = randomBytes(32).toString('hex');
   app.disable('x-powered-by');
@@ -205,7 +211,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ui: { latex: agent.ui?.latex ?? true } } });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ui: { latex: agent.ui?.latex ?? true } }, versions });
   });
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
