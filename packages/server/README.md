@@ -1,7 +1,11 @@
 # @ai-sdk-letta/server
 
-Local HTTP runtime for [ai-sdk-letta](../ai-sdk-letta) agents. Unofficial; not
+Local HTTP runtime for [ai-sdk-letta](https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/ai-sdk-letta) agents. Unofficial; not
 affiliated with Letta or Vercel.
+
+```sh
+npm install @ai-sdk-letta/server ai-sdk-letta ai
+```
 
 - `ThreadRuntime`: durable threads and runs over one agent, NDJSON events,
   exactly-once answers, cancellation, rename and archive. A run interrupted by
@@ -25,5 +29,9 @@ Text may be empty when images are present. Images are validated against
 larger body (`RUN_BODY_LIMIT_BYTES`); others keep `BODY_LIMIT_BYTES` (24 KB)
 and answer `payload_too_large` (413) beyond it. Runtime state stores each
 image's type, size and SHA-256, never its bytes.
+
+`startGuiServer` serves a built browser app from the directory you pass. The
+assistant-ui app in this repository (`apps/web`) is not on npm yet; build it
+from a checkout.
 
 License: Apache-2.0.

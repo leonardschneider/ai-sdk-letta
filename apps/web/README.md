@@ -11,4 +11,9 @@ image attachments: paste, drop or pick PNG, JPEG, GIF or WebP images
 (downscaled in the browser when large), with removable thumbnails and
 click-to-enlarge in messages.
 
+**Not on npm yet.** This package is `"private": true`: build it in this
+repository and pass its `dist/` directory to `startGuiServer`. Shipping the
+built assets with `@ai-sdk-letta/server`, or publishing them as their own
+package, is a follow-up.
+
 License: Apache-2.0.

@@ -6,14 +6,14 @@ app-server protocol through `@letta-ai/letta-agent-sdk`.
 > **Unofficial.** This package is a port of Letta's MIT-licensed
 > [`@letta-ai/vercel-ai-sdk-provider`](https://github.com/letta-ai/vercel-ai-sdk-provider)
 > (Copyright (c) 2025 Letta) from the Letta REST client to the Letta Agent SDK.
-> It is maintained as part of [ai-sdk-letta](../../README.md), is not affiliated
+> It is maintained as part of [ai-sdk-letta](https://github.com/leonardschneider/ai-sdk-letta#readme), is not affiliated
 > with or endorsed by Letta or Vercel, and keeps the original MIT license
-> ([LICENSE](./LICENSE)). The upstream git history is preserved in this
-> repository. See [PORT-NOTES.md](./PORT-NOTES.md) for what changed and why.
+> ([LICENSE](https://github.com/leonardschneider/ai-sdk-letta/blob/main/packages/provider/LICENSE)). The upstream git history is preserved in this
+> repository. See [PORT-NOTES.md](https://github.com/leonardschneider/ai-sdk-letta/blob/main/packages/provider/PORT-NOTES.md) for what changed and why.
 
 **Provider or Agent?** Use this provider when you want `generateText` /
 `streamText` against an existing Letta agent, with Letta running its own
-tools. Use the [`ai-sdk-letta`](../ai-sdk-letta) `LettaAgent` when your
+tools. Use the [`ai-sdk-letta`](https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/ai-sdk-letta) `LettaAgent` when your
 application owns the tools and the human interactions (approvals and
 questions) and you want a persistent agent defined in code.
 
@@ -41,9 +41,12 @@ questions) and you want a persistent agent defined in code.
 ## Installation
 
 ```bash
-# Not published to npm yet: use it from this repository's workspace.
-npm install @ai-sdk-letta/provider
+npm install @ai-sdk-letta/provider ai zod
 ```
+
+`ai` (7.x) and `zod` (4.x) are peer dependencies. This package starts at
+0.1.0 under its new name; see [CHANGELOG.md](https://github.com/leonardschneider/ai-sdk-letta/blob/main/packages/provider/CHANGELOG.md) for the fork's
+history.
 
 ## Quick Start
 

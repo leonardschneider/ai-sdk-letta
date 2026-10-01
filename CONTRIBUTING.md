@@ -15,3 +15,6 @@ Thanks for your interest. Issues and pull requests are welcome.
 - Do not commit local state, tokens, agent or conversation IDs, or real
   conversation content.
 - Keep commits focused, and describe *why* in the message.
+- If a change affects a published package (`ai-sdk-letta`,
+  `@ai-sdk-letta/server`, `@ai-sdk-letta/provider`), add a changeset with
+  `npx changeset`. See [RELEASING.md](RELEASING.md).

@@ -14,6 +14,14 @@ and **Ctrl+V** or a dropped image path to attach images (shown as
 `[Image 1]`; Backspace removes). Clipboard images need `osascript` (macOS)
 or `wl-paste`/`xclip` (Linux); dropping a file works everywhere.
 
+**Not on npm yet.** This package is `"private": true`. Its `@ai-sdk/tui`
+dependency is patched by the repository's `postinstall` (below), and a patch
+in a published package's own tree is not applied when a consumer installs
+it from npm: they would get the unpatched `@ai-sdk/tui`, which lacks the
+options this TUI needs. Use it from a checkout of this repository
+(`npm run tui`). The way forward is still open: depend on a published fork of
+`@ai-sdk/tui`, or wait for the changes to land upstream.
+
 **Patched dependency.** `@ai-sdk/tui` is pinned at 1.0.119 and patched on
 install by `patch-package` ([patches/](patches)): display-only restored
 history (`initialMessages`), idle-only local slash commands (`localCommand`),

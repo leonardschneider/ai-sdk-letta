@@ -4,6 +4,13 @@ A persistent, Letta-backed Vercel AI SDK `Agent` with memory, dreaming,
 application-owned tools and human-in-the-loop. Unofficial; not affiliated with
 Letta or Vercel.
 
+```sh
+npm install ai-sdk-letta ai
+```
+
+Needs Node.js 22.19+, the Letta CLI and a local Letta backend with a connected
+model ([prerequisites](https://github.com/leonardschneider/ai-sdk-letta#prerequisites)).
+
 ```ts
 import { askUserTool, createLettaAgent, defineAgent } from 'ai-sdk-letta';
 
@@ -24,5 +31,5 @@ Main exports:
 - `createToolBridge`, `askUserTool`, `fileTraceWriter`: the tool policy layer.
 - `resolveStateDirectory`, `acquireIdentity`, history and navigation helpers.
 
-See the [repository README](../../README.md) for prerequisites, the security
+See the [repository README](https://github.com/leonardschneider/ai-sdk-letta#readme) for prerequisites, the security
 model, state and identity, and limitations. License: Apache-2.0.
