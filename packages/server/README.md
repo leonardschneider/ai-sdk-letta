@@ -18,7 +18,8 @@ npm install @ai-sdk-letta/server ai-sdk-letta ai
 Routes (under `/api` for the GUI): `GET /v1/capabilities`, `GET|POST /v1/threads`,
 `PATCH /v1/threads/:id`, `GET /v1/threads/:id/history`, `GET /v1/threads/:id/view`,
 `POST /v1/runs`, `GET /v1/runs/:id/events?after=N` (NDJSON), `POST /v1/runs/:id/answer`,
-`POST /v1/runs/:id/cancel`.
+`POST /v1/runs/:id/cancel`, and with the file tools `POST /v1/uploads`,
+`GET /v1/threads/:id/files`, `GET /v1/threads/:id/files/:name`.
 
 `POST /v1/runs` takes `{ id, threadId, text, parentRunId, images? }`, where
 `images` is a list of `{ mediaType, data }` (base64, no `data:` prefix).
@@ -28,7 +29,26 @@ Text may be empty when images are present. Images are validated against
 `images_too_many` (400), `images_too_large`: 413). Only this route accepts a
 larger body (`RUN_BODY_LIMIT_BYTES`); others keep `BODY_LIMIT_BYTES` (24 KB)
 and answer `payload_too_large` (413) beyond it. Runtime state stores each
-image's type, size and SHA-256, never its bytes.
+image's type, size and SHA-256, never its bytes. An image may carry a
+`name`; with the file tools it is also saved to the conversation's folder
+under that name.
+
+**Files** (when the definition includes `fileTools`). `POST /v1/uploads`
+takes one file's raw bytes (`Content-Type: application/octet-stream`, the
+URL-encoded name in `X-File-Name`), validates it (type by content, size,
+PDF text) and stages it; it returns `{ id, name, kind, mediaType, label,
+bytes, pages?, lines? }`. Only this route accepts raw bodies, up to
+`UPLOAD_BODY_LIMIT_BYTES` (25 MB); at most three uploads are validated at
+once (`uploads_busy`, 429). `POST /v1/runs` then takes `files: [id, ...]`
+(up to 8): the staged files move into the conversation's folder and the
+turn carries the "Attached: ..." note. Staged uploads expire after 24 hours.
+`GET /v1/threads/:id/files` lists a conversation's files (archived threads
+keep them); `GET /v1/threads/:id/files/:name` downloads one with
+`Content-Disposition: attachment`, `nosniff`, `Cross-Origin-Resource-Policy:
+same-origin` and a sandboxing CSP (text is served as `text/plain`). Errors
+use fixed codes: `file_unsupported_type`, `file_invalid`, `file_name_invalid`
+(400), `file_not_found`, `files_unavailable` (404), `files_too_many`,
+`conversation_files_full` (409), `file_too_large`, `payload_too_large` (413).
 
 `startGuiServer` serves a built browser app from the directory you pass. The
 assistant-ui app in this repository (`apps/web`) is not on npm yet; build it

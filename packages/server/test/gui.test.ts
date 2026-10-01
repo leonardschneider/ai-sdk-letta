@@ -30,7 +30,7 @@ test('GUI loopback session, CSRF, origin, Host and static asset boundaries', asy
     const cookie = session.headers.get('set-cookie')!;
     assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/);
     const data = await session.json() as { csrf: string; agent: { id: string; name: string; approvalTools: string[] } };
-    assert.deepEqual(data.agent, { id: 'sandbox', name: 'Sandbox', approvalTools: ['approval_demo'] }); assert.equal(data.csrf.length, 64);
+    assert.deepEqual(data.agent, { id: 'sandbox', name: 'Sandbox', approvalTools: ['approval_demo'], files: false }); assert.equal(data.csrf.length, 64);
     const headers = { cookie: cookie.split(';')[0], origin: base, 'content-type': 'application/json' };
     assert.equal((await fetch(`${base}/api/v1/threads`, { headers })).status, 200);
     assert.equal((await fetch(`${base}/api/v1/threads`, { method: 'POST', headers, body: '{}' })).status, 403);
