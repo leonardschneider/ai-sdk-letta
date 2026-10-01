@@ -8,6 +8,29 @@ repository's history up to the first release.
 
 ## Unreleased
 
+- File attachments. Opt-in built-in tools `list_files`, `read_file` (PDF
+  page or text line ranges, bounded, with truncation notices) and
+  `search_files` (passages with page or line), restricted to the current
+  conversation's folder, which the runtime binds. Files (text, Markdown,
+  CSV, JSON, code, PDF; detected by content) are stored per conversation
+  (0700/0600, atomic, sanitized names, no symlinks or traversal); the user's
+  turn carries only an "Attached: ..." note. PDFs are read with `unpdf`
+  1.8.1 (pure JavaScript) in a bounded worker; scanned pages are returned to
+  the model as images. Images are also saved to the folder. Typed
+  `FileInputError`s and `FILE_LIMITS`. The tool bridge passes a
+  runtime-bound `context` to tools and supports `toModelOutput` (text and
+  images, bounded).
+- `@ai-sdk-letta/server`: `POST /v1/uploads` (raw bytes, route-only 25 MB
+  limit, CSRF), `files` on `POST /v1/runs`, and `GET /v1/threads/:id/files`
+  and `/files/:name` (safe download headers).
+- `@ai-sdk-letta/web`: attach PDFs and text files by picker, drop or paste;
+  file chips in the composer and in messages (download on click); natural
+  file tool lines; error toasts.
+- `@ai-sdk-letta/tui`: dropped or pasted document paths attach as
+  `[File 1: name]`; restored turns show `[File: name]`. The `@ai-sdk/tui`
+  patch names files in markers and labels.
+- The example agent includes the file tools.
+
 - Image input. `LettaAgent` accepts images (AI SDK `image`/`file` parts) in a
   new user turn and sends them as Letta `ImageContent`; PNG, JPEG, GIF and
   WebP, validated by content, with per-image, count and total limits and
