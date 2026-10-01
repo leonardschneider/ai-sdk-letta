@@ -28,6 +28,12 @@ default, also for threads saved by earlier versions), `'on'` or `'off'`.
 Threads are listed with `latex`; `GET /api/session` (GUI) returns the
 agent's `ui: { latex }`. It returns the thread as listed.
 
+`GET /api/session` also returns `versions: { aiSdkLetta, server, lettaSdk }`,
+read once at startup from the `package.json` of the packages this server
+actually resolves (an npm install or a source checkout alike; `null` when one
+cannot be read), and shown under "About this space" in the browser app.
+`runtimeVersions()` returns the same object.
+
 `POST /v1/runs` takes `{ id, threadId, text, parentRunId, images? }`, where
 `images` is a list of `{ mediaType, data }` (base64, no `data:` prefix).
 Text may be empty when images are present. Images are validated against
