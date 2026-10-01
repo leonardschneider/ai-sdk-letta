@@ -246,26 +246,31 @@ They are opt-in, like every tool: a definition without them (or with
 `read_file: 'deny'`) accepts images only, exactly as before. The example
 agent includes them.
 
-- **How it works.** Attached files are stored in a folder that belongs to
-  the conversation. The user's message carries only a short note per file,
+- **How it works.** Attached files are stored in the conversation's folder
+  of the agent's [resources](#resources). The user's message carries only a short note per file,
   such as `Attached: report.pdf (PDF, 12 pages, 2.1 MB)`, never the content.
-  The agent then reads what it needs: `list_files` (name, type, size, page
+  The agent then reads what it needs: `list_files(folder?)` (name, type, size, page
   or line count), `read_file(name, range)` (PDF pages such as `"3"` or
   `"2-4"`, or text lines; about 12,000 characters per call, and the result
   says when it is truncated and which range to read next) and
-  `search_files(query)` (passages with file name and page or line).
-- **One folder per conversation.** The runtime binds the tools to the
-  conversation it opened; nothing the model sends can point them elsewhere.
-  Names resolve only inside that folder (no paths, no hidden files,
-  symlinks or hard links are never followed, and the folder's real path is
-  checked). A second conversation cannot see the first one's files.
+  `search_files(query, name?, folder?)` (passages with file name and page or line).
+- **The current conversation first, every conversation reachable.** The
+  runtime binds the tools to the conversation it opened: a plain name such as
+  `report.pdf` or `data/raw.csv` resolves in that conversation's folder, and a
+  name starting with `/` (`/Trip planning/itinerary.md`; `/workspace/...`
+  works too) resolves from the resources root, so the agent can use files
+  from any of its conversations. `list_files` with folder `"/"` lists them
+  all. Names never leave the root: `..`, hidden names and symlinks are
+  refused, and hard-linked files are not read. Files the agent creates with
+  shell commands are readable too, described by content.
 - **Types, detected by content:** plain text, Markdown, CSV, JSON, code and
   other UTF-8 text (binary content is refused whatever its name), PDF, and
   the image types above. Office documents are refused with a hint to export
   a PDF. Errors are `FileInputError`s with a fixed `code`:
   `file_unsupported_type`, `file_invalid`, `file_too_large`,
   `files_too_many`, `conversation_files_full`, `file_not_found`,
-  `file_name_invalid`, `file_range_invalid`.
+  `file_name_invalid`, `file_range_invalid`, `file_exists`, `resources_busy`,
+  `resources_full`.
 - **PDFs** are read with [unpdf](https://github.com/unjs/unpdf) (Mozilla's
   PDF.js, pure JavaScript, no native modules) in a worker thread with a
   memory cap and a deadline. Scripts in PDFs are never run. Text is
@@ -277,14 +282,90 @@ agent includes them.
 - **Images** are still sent inline, as before, and are also saved to the
   folder, so `list_files` shows them and `read_file` can show one again.
 - **Limits** (`FILE_LIMITS`): 25 MB per file, 8 files per message (images
-  keep their own limits), 100 files and 250 MB per conversation, the first
-  2,000 pages of a PDF.
+  keep their own limits), 100 attached files and 250 MB per conversation
+  folder, the first 2,000 pages of a PDF.
 - **No replay.** The note is ordinary text in Letta history. In the
   transcript, files are kept as SHA-256 references, like images; history
   that changes a file is refused as an edit.
 - **From code**, pass AI SDK `file` parts in the new user turn
   (`{ type: 'file', mediaType, filename, data }`, with bytes, base64 or a
   `data:` URL; remote URLs are never fetched).
+
+### Resources
+
+All of an agent's files live in one folder, its **resources**, versioned
+with git: one folder per conversation, plus any folders the user makes.
+The GUI shows them in a panel where the user can preview, upload, move,
+rename and delete them (see [GUI](#gui)); the TUI lists them with `/resources`.
+They are enabled by the file tools or the sandbox.
+
+```
+<state>/resources/<letta agent ID>/
+  files/            the work tree: one folder per conversation (named after its title) and user folders
+  git/              the git repository (separate from the work tree; no remote)
+  cache/            text extracted from PDFs, by content hash
+  state.json        which folder belongs to which conversation; where each attached file is now
+  resources.lock    held during a git operation
+```
+
+- **Folders are named after the conversation's title** (made a valid,
+  unique name; "Trip planning", "Trip planning (2)"). A conversation still
+  called "New conversation" gets its folder renamed once, with its first
+  real title. Later renames of the conversation keep the folder's name;
+  rename the folder in the panel if you like. The mapping from conversation
+  to folder is stored by ID, so it survives renames and moves of the folder
+  (also `mv` in the sandbox, followed by inode).
+- **One commit per change.** Every user operation (upload, new folder, move,
+  rename, delete, restore) is one commit with a clear message, such as
+  `Rename Trip planning/notes.txt to itinerary.md`. Attachments are committed
+  as `Attach report.pdf in Trip planning`. Whatever the agent changed during
+  a turn, finished or not, is committed at the end of the turn as
+  `Agent changes in <folder>`. A user operation commits only its own paths,
+  so a user action during a turn never sweeps up the agent's half-done work.
+  Changes made while the app was closed are committed on the next start.
+- **Git runs isolated and serialized.** A fixed identity
+  (`ai-sdk-letta <resources@ai-sdk-letta.invalid>`), `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`, literal pathspecs, no hooks, no remote. A lock
+  (a queue in the process plus a lock file across processes; a lock left
+  by a process that died is taken over) keeps user actions, the agent's
+  commit and other processes from racing.
+- **The agent cannot rewrite the history.** The repository lives in `git/`,
+  next to the work tree, and only `files/` is mounted in the sandbox. From
+  `/workspace`, `git` finds no repository, so the agent's own `git` commands
+  never touch the resources history. Repositories the agent creates in a
+  folder (`git init` in `/workspace/<folder>/project`) work as before; their
+  files are versioned by the resources too (their `.git` is not), and their
+  settings are reduced to plain ones and active hooks removed, because git
+  on your computer would obey them.
+- **Not versioned:** `.venv/`, `.home/`, `__pycache__/`, `node_modules/` and
+  other caches (the list, `RESOURCES_GITIGNORE`, is kept in the repository's
+  `info/exclude`, which commands cannot change; `.gitignore` files in
+  folders apply too), symlinks, and files over 100 MB. Hidden entries (names
+  starting with a dot), `__pycache__` and `node_modules` are not shown.
+- **Deleting keeps history.** The panel's Undo restores a deleted file or
+  folder from the commit before the delete. To recover anything later, use
+  git directly:
+
+  ```sh
+  cd <state>/resources/<letta agent ID>
+  git --git-dir=git --work-tree=files log --stat               # what changed, when
+  git --git-dir=git --work-tree=files restore --source=<commit>^ -- "Trip planning/notes.txt"
+  ```
+
+- **Upgrading from 0.3.** Files attached with 0.3 (in
+  `<state>/attachments/<agent ID>/<conversation ID>/`) are moved into the
+  resources automatically the first time the agent opens: each conversation
+  gets a folder named after its title, the files keep their names, the move
+  is one commit (`Import attachments from earlier versions`), and the old
+  folders are kept aside in `<state>/attachments/<agent ID>/.migrated/`. It
+  is idempotent and resumable. Links to files in older messages keep working,
+  also after you move or rename the files: they resolve through the record
+  of where each attached file is now (`state.json`), then the conversation's
+  folder, then the same content anywhere in the resources.
+- **From code:** `ResourceStore.open(statePaths(dir).resources, agentId)`
+  gives `tree()`, `upload()`, `createFolder()`, `move()`, `delete()`,
+  `restore()`, `log()` and `commitAll()`; `LettaRuntime.resources` is the
+  open agent's store.
 
 ### Shell commands (sandbox)
 
@@ -322,14 +403,18 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
   removed right after; everything else runs in the conversation's sandbox,
   which never has a network interface. A separate tool also makes the
   approval policy per tool (allow vs. ask) instead of per argument.
-- **Workspace.** `/workspace` is the conversation's attachment folder (the
-  same folder the file tools read), read-write except its `.meta/` and
-  `.text/` sidecars. Files the agent creates appear there, owned by your
-  user. An optional project folder is mounted at `/project`
+- **Workspace.** `/workspace` is the agent's [resources](#resources) work
+  tree, read-write: every conversation's folder, so commands can use files
+  from other conversations. Commands start in the current conversation's
+  folder (`cwd` is relative to it; absolute paths under `/workspace` work).
+  Files the agent creates appear in the Resources panel and are committed at
+  the end of the turn, owned by your user. The resources' git history is
+  not mounted. An optional project folder is mounted at `/project`
   (`sandbox.project`, or `{ path, readOnly: true }`).
-- **Python packages persist.** Commands use a virtual environment in
-  `/workspace/.venv` (created on first start); `pip install` puts packages
-  there, so a later turn, or a later run, still has them.
+- **Python packages persist.** Commands use one virtual environment,
+  `/workspace/.venv`, shared by all conversations (created on first start,
+  hidden and not versioned); `pip install` puts packages there, so a later
+  turn, conversation or run still has them.
 - **One sandbox per conversation**, started on the first command, reused
   across turns, stopped after 10 minutes without commands (`idleTimeoutMs`)
   and when the agent closes. Commands of a conversation run one at a time.
@@ -403,10 +488,13 @@ npm run tui -- --list              # list conversations and exit (no TTY needed)
 ```
 
 Inside: `/resume [title or ID]`, `/search [text]` (this agent's
-conversations only), `/help`; PgUp/PgDn scroll restored history; Esc exits.
+conversations only), `/resources`, `/help`; PgUp/PgDn scroll restored history; Esc exits.
 Approvals and questions appear as prompts during the turn that needs them.
 Shell commands show as "Ran `command`" cards with the exit code, the command
 and the first lines of output (verbatim).
+
+**Resources.** `/resources` lists the agent's [resources](#resources), one
+folder per conversation, with sizes, and marks the current conversation's folder.
 
 **Images.** Press **Ctrl+V** to attach an image from the clipboard, or drag
 an image file into the terminal (or paste its path; shell-escaped, quoted
@@ -459,6 +547,24 @@ Expanding shows the exact command, the exit code and the output in
 monospace, with "show more" for long output. Approval cards for
 `run_command_online` show the exact command.
 
+**Panels.** The conversations sidebar collapses with the button next to the
+agent's name or **⌘B** (Ctrl+B); the **Resources** panel opens with the
+folder button at the top right or **⌘⇧E** (Ctrl+Shift+E), and can be resized
+by dragging its edge. Both are remembered. On a phone, both are drawers.
+
+**Resources.** The panel shows the agent's [resources](#resources): one
+folder per conversation (the current one is marked "this chat" and opened)
+and your own folders, with file icons by type and sizes. Drag a file or
+folder onto a folder to move it; drop files from your computer onto a folder
+to upload them; right-click or use ⋯ for Preview, Download, Rename (inline;
+also F2), Move to…, New folder, Upload and Delete (with a confirmation, and
+an Undo in the notice). Files the agent creates appear while it works.
+Click a file to **preview** it: CSV and TSV as a table (the first 500 rows),
+Markdown with the same safe renderer as the chat, text, images, PDFs in the
+browser's viewer, and HTML in a sandboxed frame without scripts. Previews
+are served under a policy that allows no script, no network and no access to
+the app (`default-src 'none'; sandbox`); HTML is shown only inside it.
+
 **Files.** With the file tools, the same paperclip, drop and paste attach
 PDFs and text files (Markdown, CSV, JSON, code). Each is uploaded and
 checked by the server right away and appears as a chip with its name, type
@@ -504,8 +610,16 @@ token-authenticated server-to-server API with the same routes.
   downloads are same-origin, need the session, and are always sent as
   attachments (`Content-Disposition: attachment`, text as `text/plain`,
   `nosniff`, a sandboxing CSP), so a file never runs as part of the app.
-- **Files are confined** to their conversation's folder (see
-  [Files](#files)); the file tools only read.
+  Previews are inline but in a frame of their own under
+  `default-src 'none'; ...; sandbox` (an opaque origin: no script, no
+  network, no cookies; PDFs get the browser's viewer under a policy without
+  scripts or network); the app's own CSP allows frames from itself only.
+  The resources routes (`/v1/resources...`) need the session, every change
+  needs Origin and CSRF, and paths are checked on the server (no `..`, hidden
+  names or symlinks).
+- **Files are confined** to the agent's [resources](#resources); the file
+  tools only read, and the sandbox mounts the work tree but never its git
+  history.
 - **Shell commands run in a sandbox** without network, credentials or host
   environment; network commands always ask (see
   [Shell commands](#shell-commands-sandbox)).
@@ -533,19 +647,16 @@ State lives in one directory, resolved in this order:
   tool-traces/             metadata-only tool audit (NDJSON, per day)
   server/<id>/gui|api/     thread and run records for the HTTP runtime
     uploads/.staging/      browser uploads not yet sent (removed after 24 hours)
-  attachments/<letta agent ID>/<conversation ID>/
-                           attached files (0600, folders 0700), plus .meta/ and .text/ sidecars
+  resources/<letta agent ID>/
+                           all files, git-versioned: files/ (one folder per conversation), git/, cache/, state.json
+  attachments/<letta agent ID>/.migrated/
+                           files of 0.3 kept aside after they were moved into resources/
 ```
 
-**Attached files** stay in their conversation's folder, including after the
-conversation is archived; they are never sent anywhere except to the model
-through the file tools. To find a conversation's folder, list its files in
-the GUI (`GET /api/v1/threads/<id>/files`) or look under
-`<state>/attachments/` for the Letta agent ID (`agents/<id>.json`) and the
-conversation ID. To delete files, stop the app and remove the folder (or
-single files and their `.meta/<name>.json`); the agent then no longer sees
-them, while history still shows the note. Deleting from the app is not
-available yet.
+**Files** stay in the agent's resources, including after a conversation is
+archived; they are never sent anywhere except to the model through the file
+tools and the sandbox. Manage them in the GUI's Resources panel, or with git
+(see [Resources](#resources)).
 
 **Keeping an existing agent.** The mapping is what ties a logical ID to a
 Letta agent. To reuse an agent you already created with an earlier tool or
@@ -585,8 +696,15 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   GIF, WebP; 5 MB each, 10 MB total) and, with the file tools, 8 files
   (PDF or text, 25 MB each) per turn. No Office documents, no OCR (scanned
   PDF pages are shown to the model as images, so reading them depends on
-  the model), and no file deletion from the app yet. No history edits,
-  regeneration or retries by design.
+  the model). No history edits, regeneration or retries by design.
+- **Resources.** The panel refreshes by polling every few seconds while it
+  is open (and at once when a turn ends). It lists up to 5,000 entries and
+  versions up to 20,000 files; previews show files up to 25 MB, CSV and TSV
+  up to 500 rows. Undo is offered right after a delete; older versions are
+  recovered with git (see [Resources](#resources)), not from the app. The
+  sandbox mounts all of an agent's resources, so every conversation's
+  commands can change every folder (each change is committed and can be
+  restored).
 - **Images in restored history** are shown when Letta returns them: the
   browser displays the newest 48 MB per conversation and `[Image]` for the
   rest; the terminal always shows `[Image]`. A reply that is still running
