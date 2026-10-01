@@ -42,9 +42,10 @@ npm run script --workspace @ai-sdk-letta/example-my-agent -- "How many business 
 ```
 
 Environment variables: `LETTA_MODEL` (model handle, default
-`openai-codex/gpt-5.5`), `AGENT_ID` and `AGENT_NAME` (for a throwaway agent),
+`openai-codex/gpt-5.5`), `STARTER_AGENT_ID` (a throwaway logical ID),
 `AI_SDK_LETTA_STATE_DIR` (state directory), `DATE_DIFF_PERMISSION=ask`
-(approve each `date_diff` call).
+(approve each `date_diff` call). When you rename the agent, rename
+`STARTER_AGENT_ID` too, or remove it.
 
 Try: "How many business days between 2026-03-02 and 2026-04-03?", or "Ask
 me which month to plan for, with three options".

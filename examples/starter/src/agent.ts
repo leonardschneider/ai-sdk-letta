@@ -6,12 +6,14 @@ import { dateDiff } from './tools.js';
  * the first run: the first run creates a persistent Letta agent for this ID
  * and every later run reopens it.
  *
- * `AGENT_ID`, `AGENT_NAME` and `LETTA_MODEL` override the defaults without
- * editing code (for example, a throwaway ID for a smoke test).
+ * `STARTER_AGENT_ID` (for example, a throwaway ID for a smoke test) and
+ * `LETTA_MODEL` override the defaults without editing code. The variable is
+ * namespaced on purpose: some shells, such as Letta Code's, already export
+ * `AGENT_ID` and `AGENT_NAME` for their own agent.
  */
 export const agent = defineAgent({
-  id: process.env.AGENT_ID ?? 'starter-assistant',
-  name: process.env.AGENT_NAME ?? 'Starter Assistant',
+  id: process.env.STARTER_AGENT_ID ?? 'starter-assistant',
+  name: 'Starter Assistant',
   model: process.env.LETTA_MODEL ?? 'openai-codex/gpt-5.5',
   instructions: 'You are a concise planning assistant. For any question about the number of days, weeks or business days between dates, '
     + 'or the weekday of a date, call date_diff instead of computing it yourself. '

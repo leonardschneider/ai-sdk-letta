@@ -91,7 +91,9 @@ Then, in `examples/my-agent`:
 1. In `package.json`, set `"name"` to `@ai-sdk-letta/example-my-agent`
    (workspace names must be unique; keep `"private": true`).
 2. In `src/agent.ts`, set `id` (for example `my-agent`) and `name`, then
-   edit `instructions`, `tools` and `permissions`.
+   edit `instructions`, `tools` and `permissions`. Rename the
+   `STARTER_AGENT_ID` override too (for example `MY_AGENT_ID`), so the two
+   agents never share one.
 
 Back at the repository root, run `npm install` once so npm links the new
 workspace (`examples/*` are all workspaces), then:
@@ -210,7 +212,7 @@ import { askUserTool, defineAgent } from 'ai-sdk-letta';
 import { convertTemperature, saveNote } from './tools.js';
 
 export const agent = defineAgent({
-  id: process.env.AGENT_ID ?? 'kitchen-helper',   // stable; never reuse for another agent
+  id: process.env.KITCHEN_AGENT_ID ?? 'kitchen-helper', // stable; never reuse for another agent
   name: 'Kitchen Helper',                          // checked on every start
   model: process.env.LETTA_MODEL ?? 'openai-codex/gpt-5.5',
   instructions: 'You help with cooking. Use convert_temperature for any temperature conversion. '
@@ -475,8 +477,10 @@ The mapping is also tied to the Letta local backend directory
 - **Start fresh, keeping the old agent:** use a new `id`, or a new state
   directory. The old Letta agent stays in Letta, unused.
 - **Experiment safely:** use a throwaway ID and state directory, for example
-  `AGENT_ID=kitchen-test AI_SDK_LETTA_STATE_DIR=/tmp/kitchen-test` (the
-  starter reads `AGENT_ID`).
+  `KITCHEN_AGENT_ID=kitchen-test AI_SDK_LETTA_STATE_DIR=/tmp/kitchen-test`
+  (the starter reads `STARTER_AGENT_ID`). Give such an override a name of
+  your own: generic names such as `AGENT_ID` may already be set by the shell
+  (Letta Code sets `AGENT_ID` and `AGENT_NAME` for its own agent).
 - **Delete an agent:** stop every process using it, delete the Letta agent,
   then remove its mapping and folders. Deleting only the mapping makes the
   next start create a second Letta agent with the same name; deleting only
@@ -545,7 +549,7 @@ state directory so you never touch a real agent, run one tool call and one
 question, then clean up:
 
 ```sh
-export AGENT_ID=starter-smoke AI_SDK_LETTA_STATE_DIR=/tmp/starter-smoke
+export STARTER_AGENT_ID=starter-smoke AI_SDK_LETTA_STATE_DIR=/tmp/starter-smoke
 npm run script --workspace @ai-sdk-letta/example-starter -- "How many business days from 2026-03-02 to 2026-03-16?"
 npm run script --workspace @ai-sdk-letta/example-starter -- "Ask me which month to plan for, with three options, then tell me what I picked."
 ```
