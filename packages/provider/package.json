@@ -63,8 +63,7 @@
     "prepack": "node ../../scripts/check-dist.mjs"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^2.0.0",
-    "@ai-sdk/provider-utils": "^3.0.16",
+    "@ai-sdk/provider": "^4.0.18",
     "@letta-ai/letta-agent-sdk": "0.8.22"
   },
   "peerDependencies": {
@@ -79,7 +78,7 @@
     "tsup": "^8",
     "typescript": "5.9.3",
     "vite": "^7.1.5",
-    "vitest": "^3.1.1",
+    "vitest": "^5.0.3",
     "ws": "^8.21.3",
     "zod": "^4.6.5"
   }

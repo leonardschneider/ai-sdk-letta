@@ -37,7 +37,12 @@
     "@changesets/cli": "3.0.3",
     "@types/node": "22.19.15",
     "patch-package": "8.0.1",
-    "tsx": "4.21.0",
+    "tsx": "4.23.15",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "tsup": {
+      "esbuild": "^0.28.1"
+    }
   }
 }
