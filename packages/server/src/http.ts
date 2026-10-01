@@ -141,7 +141,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title)));
-  app.patch('/v1/threads/:id', (req, res) => res.json(runtime.updateMetadata(owner, req.params.id, req.body)));
+  // A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
+  app.patch('/v1/threads/:id', async (req, res) => { const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary); });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body)));

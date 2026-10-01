@@ -196,13 +196,17 @@ export class ThreadRuntime {
     thread.title = title;
     if (typeof patch.archived === 'boolean') thread.archived = patch.archived;
     this.save();
-    // A folder still named after a placeholder title ("New conversation") takes the first real one.
+    // The conversation's folder follows its title (after the running turn, if any). A failure never fails the rename.
     if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {
       const conversationId = thread.conversationId;
-      void (async () => { try { await this.resourcesOf(thread.agentId).retitle(conversationId, title); } catch { /* the folder keeps its name */ } })();
+      const store = this.resourcesOf(thread.agentId);
+      this.renaming = this.renaming.then(() => store.retitle(conversationId, title)).then(() => {}, () => {});
     }
     return this.summary(thread);
   }
+  private renaming: Promise<void> = Promise.resolve();
+  /** Resolves when folder renames requested by {@link updateMetadata} are done (or deferred to the end of a turn). */
+  folderRenamed(): Promise<void> { return this.renaming; }
   async create(owner: string, id: string, title: string) {
     this.authorize(owner);
     if (!uuid.test(id) || typeof title !== 'string' || !title.trim() || title.length > 120) throw new RuntimeFault('invalid_input', 400);
@@ -306,7 +310,10 @@ export class ThreadRuntime {
    * this runtime knows it) and the user's own folders. `version` changes with
    * the content; pass it back as `since` to get `{ unchanged: true }` cheaply.
    */
-  resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; changes: number }> {
+  async resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; changes: number }> {
+    this.authorize(owner);
+    // Before the first conversation there is no agent yet, so nothing to list (not an error).
+    if (this.host.attachmentsRoot && !this.state.threads.some(t => t.agentId)) return { children: [], truncated: false, version: 'empty', threads: {}, changes: 0 };
     return this.withResources(owner, store => {
       const tree = store.tree();
       const threads: Record<string, string> = {};

@@ -30,7 +30,7 @@ function fixture() {
       const store = ResourceStore.open(root, AGENT);
       const attachments = new AttachmentStore(store, conversationId, { title });
       const agent = current = new LettaAgent({ id: 'fixture', tools: { ...tools, ...fileTools }, lettaAgentId: AGENT, interactions: new ToolInteractions(), attachments,
-        afterTurn: async () => { await store.commitAgentChanges(conversationId); },
+        beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId),
         open: () => ({
           async send() { writeFileSync(join(attachments.directory, 'agent-notes.md'), '# Made by the agent\n'); }, async abort() {}, close() {},
           async *stream() { yield { type: 'result', success: true, uuid: 'r', durationMs: 1, conversationId } as SDKMessage; },
@@ -87,15 +87,68 @@ test('the tree has one folder per conversation (with its thread), user folders, 
     assert.notEqual(after.version, tree.version);
     assert.ok(after.changes > tree.changes, 'commits are counted, so the browser can refresh');
     assert.deepEqual(after.children.find(n => n.name === 'Budget')!.children!.map(n => [n.name, n.bytes]), [['agent-notes.md', 20]]);
-    // A placeholder title becomes the folder's name with the first real title; later titles do not rename it.
+    // Every rename of the conversation renames its folder.
     const c = randomUUID();
     await f.runtime.create('owner', c, 'New conversation');
     f.runtime.updateMetadata('owner', c, { title: 'Lisbon itinerary' });
-    await until(async () => (await f.runtime.resourceTree('owner')).children.some(n => n.name === 'Lisbon itinerary'));
-    f.runtime.updateMetadata('owner', c, { title: 'Porto itinerary' });
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await f.runtime.folderRenamed();
     assert.ok((await f.runtime.resourceTree('owner')).children.some(n => n.name === 'Lisbon itinerary'));
+    f.runtime.updateMetadata('owner', c, { title: 'Porto itinerary' });
+    await f.runtime.folderRenamed();
+    const names = (await f.runtime.resourceTree('owner')).children.map(n => n.name);
+    assert.ok(names.includes('Porto itinerary') && !names.includes('Lisbon itinerary'), names.join());
   } finally { await f.cleanup(); }
+});
+
+test('renaming a conversation during a turn renames its folder after the turn; the running command keeps its folder; chips resolve', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-rename-'));
+  const root = join(directory, 'resources');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let cwdDuringTurn = '';
+  let wroteAfterRename = false;
+  const host: RuntimeHost = {
+    attachmentsRoot: root,
+    async close() {},
+    async open() {
+      const store = ResourceStore.open(root, AGENT);
+      const attachments = new AttachmentStore(store, 'conv-1', { title: 'Trip' });
+      const agent = new LettaAgent({ id: 'fixture', tools: { ...tools, ...fileTools }, lettaAgentId: AGENT, interactions: new ToolInteractions(), attachments,
+        beforeTurn: () => store.beginTurn('conv-1'), afterTurn: () => store.endTurn('conv-1'),
+        open: () => ({
+          // Like a command running in the conversation's folder: it starts there, the user renames the chat, it keeps writing there.
+          async send() { cwdDuringTurn = attachments.directory; await gate; writeFileSync(join(cwdDuringTurn, 'result.txt'), 'done'); wroteAfterRename = true; },
+          async abort() {}, close() {},
+          async *stream() { yield { type: 'result', success: true, uuid: 'r', durationMs: 1, conversationId: 'conv-1' } as SDKMessage; },
+        }) });
+      return { agent, agentId: AGENT, conversationId: 'conv-1', history: [] };
+    },
+  };
+  const runtime = new ThreadRuntime(host, join(directory, 'state.json'), 'owner');
+  try {
+    const thread = randomUUID();
+    await runtime.create('owner', thread, 'Trip');
+    const staged = await runtime.upload('owner', 'plan.md', Buffer.from('# Plan\n'));
+    const run = { id: randomUUID(), threadId: thread, text: 'work', parentRunId: null, files: [staged.id!] };
+    await runtime.start('owner', run);
+    await until(() => cwdDuringTurn !== '');
+    runtime.updateMetadata('owner', thread, { title: 'Lisbon' });
+    await runtime.folderRenamed();
+    assert.deepEqual((await runtime.resourceTree('owner')).children.map(n => n.name), ['Trip'], 'not renamed while the turn runs');
+    release();
+    await until(() => runtime.events('owner', run.id, 0).status === 'completed');
+    const store = ResourceStore.open(root, AGENT);
+    await until(() => subjects(store)[0] === 'Rename folder Trip → Lisbon');
+    assert.ok(wroteAfterRename);
+    assert.deepEqual(subjects(store).slice(0, 2), ['Rename folder Trip → Lisbon', 'Agent changes in Trip']);
+    assert.deepEqual((await runtime.resourceTree('owner')).children[0]!.children!.map(n => n.name), ['plan.md', 'result.txt'], 'the command finished in the folder, which then moved as a whole');
+    assert.equal(runtime.file('owner', thread, 'plan.md').bytes.toString(), '# Plan\n', 'the chip still downloads');
+    // Idle again: a rename applies at once.
+    runtime.updateMetadata('owner', thread, { title: 'Porto' });
+    await runtime.folderRenamed();
+    assert.deepEqual((await runtime.resourceTree('owner')).children.map(n => n.name), ['Porto']);
+    assert.equal(runtime.file('owner', thread, 'plan.md').bytes.toString(), '# Plan\n');
+  } finally { await runtime.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('operations: upload, folder, move, rename, delete and restore are one commit each; chips in old messages still download after moves', async () => {

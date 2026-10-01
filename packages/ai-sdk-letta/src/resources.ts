@@ -60,8 +60,6 @@ node_modules/
 .DS_Store
 `;
 
-/** Titles that only stand in until a conversation gets a real one; its folder is renamed then. */
-const PLACEHOLDER_TITLES = new Set(['new conversation', 'new chat', 'untitled', 'untitled conversation']);
 const AGENT_ID = /^agent-[a-zA-Z0-9-]{1,100}$/;
 const CONVERSATION_ID = /^(?:default|(?:conv-|local-conv-)[a-zA-Z0-9-]{1,100})$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -90,6 +88,7 @@ export interface ResourceFile extends StoredFile { path: string }
 /** One commit in the resources history. */
 export interface ResourceCommit { commit: string; message: string; date: string }
 
+/** `provisional` was written by an earlier version; it is ignored. */
 type FolderEntry = { path: string; ino?: number; provisional?: boolean };
 type LedgerEntry = { conversationId: string; name: string; path: string; sha256: string; bytes: number };
 type State = { version: 1; folders: Record<string, FolderEntry>; attachments: LedgerEntry[]; migrated: string[] };
@@ -173,7 +172,6 @@ export function folderNameFromTitle(title: string | undefined, fallback: string)
 }
 /** Names the resources UI and listings leave out: hidden (dot) entries, caches, odd names. */
 const hiddenName = (name: string) => name.startsWith('.') || name === '__pycache__' || name === 'node_modules' || /[\0-\x1f\x7f\\]/.test(name);
-const isPlaceholder = (title: string | undefined) => !title?.trim() || PLACEHOLDER_TITLES.has(title.trim().toLowerCase());
 
 /* ------------------------------------------------------------------ */
 /* Lock                                                                */
@@ -507,9 +505,8 @@ export class ResourceStore {
 
   /**
    * The folder of a conversation, created if needed (path from the root).
-   * A new folder is named after `title` (made unique); while the title is a
-   * placeholder such as "New conversation", the folder is renamed with the
-   * first real title (see {@link retitle}).
+   * A new folder is named after `title` (made unique); when the conversation
+   * is renamed, the folder follows (see {@link retitle}).
    */
   ensureFolder(conversationId: string, title?: string): string {
     if (!CONVERSATION_ID.test(conversationId)) throw invalid('Invalid conversation ID');
@@ -534,7 +531,7 @@ export class ResourceStore {
     const fallback = conversationId === 'default' ? 'Default conversation' : `Conversation ${tail.length > 8 ? tail.slice(-8) : tail}`;
     const name = this.freeName('', folderNameFromTitle(title, fallback));
     mkdirSync(join(this.files, name), { mode: 0o700 });
-    state.folders[conversationId] = { path: name, ino: lstatSync(join(this.files, name)).ino, ...(isPlaceholder(title) ? { provisional: true } : {}) };
+    state.folders[conversationId] = { path: name, ino: lstatSync(join(this.files, name)).ino };
     this.save(state);
     return name;
   }
@@ -547,24 +544,46 @@ export class ResourceStore {
     return Object.keys(this.state().folders).map(conversationId => ({ conversationId, path: this.folderOf(conversationId)! }));
   }
   /**
-   * A conversation got a title. Its folder is renamed only if it was named
-   * after a placeholder title and never renamed since; otherwise the folder
-   * keeps its name (rename it in the resources instead).
+   * A conversation was renamed: its folder takes the new title (made a valid
+   * name, unique in its parent), wherever the folder is now, also if the user
+   * renamed or moved it. One commit, "Rename folder <old> → <new>". While a
+   * turn of that conversation runs, the rename waits until the turn ended
+   * (after its end-of-turn commit), so running commands keep their working
+   * directory; only the newest title is applied. A conversation whose folder
+   * no longer exists keeps none (nothing is created).
+   * @returns the new path, `'deferred'`, or `undefined` when nothing changed
    */
-  async retitle(conversationId: string, title: string): Promise<string | undefined> {
-    const entry = this.state().folders[conversationId];
-    if (!entry?.provisional || isPlaceholder(title)) return undefined;
+  async retitle(conversationId: string, title: string): Promise<string | 'deferred' | undefined> {
+    if (!this.state().folders[conversationId]) return undefined;
+    if (this.running.has(conversationId)) { this.pendingTitles.set(conversationId, title); return 'deferred'; }
+    this.pendingTitles.delete(conversationId);
     const from = this.folderOf(conversationId)!;
-    if (!existsSync(join(this.files, from))) return undefined;
-    const name = folderNameFromTitle(title, baseName(from));
+    try { if (!lstatSync(join(this.files, from)).isDirectory()) return undefined; } catch { return undefined; }
     const parent = parentOf(from);
-    const free = this.freeNameExcept(parent, name, baseName(from));
-    const to = joinResourcePath(parent, free);
-    if (to === from) { const state = this.state(); delete state.folders[conversationId]!.provisional; this.save(state); return from; }
-    const result = await this.move(from, to);
-    const state = this.state();
-    if (state.folders[conversationId]) { delete state.folders[conversationId]!.provisional; this.save(state); }
-    return result.path;
+    const name = this.freeNameExcept(parent, folderNameFromTitle(title, baseName(from)), baseName(from));
+    const to = joinResourcePath(parent, name);
+    if (to === from) return undefined;
+    return (await this.move(from, to, `Rename folder ${from} → ${name}`)).path;
+  }
+  /** Conversations with a turn running (their folder renames wait), and the titles to apply when they end. */
+  private readonly running = new Map<string, number>();
+  private readonly pendingTitles = new Map<string, string>();
+  /** A turn of `conversationId` started: renames of its folder wait until {@link endTurn}. */
+  beginTurn(conversationId: string) { this.running.set(conversationId, (this.running.get(conversationId) ?? 0) + 1); }
+  /** Is a turn of this conversation running? */
+  turnRunning(conversationId: string) { return this.running.has(conversationId); }
+  /**
+   * A turn ended: commit what the agent changed ("Agent changes in <folder>"),
+   * then apply a folder rename that waited for the turn.
+   */
+  async endTurn(conversationId: string): Promise<void> {
+    try { await this.commitAgentChanges(conversationId); }
+    finally {
+      const left = (this.running.get(conversationId) ?? 1) - 1;
+      if (left > 0) this.running.set(conversationId, left); else this.running.delete(conversationId);
+      const title = left > 0 ? undefined : this.pendingTitles.get(conversationId);
+      if (title !== undefined) await this.retitle(conversationId, title).catch(() => undefined);
+    }
   }
   private freeNameExcept(folder: string, name: string, except: string) {
     for (let n = 1; n <= 200; n++) { const candidate = n === 1 ? name : numberedName(name, n); if (!this.existsCaseless(folder, candidate, except)) return candidate; }
@@ -688,8 +707,8 @@ export class ResourceStore {
    * Rename or move a file or folder to `to` (its full new path; the parent
    * must exist). Conversation folders and attachment links follow it.
    */
-  move(from: string, to: string): Promise<{ path: string; from: string; commit?: string }> {
-    return this.change(value => parentOf(value.from) === parentOf(value.path) ? `Rename ${value.from} to ${baseName(value.path)}` : `Move ${value.from} to ${parentOf(value.path) || 'the top level'}`,
+  move(from: string, to: string, message?: string): Promise<{ path: string; from: string; commit?: string }> {
+    return this.change(value => message ?? (parentOf(value.from) === parentOf(value.path) ? `Rename ${value.from} to ${baseName(value.path)}` : `Move ${value.from} to ${parentOf(value.path) || 'the top level'}`),
       value => [value.from, value.path], () => {
         const source = splitResourcePath(from).join('/');
         const target = splitResourcePath(to).map((part, index, all) => index === all.length - 1 ? sanitizeFileName(part) : part).join('/');
@@ -704,7 +723,7 @@ export class ResourceStore {
         renameSync(sourcePath, join(targetParent, baseName(target)));
         syncDirectory(targetParent);
         const state = this.state();
-        for (const entry of Object.values(state.folders)) if (within(entry.path, source)) { entry.path = target + entry.path.slice(source.length); if (entry.path === target) delete entry.provisional; }
+        for (const entry of Object.values(state.folders)) if (within(entry.path, source)) entry.path = target + entry.path.slice(source.length);
         for (const entry of state.attachments) if (within(entry.path, source)) entry.path = target + entry.path.slice(source.length);
         this.save(state);
         this.described.clear();

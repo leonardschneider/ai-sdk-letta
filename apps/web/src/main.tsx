@@ -195,6 +195,8 @@ function App() {
   async function patch(id: string, body: { title?: string; archived?: boolean }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
+    // The conversation's folder follows its title: refresh the Resources panel now.
+    if (body.title !== undefined) setTurns(n => n + 1);
     return updated;
   }
   async function rename(id: string, title: string) {

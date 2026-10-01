@@ -309,11 +309,14 @@ They are enabled by the file tools or the sandbox.
 ```
 
 - **Folders are named after the conversation's title** (made a valid,
-  unique name; "Trip planning", "Trip planning (2)"). A conversation still
-  called "New conversation" gets its folder renamed once, with its first
-  real title. Later renames of the conversation keep the folder's name;
-  rename the folder in the panel if you like. The mapping from conversation
-  to folder is stored by ID, so it survives renames and moves of the folder
+  unique name; "Trip planning", "Trip planning (2)") and **follow it**: when
+  the conversation is renamed, its folder is renamed too, as one commit
+  (`Rename folder Trip planning → Lisbon`), wherever the folder is now, also
+  if you renamed or moved it in the panel. While a turn of that conversation
+  runs, the rename waits until the turn ends (after its end-of-turn commit),
+  so commands that are running keep their working directory. A folder you
+  deleted is not recreated by a rename. The mapping from conversation to
+  folder is stored by ID, so it survives renames and moves of the folder
   (also `mv` in the sandbox, followed by inode).
 - **One commit per change.** Every user operation (upload, new folder, move,
   rename, delete, restore) is one commit with a clear message, such as

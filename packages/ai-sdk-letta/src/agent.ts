@@ -56,6 +56,8 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
    * agent changed in its resources). Errors are ignored.
    */
   afterTurn?: () => Promise<void>;
+  /** Runs when a turn starts, before anything is stored or sent (paired with `afterTurn`). Errors are ignored. */
+  beforeTurn?: () => void;
 }
 
 type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS>;
@@ -262,6 +264,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
   private readonly afterTurn?: () => Promise<void>;
+  private readonly beforeTurn?: () => void;
   private readonly modelId: string;
   private history: ModelMessage[] = [];
   private busy = false;
@@ -280,6 +283,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.modelId = options.modelId ?? 'letta';
     this.attachments = options.attachments;
     this.afterTurn = options.afterTurn;
+    this.beforeTurn = options.beforeTurn;
   }
   private settled?: Promise<void>;
   /** Resolves when the work after the last turn (see `afterTurn`) is done. */
@@ -312,10 +316,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
     options.abortSignal?.throwIfAborted();
     this.busy = true;
+    try { this.beforeTurn?.(); } catch { /* observer */ }
     // Attachments are stored before delivery; a turn that then fails leaves them in the folder (harmless, and listed).
     let turn: Awaited<ReturnType<typeof storeUserTurn>>;
     try { turn = await storeUserTurn(parsed, this.attachments, options.abortSignal); options.abortSignal?.throwIfAborted(); }
-    catch (error) { this.busy = false; throw error; }
+    catch (error) { this.busy = false; this.finishTurn(); throw error; }
     const control = new AbortController();
     this.active = control;
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;

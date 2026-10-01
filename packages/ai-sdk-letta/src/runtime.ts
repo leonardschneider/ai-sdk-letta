@@ -287,7 +287,8 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
       delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
       // Whatever the agent changed in the resources during the turn becomes one commit.
-      ...(resources ? { afterTurn: async () => { await resources!.commitAgentChanges(conversationId); } } : {}),
+      // Folder renames of this conversation wait while a turn runs, then apply after that commit.
+      ...(resources ? { beforeTurn: () => resources!.beginTurn(conversationId), afterTurn: () => resources!.endTurn(conversationId) } : {}),
     });
     return { agent, identity, navigation, ...(resources ? { resources } : {}), close: async () => { agent.close(); await agent.idle(); await close(); } };
   } catch (error) { await close(); throw error; }

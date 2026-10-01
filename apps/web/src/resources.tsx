@@ -106,7 +106,20 @@ export function ResourcesPanel(props: Props) {
     const timer = setInterval(() => { if (document.visibilityState === 'visible' && !stopped.current) void load(true); }, POLL_MS);
     return () => clearInterval(timer);
   }, [props.visible, load]);
-  useEffect(() => { if (props.visible && !stopped.current) void load(true); }, [props.refreshKey, props.visible, load]);
+  // At the end of a turn (and after a rename), and once more shortly after: a folder rename that waited for the turn lands right after its commit.
+  useEffect(() => {
+    if (!props.visible || stopped.current) return;
+    void load(true);
+    const again = setTimeout(() => { if (!stopped.current) void load(true); }, 1200);
+    return () => clearTimeout(again);
+  }, [props.refreshKey, props.visible, load]);
+  // Polling pauses in a background tab; catch up as soon as it is shown again.
+  useEffect(() => {
+    if (!props.visible) return;
+    const shown = () => { if (document.visibilityState === 'visible' && !stopped.current) void load(true); };
+    document.addEventListener('visibilitychange', shown);
+    return () => document.removeEventListener('visibilitychange', shown);
+  }, [props.visible, load]);
 
   // The current conversation's folder is expanded and scrolled into view.
   useEffect(() => {

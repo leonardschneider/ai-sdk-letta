@@ -48,7 +48,7 @@ test('layout: work tree, separate git history (never inside the tree), private f
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('conversation folders: named after the title, unique, stable, renamed once from a placeholder title only', async () => {
+test('conversation folders: named after the title, unique, with a mapping that follows moves', async () => {
   const root = tmp();
   try {
     const store = ResourceStore.open(root, AGENT);
@@ -57,9 +57,7 @@ test('conversation folders: named after the title, unique, stable, renamed once 
     assert.equal(store.ensureFolder('conv-b', 'trip planning'), 'trip planning (2)', 'unique ignoring case');
     assert.equal(store.ensureFolder('conv-a', 'Another title'), 'Trip planning', 'the mapping is stable');
     assert.equal(store.ensureFolder('conv-c', 'New conversation'), 'New conversation');
-    assert.equal(await store.retitle('conv-c', 'Budget review'), 'Budget review', 'a placeholder folder takes the first real title');
-    assert.equal(await store.retitle('conv-c', 'Something else'), undefined, 'only once');
-    assert.equal(await store.retitle('conv-a', 'Renamed chat'), undefined, 'a titled folder keeps its name');
+    assert.equal(await store.retitle('conv-c', 'Budget review'), 'Budget review');
     assert.equal(store.folderOf('conv-c'), 'Budget review');
     // Moving a conversation folder keeps the mapping.
     await store.createFolder('', 'Archive');
@@ -74,6 +72,56 @@ test('conversation folders: named after the title, unique, stable, renamed once 
     assert.equal(store.ensureFolder('conv-a'), 'Trip planning');
     const tree = store.tree();
     assert.deepEqual(tree.children.map(n => [n.name, n.conversationId]), [['Budget 2026', 'conv-c'], ['Trip planning', 'conv-a'], ['trip planning (2)', 'conv-b']]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('renaming a conversation renames its folder: unique name, one commit, after a manual rename or move, deferred during a turn, chips still resolve', async () => {
+  const root = tmp();
+  try {
+    const store = ResourceStore.open(root, AGENT);
+    await store.init();
+    const a = new AttachmentStore(store, 'conv-a', { title: 'Trip' });
+    await a.save([{ name: 'plan.md', bytes: enc('# Plan\n') }]);
+    store.ensureFolder('conv-b', 'Budget');
+    // Follows the title, sanitized, as one commit.
+    assert.equal(await store.retitle('conv-a', 'Lisbon: day trips?'), 'Lisbon - day trips');
+    assert.equal(subjects(store)[0], 'Rename folder Trip → Lisbon - day trips');
+    assert.deepEqual(tracked(store), ['Lisbon - day trips/plan.md']);
+    assert.equal(store.folderOf('conv-a'), 'Lisbon - day trips', 'the mapping is updated');
+    assert.equal(a.path, 'Lisbon - day trips', 'the conversation keeps using its folder');
+    // Same title again: nothing to do, no empty commit.
+    const count = subjects(store).length;
+    assert.equal(await store.retitle('conv-a', 'Lisbon: day trips?'), undefined);
+    assert.equal(subjects(store).length, count);
+    // Unique among its siblings, ignoring case.
+    assert.equal(await store.retitle('conv-a', 'budget'), 'budget (2)');
+    // A case-only change of its own name is fine.
+    assert.equal(await store.retitle('conv-b', 'BUDGET'), 'BUDGET');
+    // The user renamed and moved the folder in the panel: a later conversation rename still renames it, where it is.
+    await store.move('budget (2)', 'My trip');
+    await store.createFolder('', 'Archive');
+    await store.move('My trip', 'Archive/My trip');
+    assert.equal(await store.retitle('conv-a', 'Porto'), 'Archive/Porto');
+    // Chips of older messages still resolve to the attached file.
+    assert.equal(store.locateAttachment('conv-a', 'plan.md'), 'Archive/Porto/plan.md');
+    // During a turn the rename waits; it applies after the end-of-turn commit, with the newest title.
+    store.beginTurn('conv-a');
+    writeFileSync(join(store.files, 'Archive/Porto/out.txt'), 'made during the turn');
+    assert.equal(await store.retitle('conv-a', 'Faro'), 'deferred');
+    assert.equal(await store.retitle('conv-a', 'Sagres'), 'deferred');
+    assert.equal(store.folderOf('conv-a'), 'Archive/Porto', 'not renamed while the turn runs');
+    await store.endTurn('conv-a');
+    assert.equal(store.folderOf('conv-a'), 'Archive/Sagres');
+    assert.deepEqual(subjects(store).slice(0, 2), ['Rename folder Archive/Porto → Sagres', 'Agent changes in Archive/Porto']);
+    assert.ok(tracked(store).includes('Archive/Sagres/out.txt'));
+    assert.equal(store.locateAttachment('conv-a', 'plan.md'), 'Archive/Sagres/plan.md');
+    // A deleted folder is not recreated by a rename, and the rename does not fail.
+    await store.delete('Archive/Sagres');
+    const before = subjects(store).length;
+    assert.equal(await store.retitle('conv-a', 'Gone'), undefined);
+    assert.equal(subjects(store).length, before);
+    assert.ok(!existsSync(join(store.files, 'Gone')));
+    assert.equal(await store.retitle('conv-unknown', 'X'), undefined, 'a conversation without a folder');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
