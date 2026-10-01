@@ -283,9 +283,13 @@ try {
 }
 ```
 
-Human waits are bounded: the Letta harness allows a client tool five
-minutes; the HTTP runtime closes prompts after four. The handler receives an
-`AbortSignal` as second argument that fires when a prompt is withdrawn.
+Answer promptly. Human waits are bounded (the Letta harness allows a client
+tool at most five minutes; the HTTP runtime closes prompts after four), and
+a prompt left unanswered fails the turn. Like any failed turn, that leaves
+the conversation blocked as an uncertain delivery (see
+[Troubleshooting](#12-troubleshooting)); continue in a new conversation. The
+handler receives an `AbortSignal` as second argument that fires when a prompt
+is withdrawn; stop showing the prompt then.
 
 ## 7. Optional built-ins: files, shell, images
 
@@ -560,7 +564,7 @@ and `rm -rf /tmp/starter-smoke`.
 | `Model "x" is not available on the local Letta backend; connect its provider first` | Raised when the agent is created. Check `letta --backend local model list` and connect the provider. |
 | `Agent identity is locked: <state>/agents/<id>.lock` | Another process has the agent open (one process per agent). After a crash, check that the PID in the file is not running, then remove the `.lock`. |
 | `Server already running or stale lock: .../service.lock` | Same, for the GUI or API server. |
-| `Uncertain prior delivery: ...turn.pending.json` | A turn was sent but its completion was never confirmed (crash, kill). That conversation is blocked; nothing is resent. Inspect it (for example in Letta), then remove the file; or continue in another conversation. |
+| `Uncertain prior delivery: ...turn.pending.json` | A turn was sent but its completion was never confirmed (crash, kill, or a failed turn such as an unanswered prompt). That conversation is blocked; nothing is resent. Inspect it (for example in Letta), then remove the file; or continue in another conversation. In the GUI, start a new chat. |
 | `Unresolved agent creation intent: <id>.pending.json` | Agent creation was interrupted. Check in Letta whether an agent with that name was created; reconcile by hand before removing the file. |
 | `Invalid identity mapping or backend mismatch; refusing to recreate agent` | `name` changed, or `LETTA_LOCAL_BACKEND_DIR` differs from when the mapping was made. Restore them, or start fresh. |
 | `Session closed or delivery uncertain; inspect backend history before reopening` | A previous turn on this instance failed or was cancelled. Close it and open the agent again. |
