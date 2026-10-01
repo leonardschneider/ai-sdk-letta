@@ -30,6 +30,7 @@
     "gui": "npm run gui --workspace @ai-sdk-letta/example-basic --",
     "check:packages": "node scripts/check-packages.mjs",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:audit": "node scripts/check-audit.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts"
   },

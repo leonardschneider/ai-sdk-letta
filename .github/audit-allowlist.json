@@ -1,0 +1,17 @@
+{
+  "$comment": "Production advisories that scripts/check-audit.mjs tolerates until `expires` (YYYY-MM-DD). Only for fixes we cannot ship ourselves. Every entry needs a reason and a short expiry; when it expires CI fails and the entry must be reviewed again.",
+  "advisories": [
+    {
+      "id": "GHSA-f88m-g3jw-g9cj",
+      "package": "sharp",
+      "expires": "2026-11-01",
+      "reason": "libvips CVEs, fixed in sharp 0.35.0. Reached only through @letta-ai/letta-agent-sdk 0.8.22 -> @letta-ai/letta-code 0.33.4, which pins sharp ^0.34.5 and @janhapke/sharp-electron 0.35.3-electron.1. An npm override to sharp 0.35.5 breaks letta-code 0.33.4's bundled image worker (it uses the removed format.jp2k), so every image turn fails. letta-code 0.34.1 (SDK 0.8.27) works with the override but still pins the old ranges. Remove when the SDK is bumped together with the override, or when letta-code ships sharp >= 0.35.4."
+    },
+    {
+      "id": "GHSA-rgj7-g3m4-5g8c",
+      "package": "sharp",
+      "expires": "2026-11-01",
+      "reason": "libheif CVEs, fixed in sharp 0.35.4. Same path and constraint as GHSA-f88m-g3jw-g9cj."
+    }
+  ]
+}
