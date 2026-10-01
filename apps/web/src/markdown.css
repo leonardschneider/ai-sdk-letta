@@ -50,3 +50,10 @@
   .hljs-meta { color: #a0a8b0; }
   .hljs-deletion { color: #ffa198; }
 }
+/* Maths (KaTeX). Colours follow the text, so light and dark both read. */
+.markdown .katex { font-size: 1.08em; overflow-wrap: normal; }
+/* Display maths scrolls sideways instead of widening the message (phones). */
+.markdown .katex-display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; margin: .8em 0; padding: .2em 0; scrollbar-width: thin; }
+.markdown .katex-display > .katex { white-space: nowrap; }
+/* Invalid TeX: the source as written, marked as an error; the rest of the reply renders normally. */
+.markdown .katex-error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; color: var(--danger) !important; background: var(--danger-soft); border-radius: 5px; padding: .12em .35em; white-space: pre-wrap; cursor: help; }

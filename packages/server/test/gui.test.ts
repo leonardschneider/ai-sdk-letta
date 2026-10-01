@@ -30,7 +30,7 @@ test('GUI loopback session, CSRF, origin, Host and static asset boundaries', asy
     const cookie = session.headers.get('set-cookie')!;
     assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/);
     const data = await session.json() as { csrf: string; agent: { id: string; name: string; approvalTools: string[] } };
-    assert.deepEqual(data.agent, { id: 'sandbox', name: 'Sandbox', approvalTools: ['approval_demo'], files: false }); assert.equal(data.csrf.length, 64);
+    assert.deepEqual(data.agent, { id: 'sandbox', name: 'Sandbox', approvalTools: ['approval_demo'], files: false, ui: { latex: true } }); assert.equal(data.csrf.length, 64);
     const headers = { cookie: cookie.split(';')[0], origin: base, 'content-type': 'application/json' };
     assert.equal((await fetch(`${base}/api/v1/threads`, { headers })).status, 200);
     assert.equal((await fetch(`${base}/api/v1/threads`, { method: 'POST', headers, body: '{}' })).status, 403);
@@ -38,6 +38,8 @@ test('GUI loopback session, CSRF, origin, Host and static asset boundaries', asy
     assert.equal((await fetch(`${base}/api/v1/threads`, { method: 'POST', headers: { ...headers, origin: 'http://localhost:4400', 'x-csrf-token': data.csrf }, body: '{}' })).status, 403);
     assert.equal((await fetch(`${base}/api/v1/threads`, { headers: { cookie: 'ai_sdk_letta_session=' + '0'.repeat(64) } })).status, 401);
     const page = await fetch(base); assert.equal(page.status, 200); assert.match(page.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
+    // Fonts only from the app itself (KaTeX's are bundled), never data: URLs or another origin.
+    assert.match(page.headers.get('content-security-policy')!, /(^|; )font-src 'self'(;|$)/);
     assert.equal((await fetch(`${base}/../.env`)).status, 404);
     assert.equal((await fetch(`${base}/src/index.ts`)).status, 404);
     assert.equal((await fetch(`${base}/.env`)).status, 404);

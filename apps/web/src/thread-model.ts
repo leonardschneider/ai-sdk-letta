@@ -1,7 +1,8 @@
 /** Pure sidebar model: titles, activity times, date groups and search. No I/O. */
 import { nodesText, parseTitle, titleText } from 'ai-sdk-letta/title';
 
-export type ThreadSummary = { id: string; title: string; state: string; archived?: boolean; createdAt?: string; lastActivityAt?: string };
+/** A thread as listed by the server. `latex` is absent from older servers (treated as `'inherit'`). */
+export type ThreadSummary = { id: string; title: string; state: string; archived?: boolean; createdAt?: string; lastActivityAt?: string; latex?: 'inherit' | 'on' | 'off' };
 export const DEFAULT_TITLE = 'New conversation';
 export const TITLE_LIMIT = 120;
 const hidden = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;

@@ -87,7 +87,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
     const runtime = new ThreadRuntime(host(definition, stateDirectory), join(directory, 'state.json'), owner);
-    const server = guiApp(runtime, owner, port, assets, { id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition) }).listen(port, '127.0.0.1');
+    const server = guiApp(runtime, owner, port, assets, { id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ui: { latex: definition.ui?.latex ?? true } }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
     log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);

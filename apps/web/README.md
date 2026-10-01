@@ -7,7 +7,9 @@ ai-sdk-letta agents. `npm run build` writes static assets to `dist/`, which
 It renders conversation names as inline Markdown (links open in a new tab;
 only http, https and mailto are active), streaming replies, tool activity (technical details collapsed),
 docked approval and question cards (each answer is sent exactly once),
-safe Markdown (no raw HTML, no remote images, lazy syntax highlighting), and
+safe Markdown (no raw HTML, no remote images, lazy syntax highlighting),
+LaTeX maths in replies (`\(...\)`, `\[...\]`; KaTeX bundled and loaded on
+first use; per agent and per conversation), and
 image attachments: paste, drop or pick PNG, JPEG, GIF or WebP images
 (downscaled in the browser when large), with removable thumbnails and
 click-to-enlarge in messages. When the agent has the file tools, PDFs and

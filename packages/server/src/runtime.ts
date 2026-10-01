@@ -8,8 +8,14 @@ import {
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
 export type RuntimeEvent = { sequence: number; type: string; data: Record<string, unknown> };
-// createdAt/lastActivityAt are optional: threads recorded before they existed stay valid.
-type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string };
+/**
+ * A conversation's override of a display setting: `'inherit'` uses the
+ * agent's setting (the definition's `ui`), `'on'`/`'off'` override it.
+ */
+export type DisplayOverride = 'inherit' | 'on' | 'off';
+const DISPLAY_OVERRIDES: readonly DisplayOverride[] = ['inherit', 'on', 'off'];
+// createdAt/lastActivityAt/latex are optional: threads recorded before they existed stay valid (latex: inherit).
+type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'> };
 /** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
 export type RunImage = { mediaType: string; bytes: number; sha256: string };
 /** A single user turn and the events observed while it ran. */
@@ -168,20 +174,26 @@ export class ThreadRuntime {
     return session;
   }
   /** Display metadata only; timestamps are omitted for legacy threads that never recorded them. */
-  private summary({ id, title, state, archived, createdAt, lastActivityAt }: Thread) {
-    return { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}) };
+  private summary({ id, title, state, archived, createdAt, lastActivityAt, latex }: Thread) {
+    return { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride };
   }
   list(owner: string) {
     this.authorize(owner);
     return this.state.threads.filter(t => t.owner === owner).map(t => this.summary(t));
   }
-  /** Local display metadata only: never opens a session or edits backend history. */
+  /**
+   * Local display metadata only: never opens a session or edits backend history.
+   * Fields: `title` (1–120 characters), `archived` (boolean), and `latex`
+   * (`'inherit' | 'on' | 'off'`: whether the browser app renders LaTeX in this
+   * conversation; `'inherit'` follows the agent's `ui.latex`).
+   */
   updateMetadata(owner: string, id: string, input: unknown) {
     const thread = this.thread(owner, id);
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RuntimeFault('invalid_input', 400);
     const fields = Object.keys(input);
-    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived')) throw new RuntimeFault('invalid_input', 400);
-    const patch = input as { title?: unknown; archived?: unknown };
+    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived' && key !== 'latex')) throw new RuntimeFault('invalid_input', 400);
+    const patch = input as { title?: unknown; archived?: unknown; latex?: unknown };
+    if (fields.includes('latex') && !DISPLAY_OVERRIDES.includes(patch.latex as DisplayOverride)) throw new RuntimeFault('invalid_input', 400);
     let title = thread.title;
     if (fields.includes('title')) {
       // Reject terminal controls and invisible formatting/bidi controls before trimming.
@@ -195,6 +207,7 @@ export class ThreadRuntime {
     const retitled = thread.title !== title;
     thread.title = title;
     if (typeof patch.archived === 'boolean') thread.archived = patch.archived;
+    if (patch.latex === 'inherit') delete thread.latex; else if (patch.latex === 'on' || patch.latex === 'off') thread.latex = patch.latex;
     this.save();
     // The conversation's folder follows its title (after the running turn, if any). A failure never fails the rename.
     if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {

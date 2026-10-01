@@ -167,6 +167,14 @@ kbd { font-family: inherit; font-size: 11px; color: var(--text-3); border: 1px s
 a.menu-item { text-decoration: none; }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
 .menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+.menu-label { padding: 6px 10px 4px; font-size: 12px; font-weight: 600; color: var(--text-3); user-select: none; }
+.menu-check { display: inline-grid; place-items: center; width: 15px; height: 15px; flex-shrink: 0; }
+.menu-check svg { color: var(--accent); }
+/* LaTeX toggle in the header: muted when maths shows as written, accent when overridden for this conversation. */
+.latex-btn { margin-left: auto; color: var(--text-3); }
+.latex-btn[data-active] { color: var(--text-2); }
+.latex-btn[data-override] { color: var(--accent); }
+.latex-btn + .resources-btn { margin-left: 0; }
 @keyframes pop { from { opacity: 0; transform: translateY(-3px) scale(.98); } }
 
 /* ---------- Top bar ---------- */
@@ -489,7 +497,7 @@ body[data-resizing] iframe { pointer-events: none; }
   .resources-pane { position: fixed; inset: 0 0 0 auto; width: min(92vw, 380px); z-index: 50; box-shadow: var(--shadow-pop); animation: slide-in .2s ease; }
   .resources-pane[hidden] { display: none !important; }
   .res-head { height: 50px; }
-  .topbar .resources-btn { margin-left: 0; }
+  .topbar .resources-btn, .topbar .latex-btn { margin-left: 0; }
   .modal-scrim { padding: 0; place-items: stretch; }
   .modal.preview { width: 100%; height: 100%; border-radius: 0; border: 0; }
   .modal.confirm, .modal.move { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }

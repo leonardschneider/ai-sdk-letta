@@ -10,8 +10,8 @@ export {
   type ImageInputErrorCode, type ImageMediaType, type ImageLimits, type DecodedImage,
 } from './images.js';
 export {
-  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, INTERNAL_MEMORY_TOOLS,
-  type AgentDefinition, type AgentDefinitionInput, type DreamingSettings, type DreamingTrigger, type ToolPermission,
+  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, INTERNAL_MEMORY_TOOLS,
+  type AgentDefinition, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
 export { openLettaAgent, createLettaAgent, openResources, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice } from './runtime.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
