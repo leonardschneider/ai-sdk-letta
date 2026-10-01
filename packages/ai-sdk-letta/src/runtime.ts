@@ -13,6 +13,7 @@ import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge }
 import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore } from './attachments.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
+import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout } from './sandbox.js';
 
 /** Which conversation to open. `null` means "open nothing" (for example, the user quit a picker). */
 export type ConversationChoice = { conversationId: string } | { newTitle: string } | null;
@@ -112,9 +113,10 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
   let session: LettaCodeSession | undefined;
   let release: (() => void) | undefined;
   let interactions: ToolInteractions | undefined;
+  let sandbox: SandboxManager | undefined;
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
-    try { interactions?.close(); session?.close(); await client.close(); }
+    try { interactions?.close(); await sandbox?.close(); session?.close(); await client.close(); }
     finally { release?.(); }
   })();
   try {
@@ -167,13 +169,25 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     // Files: one folder per conversation, bound here from the conversation this
     // runtime opened (never from tool arguments). Tools see only this store.
     const attachments = filesEnabled(definition) ? new AttachmentStore(paths.attachments, identity.agentId, conversationId) : undefined;
-    const toolContext = Object.freeze(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {});
+    // Shell commands: one sandbox per conversation, created on the first
+    // command, with the conversation's folder mounted at /workspace.
+    if (sandboxEnabled(definition)) {
+      const workspace = attachments ?? new AttachmentStore(paths.attachments, identity.agentId, conversationId);
+      sandbox = new SandboxManager(definition.sandbox!, { workspace: () => workspace.folder(), owner: `${identity.agentId}.${conversationId}` });
+    }
+    const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
+    // Without a sandbox, the shell tools are never exposed.
+    const allowedTools = sandbox ? undefined : Object.keys(definition.tools).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name));
+    const sandboxTimeout = definition.sandbox ? sandboxToolTimeout(definition.sandbox) : undefined;
+    const shell = sandbox;
     const persist = options.traces === false ? undefined : typeof options.traces === 'function' ? options.traces : fileTraceWriter(paths.traces);
     // Background harness work must never open a prompt over an idle chat input.
     const bridge = createToolBridge({
-      tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist,
+      tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+      ...(sandboxTimeout ? { toolTimeouts: Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) } : {}),
       get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
       context: () => toolContext,
+      sandbox: () => shell?.session,
     });
     let memoryRoot: string | undefined;
     session = client.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
@@ -232,8 +246,9 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
+    const sandboxLine = shell ? `\nSandbox: ${typeof shell.config.provider === 'string' ? shell.config.provider : 'custom'} · no network${definition.permissions.run_command_online === 'ask' ? ' (network commands ask first)' : ''}${shell.hasProject ? ` · project ${shell.config.project!.path}` : ''}` : '';
     const dreamingLine = definition.dreaming.trigger === 'off' ? 'Dreaming: off' : `Dreaming: ${reflection.trigger}${reflection.trigger === 'step-count' ? ` ${reflection.step_count}` : ''} configured (not evidence a dream ran)`;
-    const startupStatus = `${definition.name}\nLogical ID: ${definition.id}\nLetta ID: ${identity.agentId}\nConversation: ${conversationTitle} (${conversationId})\nStartup status: idle / ready · MemFS confirmed enabled\n${dreamingLine}\nHistory: ${initialMessages.length} visible records restored${history.truncated ? ' · LIMITED to newest 10,000 backend records; older history omitted' : ' · complete backend pagination'}`;
+    const startupStatus = `${definition.name}\nLogical ID: ${definition.id}\nLetta ID: ${identity.agentId}\nConversation: ${conversationTitle} (${conversationId})\nStartup status: idle / ready · MemFS confirmed enabled\n${dreamingLine}\nHistory: ${initialMessages.length} visible records restored${history.truncated ? ' · LIMITED to newest 10,000 backend records; older history omitted' : ' · complete backend pagination'}${sandboxLine}`;
     // Keep one session alive between turns so background dreaming can progress.
     // LettaAgent closes only its per-turn wrapper, not this shared session.
     const agent = new LettaAgent<TOOLS>({

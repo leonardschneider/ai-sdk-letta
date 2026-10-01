@@ -1,4 +1,4 @@
-import { tool, jsonSchema, asSchema, type Tool, type ToolSet } from 'ai';
+import { tool, jsonSchema, asSchema, type Experimental_SandboxSession, type Tool, type ToolSet } from 'ai';
 import { Ajv } from 'ajv';
 import type { AgentToolResultContent, AnyAgentTool } from '@letta-ai/letta-agent-sdk';
 import { appendFileSync, mkdirSync, chmodSync, lstatSync } from 'node:fs';
@@ -55,6 +55,13 @@ export interface ToolBridgeOptions {
   interactions?: ToolInteractions;
   /** Per-call execution deadline in ms, excluding human waits. @default 5000 */
   timeoutMs?: number;
+  /** Deadlines for specific tools, overriding `timeoutMs` (for example, shell commands). */
+  toolTimeouts?: Readonly<Record<string, number>>;
+  /**
+   * AI SDK sandbox passed to every tool as `options.experimental_sandbox`,
+   * read at call time. The runtime binds the conversation's sandbox.
+   */
+  sandbox?: () => Experimental_SandboxSession | undefined;
   /** Audit sink; see {@link fileTraceWriter}. @default no persistence */
   persist?: (event: ToolActivity) => void;
   /** Observer for audit events. */
@@ -112,7 +119,7 @@ async function modelContent(definition: { toModelOutput?: (options: { toolCallId
  * cancellation, bounded output and sanitized errors.
  */
 export function createToolBridge(options: ToolBridgeOptions) {
-  const definitions = options.tools as Record<string, { description?: string; inputSchema: Parameters<typeof asSchema>[0]; execute?: (args: unknown, context: { toolCallId: string; messages: []; abortSignal: AbortSignal; context: Readonly<Record<string, unknown>> }) => unknown; toModelOutput?: (options: { toolCallId: string; input: unknown; output: unknown }) => unknown }>;
+  const definitions = options.tools as Record<string, { description?: string; inputSchema: Parameters<typeof asSchema>[0]; execute?: (args: unknown, context: { toolCallId: string; messages: []; abortSignal: AbortSignal; context: Readonly<Record<string, unknown>>; experimental_sandbox?: Experimental_SandboxSession }) => unknown; toModelOutput?: (options: { toolCallId: string; input: unknown; output: unknown }) => unknown }>;
   const permissions = options.permissions;
   const restrict = options.allowedTools ? new Set(options.allowedTools) : undefined;
   const allowed = new Set(Object.keys(definitions).filter(n => (!restrict || restrict.has(n)) && Object.hasOwn(permissions, n) && (permissions[n] === 'allow' || permissions[n] === 'ask') && (n === ASK_USER_TOOL || typeof definitions[n]?.execute === 'function')));
@@ -174,10 +181,11 @@ export function createToolBridge(options: ToolBridgeOptions) {
       const interrupted = new Promise<never>((_, reject) => {
         abort = () => reject(new Error(control.signal.aborted ? 'tool_timeout' : 'tool_cancelled'));
         signal.addEventListener('abort', abort, { once: true });
-        timer = setTimeout(() => control.abort(), options.timeoutMs ?? 5000);
+        timer = setTimeout(() => control.abort(), (Object.hasOwn(options.toolTimeouts ?? {}, name) ? options.toolTimeouts![name] : undefined) ?? options.timeoutMs ?? 5000);
       });
       const context = options.context?.() ?? {};
-      const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal, context }); }), interrupted]);
+      const sandbox = options.sandbox?.();
+      const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal, context, ...(sandbox ? { experimental_sandbox: sandbox } : {}) }); }), interrupted]);
       const result = await modelContent(definition, id, args, output);
       emit(name, id, result.isError ? 'error' : 'completion', started, result.isError ? 'tool_reported_error' : undefined);
       return result;

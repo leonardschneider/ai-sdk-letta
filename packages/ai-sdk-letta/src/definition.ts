@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
+import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 
 /** How a single application tool call is authorized. */
 export type ToolPermission = 'allow' | 'ask' | 'deny';
@@ -42,6 +43,11 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   dreaming?: Partial<DreamingSettings>;
   /** Per-call tool execution deadline in milliseconds (human waits excluded). @default 5000 */
   toolTimeoutMs?: number;
+  /**
+   * Where `run_command` and `run_command_online` run commands. Without it,
+   * those tools are never exposed. See `sandboxTools`.
+   */
+  sandbox?: SandboxConfig;
 }
 
 /** A validated, immutable agent definition. */
@@ -54,6 +60,7 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly permissions: Readonly<Record<string, ToolPermission>>;
   readonly dreaming: Readonly<DreamingSettings>;
   readonly toolTimeoutMs: number;
+  readonly sandbox?: ResolvedSandboxConfig;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -91,6 +98,9 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
     permissions[ASK_USER_TOOL] ??= 'allow';
     if (permissions[ASK_USER_TOOL] === 'ask') throw new Error('ask_user is already interactive; use "allow" or "deny"');
   }
+  // Network commands always need a human: approval is the only network switch.
+  if (permissions.run_command_online === 'allow') throw new Error('run_command_online uses the network; its permission must be "ask" or "deny"');
+  const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(input.sandbox);
   const missing = names.filter(name => !Object.hasOwn(permissions, name));
   if (missing.length) throw new Error(`Missing permission for tool(s): ${missing.join(', ')}. Every tool needs "allow", "ask" or "deny".`);
   const dreaming = { ...DEFAULT_DREAMING, ...input.dreaming };
@@ -100,7 +110,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (!Number.isInteger(toolTimeoutMs) || toolTimeoutMs < 1 || toolTimeoutMs > 300_000) throw new Error('toolTimeoutMs must be 1–300000');
   return Object.freeze({
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}),
   });
 }
 

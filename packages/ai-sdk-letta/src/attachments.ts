@@ -332,6 +332,9 @@ export class AttachmentStore {
     for (const sub of ['.meta', '.text']) privateDirectory(join(real, sub));
     return real;
   }
+  /** Create the folder (0700) if needed and return its verified real path, for example to mount it in a sandbox. */
+  folder(): string { return this.ensure(); }
+
   /** The folder's real path, or `undefined` if nothing was ever stored. */
   private existing(): string | undefined {
     try { lstatSync(this.directory); } catch (error) { if (missing(error)) return undefined; throw error; }

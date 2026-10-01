@@ -31,7 +31,8 @@ history (`initialMessages`), idle-only local slash commands (`localCommand`),
 an interaction renderer for approvals and questions (`interaction`), and
 generic prompt attachments (`attachments`: `fromClipboard` for Ctrl+V and
 `fromText` for pasted or dropped text; files are sent as `file` parts and
-named in their markers). To change the patch, edit
+named in their markers), and custom tool cards (`toolView`: title, right
+title and verbatim content, used for "Ran `command`" cards). To change the patch, edit
 `node_modules/@ai-sdk/tui/src`, rebuild `dist/index.js` with
 `npx esbuild node_modules/@ai-sdk/tui/src/index.ts --bundle --platform=node --format=esm --external:ai --outfile=node_modules/@ai-sdk/tui/dist/index.js`
 (it reproduces the patched `dist` exactly), mirror any type changes in

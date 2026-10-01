@@ -14,7 +14,10 @@
     "@ai-sdk-letta/server": "*",
     "@ai-sdk-letta/tui": "*",
     "@ai-sdk-letta/web": "*",
+    "@ai-sdk/harness": "1.0.128",
+    "@lgrammel/apple-container-sandbox": "1.1.0",
     "ai": "7.0.118",
-    "ai-sdk-letta": "*"
+    "ai-sdk-letta": "*",
+    "ai-sdk-sandbox-docker": "0.1.2"
   }
 }

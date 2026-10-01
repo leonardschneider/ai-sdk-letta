@@ -51,7 +51,8 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts",
     "test:live": "node --conditions=ai-sdk-letta-source --import tsx --test --test-concurrency=1 test/live/*.test.ts",
-    "prepack": "node ../../scripts/check-dist.mjs"
+    "prepack": "node ../../scripts/check-dist.mjs",
+    "test:sandbox": "node --conditions=ai-sdk-letta-source --import tsx --test --test-concurrency=1 test/sandbox-container.test.ts"
   },
   "dependencies": {
     "@letta-ai/letta-agent-sdk": "0.8.22",
@@ -59,10 +60,24 @@
     "unpdf": "1.8.1"
   },
   "peerDependencies": {
-    "ai": "^7.0.118"
+    "@lgrammel/apple-container-sandbox": "1.1.0",
+    "ai": "^7.0.118",
+    "ai-sdk-sandbox-docker": "0.1.2"
+  },
+  "peerDependenciesMeta": {
+    "@lgrammel/apple-container-sandbox": {
+      "optional": true
+    },
+    "ai-sdk-sandbox-docker": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@ai-sdk/harness": "1.0.128",
     "@ai-sdk/provider": "4.0.18",
-    "ai": "7.0.118"
+    "@ai-sdk/sandbox-just-bash": "1.0.128",
+    "@lgrammel/apple-container-sandbox": "1.1.0",
+    "ai": "7.0.118",
+    "ai-sdk-sandbox-docker": "0.1.2"
   }
 }

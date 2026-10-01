@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
-import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, FileText, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, Wrench } from 'lucide-react';
+import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { answerLine, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
+import { COMMAND_TOOLS, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
@@ -143,6 +143,34 @@ function Value({ value }: { value: string }) {
   return <span className="value">{value.slice(0, 280)}… <button type="button" className="link-btn" onClick={() => setFull(true)}>Show all</button></span>;
 }
 
+/** Output of a command: monospace, the first lines first, with "show more". */
+function CommandText({ text, label }: { text: string; label: string }) {
+  const [full, setFull] = useState(false);
+  const lines = text.split('\n');
+  const long = lines.length > 14 || text.length > 1600;
+  const shown = full || !long ? text : lines.slice(0, 14).join('\n').slice(0, 1600);
+  return <div className="command-block">
+    <pre className="command-output" aria-label={label}>{shown}{!full && long && '\n…'}</pre>
+    {long && <button type="button" className="link-btn" onClick={() => setFull(f => !f)}>{full ? 'Show less' : `Show more (${lines.length.toLocaleString()} lines)`}</button>}
+  </div>;
+}
+
+/** Expanded view of run_command: the exact command, its exit code and its output. */
+function CommandDetail({ toolName, args, result, phase }: { toolName: string; args: Record<string, unknown>; result: unknown; phase: ToolPhase }) {
+  const out = phase === 'done' ? commandOutput(result) : undefined;
+  const command = typeof args.command === 'string' ? args.command : '';
+  const cwd = typeof args.cwd === 'string' && args.cwd.trim() && args.cwd.trim() !== '.' ? args.cwd.trim() : undefined;
+  return <div className="command-detail">
+    <pre className="command-line" aria-label="Command"><span className="prompt" aria-hidden="true">$ </span>{command}</pre>
+    {(cwd || toolName === 'run_command_online') && <p className="command-meta">{[cwd && `in ${cwd.startsWith('/') ? cwd : `/workspace/${cwd}`}`, toolName === 'run_command_online' && 'with internet access (approved)'].filter(Boolean).join(' · ')}</p>}
+    {out?.error && <p className="muted">{out.error}</p>}
+    {out && !out.error && <>
+      <p className="command-meta">{out.timedOut ? 'Stopped: took too long' : `Exit code ${out.exitCode}`}{out.duration ? ` · ${out.duration}` : ''}{out.truncated ? ' · output truncated' : ''}</p>
+      {out.output ? <CommandText text={out.output} label="Output"/> : <p className="muted">No output.</p>}
+    </>}
+  </div>;
+}
+
 function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartProps) {
   const active = useContext(InteractionContext);
   const pendingApproval = active.request?.kind === 'approval' && active.request.toolCallId === toolCallId && result === undefined;
@@ -153,21 +181,32 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
   const label = pendingApproval
     ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : `Waiting for your permission: ${friendlyName(toolName)}`
     : toolLabel(toolName, phase, result, args);
-  const summary = phase === 'done' ? toolSummary(toolName, result, args) : { fields: [] };
+  const shell = COMMAND_TOOLS.has(toolName) && typeof args.command === 'string';
+  const summary = phase === 'done' && !shell ? toolSummary(toolName, result, args) : { fields: [] };
   const approval = active.approvalTools.has(toolName) || pendingApproval;
   const fileTool = ['list_files', 'read_file', 'search_files'].includes(toolName);
-  const Icon = phase === 'running' ? LoaderCircle : denied ? ShieldX : phase === 'error' ? CircleAlert : approval ? ShieldCheck : toolName === 'search_files' ? Search : fileTool ? FileText : Wrench;
-  return <Disclosure className="tool-line" tone={phase === 'running' ? 'running' : denied ? 'denied' : phase} label={label}
-    summary={<><Icon size={14} className={`line-icon ${phase === 'running' ? 'spin' : ''}`} aria-hidden="true"/><span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{label}</span>
-      {phase === 'done' && summary.metrics && <span className="line-meta">{metricsLine(summary.metrics)}</span>}</>}>
+  const status = shell && phase === 'done' ? commandStatus(result) : '';
+  const Icon = phase === 'running' ? LoaderCircle : denied ? ShieldX : phase === 'error' || status ? CircleAlert : toolName === 'run_command_online' ? Globe : shell ? SquareTerminal : approval ? ShieldCheck : toolName === 'search_files' ? Search : fileTool ? FileText : Wrench;
+  return <Disclosure className={`tool-line${shell ? ' command' : ''}`} tone={phase === 'running' ? 'running' : denied ? 'denied' : status ? 'error' : phase} label={`${label}${status ? `, ${status}` : ''}`}
+    summary={<><Icon size={14} className={`line-icon ${phase === 'running' ? 'spin' : ''}`} aria-hidden="true"/><span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{shell ? <CommandLabel text={label}/> : label}</span>
+      {phase === 'done' && summary.metrics && <span className="line-meta">{metricsLine(summary.metrics)}</span>}
+      {status && <span className="line-meta">{status}</span>}</>}>
     <div data-tool-call-id={toolCallId} className="tool-detail">
-      {phase === 'running' && <p className="muted">{decided ? 'Your decision was sent. Waiting for the agent…' : pendingApproval ? 'Waiting for you to allow or deny this below.' : 'Working on it…'}</p>}
+      {phase === 'running' && <p className="muted">{decided ? 'Your decision was sent. Waiting for the agent…' : pendingApproval ? 'Waiting for you to allow or deny this below.' : shell ? 'Running in the sandbox…' : 'Working on it…'}</p>}
       {phase === 'error' && <p className="muted">{failureText(result)}</p>}
+      {shell && <CommandDetail toolName={toolName} args={args} result={result} phase={phase}/>}
       {summary.metrics && <dl className="metrics">{summary.metrics.map(m => <div key={m.label}><dt>{m.label}</dt><dd>{m.value}</dd></div>)}</dl>}
       {!!summary.fields.length && <dl className="fields">{summary.fields.map((f, i) => <div key={i}><dt>{f.label}</dt><dd><Value value={f.value}/></dd></div>)}</dl>}
       <Technical toolName={toolName} argsText={argsText} result={result}/>
     </div>
   </Disclosure>;
+}
+
+/** "Ran `rg budget`": the part in backticks in monospace. */
+function CommandLabel({ text }: { text: string }) {
+  const match = /^(.*?)`([^`]*)`(.*)$/s.exec(text);
+  if (!match) return <>{text}</>;
+  return <>{match[1]}<code className="inline-command">{match[2]}</code>{match[3]}</>;
 }
 
 function ToolGroup({ count, running, children }: { count: number; running: boolean; indices: readonly number[]; children: React.ReactNode }) {
@@ -327,7 +366,11 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
   const { send, busy, error, locked } = useSubmitOnce(request, answer, outcome);
   const card = useRef<HTMLElement>(null);
   useClaimFocus(card);
-  const rows = describeArguments(request.details);
+  const args = parseArgs(request.details);
+  const shell = COMMAND_TOOLS.has(request.tool) && typeof args.command === 'string';
+  const cwd = shell && typeof args.cwd === 'string' && args.cwd.trim() && args.cwd.trim() !== '.' ? args.cwd.trim() : undefined;
+  const extra = Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'command' && key !== 'cwd'));
+  const rows = shell ? (Object.keys(extra).length ? describeArguments(JSON.stringify(extra)) : []) : describeArguments(request.details);
   return <section ref={card} tabIndex={-1} className="card approval-card" aria-label={`Permission needed: ${friendlyName(request.tool)}`} aria-busy={busy || undefined}
     onKeyDown={event => {
       if (locked || event.nativeEvent.isComposing) return;
@@ -335,7 +378,12 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
       else if (event.key === 'Enter' && event.target === card.current) { event.preventDefault(); void send({ approved: true }); }
     }}>
     <header className="card-head"><ShieldAlert size={16} aria-hidden="true"/><span>Permission needed</span></header>
-    <h2 className="card-title">Wants to run {friendlyName(request.tool)}</h2>
+    <h2 className="card-title">{shell ? (request.tool === 'run_command_online' ? 'Wants to run a command with internet access' : 'Wants to run a command') : <>Wants to run {friendlyName(request.tool)}</>}</h2>
+    {shell && <>
+      <pre className="command-line approval-command" aria-label="Command"><span className="prompt" aria-hidden="true">$ </span>{String(args.command)}</pre>
+      {cwd && <p className="command-meta approval-cwd">in {cwd.startsWith('/') ? cwd : `/workspace/${cwd}`}</p>}
+      {request.tool === 'run_command_online' && <p className="card-details">It runs in a separate sandbox that can reach the internet and change this conversation’s files. Everything else stays isolated.</p>}
+    </>}
     {!!rows.length && <dl className="approval-args">{rows.map((row, i) => <div key={i}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}
     <div className="card-actions">
       <span className="hint" aria-hidden="true"><kbd>Enter</kbd> allow · <kbd>Esc</kbd> deny</span>

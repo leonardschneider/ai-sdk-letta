@@ -32,8 +32,15 @@ Main exports:
   Markdown, CSV, JSON, code), stored per conversation and announced by a short "Attached: ..." note.
 - `AttachmentStore`, `UploadStaging`, `FILE_LIMITS`, `FileInputError`, `detectFileType`, `extractPdfText`:
   the storage, validation and PDF layer (unpdf, pure JavaScript).
+- `sandboxTools`, `SANDBOX_TOOL_PERMISSIONS` and the definition's `sandbox` option: opt-in
+  `run_command` (no network) and `run_command_online` (always asks) in an isolated sandbox per
+  conversation, through the AI SDK `Experimental_SandboxSession`. Providers are optional peers:
+  `@lgrammel/apple-container-sandbox` or `ai-sdk-sandbox-docker`, or your own factory.
+- `SandboxManager`, `checkProjectFolder`, `gitConfigCredentials`, `detectSandboxProvider`, `prepareSandbox`:
+  the sandbox lifecycle and safety checks.
 - `ToolInteractions`: the broker for approvals and `ask_user` questions.
-- `createToolBridge`, `askUserTool`, `fileTraceWriter`: the tool policy layer.
+- `createToolBridge`, `askUserTool`, `fileTraceWriter`: the tool policy layer (it passes the bound
+  sandbox to tools as `experimental_sandbox`).
 - `resolveStateDirectory`, `acquireIdentity`, history and navigation helpers.
 
 See the [repository README](https://github.com/leonardschneider/ai-sdk-letta#readme) for prerequisites, the security

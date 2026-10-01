@@ -24,6 +24,12 @@ export {
   type FileLimits, type FileInputErrorCode, type FileKind, type StoredFile, type StagedFile, type StagedUpload,
 } from './attachments.js';
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
+export {
+  sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT,
+  SandboxManager, SandboxError, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
+  commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
+  type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
+} from './sandbox.js';
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
 export { createToolBridge, askUserTool, fileTraceWriter, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions } from './tools.js';
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
