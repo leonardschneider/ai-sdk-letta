@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSyn
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import {
-  AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, UploadStaging, attachmentNote, validateImages, validateResponse,
-  type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type StagedFile, type StoredFile,
+  AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, validateImages, validateResponse,
+  type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
@@ -36,11 +36,16 @@ export interface RuntimeHost {
   open(options: { conversationId: string } | { newTitle: string }): Promise<RuntimeSession>;
   close(): Promise<void>;
   /**
-   * Root of the per-conversation attachment folders, when the agent accepts
-   * files (its definition includes the file tools). Without it, uploads and
-   * file lists are refused with `files_unavailable`.
+   * Root of the agents' resources (`<stateDir>/resources`), when the agent
+   * accepts files (its definition includes the file tools). Without it,
+   * uploads, file lists and the resources API are refused with `files_unavailable`.
    */
   attachmentsRoot?: string;
+  /**
+   * Prepare the resources before any conversation is opened: create them and
+   * migrate files of earlier versions (`titles` names the folders, by conversation ID).
+   */
+  resources?(agentId: string, titles: Record<string, string>): Promise<ResourceStore>;
 }
 /** A client-visible failure with a fixed code and HTTP status. */
 export class RuntimeFault extends Error {
@@ -50,7 +55,7 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 /** Only app-defined, fixed failure codes (e.g. user_denied) are surfaced; never free-form error text. */
 const failureReasons = new Set(['user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
 /** HTTP status for a refused file. */
-const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : code === 'conversation_files_full' || code === 'files_too_many' ? 409 : 400;
+const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : ['conversation_files_full', 'files_too_many', 'file_exists', 'resources_full'].includes(code) ? 409 : code === 'resources_busy' ? 503 : 400;
 /** A FileInputError as a fixed-code RuntimeFault; anything else unchanged. */
 export const fileFault = (error: unknown) => error instanceof FileInputError ? new RuntimeFault(error.code, fileStatus(error.code)) : error;
 /** Public metadata of a stored file (what list and upload return). */
@@ -187,9 +192,15 @@ export class ThreadRuntime {
     if (fields.includes('archived') && typeof patch.archived !== 'boolean') throw new RuntimeFault('invalid_input', 400);
     // locked covers session opening before start() has installed its active run.
     if (patch.archived === true && (this.locked || this.active?.run.threadId === id)) throw new RuntimeFault('runtime_busy');
+    const retitled = thread.title !== title;
     thread.title = title;
     if (typeof patch.archived === 'boolean') thread.archived = patch.archived;
     this.save();
+    // A folder still named after a placeholder title ("New conversation") takes the first real one.
+    if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {
+      const conversationId = thread.conversationId;
+      void (async () => { try { await this.resourcesOf(thread.agentId).retitle(conversationId, title); } catch { /* the folder keeps its name */ } })();
+    }
     return this.summary(thread);
   }
   async create(owner: string, id: string, title: string) {
@@ -207,6 +218,7 @@ export class ThreadRuntime {
       this.state.threads.push(thread); this.save();
       const session = await this.open(thread);
       thread.agentId = session.agentId; thread.conversationId = session.conversationId; thread.state = 'ready'; this.save();
+      if (this.host.attachmentsRoot) { try { this.resourcesOf(session.agentId).adopt(session.conversationId, title); } catch { /* created on first use */ } }
       return { id, title };
     });
   }
@@ -239,20 +251,113 @@ export class ThreadRuntime {
     run.events.push(event); this.save();
     for (const listener of this.listeners.get(run.id) ?? []) listener(event);
   }
-  /** The thread's attachment folder (no session is opened). */
+  /** The thread's view of the resources (no session is opened). */
   private store(owner: string, id: string) {
     const thread = this.thread(owner, id);
-    if (!this.host.attachmentsRoot) throw new RuntimeFault('files_unavailable', 404);
     if (!thread.agentId || !thread.conversationId) throw new RuntimeFault('not_found', 404);
-    return new AttachmentStore(this.host.attachmentsRoot, thread.agentId, thread.conversationId);
+    return new AttachmentStore(this.resourcesOf(thread.agentId), thread.conversationId, { title: thread.title });
   }
-  /** Files attached to a thread's conversation, oldest first. Archived threads keep their files. */
+  /** Files in a thread's conversation folder, by name. Archived threads keep their files. */
   files(owner: string, id: string) {
-    try { return this.store(owner, id).list().map(fileSummary); } catch (error) { throw fileFault(error); }
+    try { return this.store(owner, id).list().filter(file => !file.name.includes('/')).map(fileSummary); } catch (error) { throw fileFault(error); }
   }
-  /** One attached file's metadata and bytes, by its exact stored name. */
+  /**
+   * A file attached to a thread's conversation, by the name it was attached
+   * under: found where it is now, even after the user moved or renamed it.
+   */
   file(owner: string, id: string, name: string) {
-    try { return this.store(owner, id).read(name); } catch (error) { throw fileFault(error); }
+    try {
+      const store = this.store(owner, id);
+      const path = store.resources.locateAttachment(store.conversationId, name);
+      if (!path) throw new FileInputError('file_not_found', 'No such file');
+      const file = store.resources.describe(path);
+      return { file: { ...file, name: file.path.split('/').pop()! }, bytes: store.resources.read(path) };
+    } catch (error) { throw fileFault(error); }
+  }
+
+  /* ---------------- resources ---------------- */
+
+  /** The agent's resources (one agent per runtime). */
+  private resourcesOf(agentId?: string): ResourceStore {
+    if (!this.host.attachmentsRoot) throw new RuntimeFault('files_unavailable', 404);
+    const id = agentId ?? this.state.threads.find(t => t.agentId)?.agentId;
+    if (!id) throw new RuntimeFault('resources_empty', 404);
+    return ResourceStore.open(this.host.attachmentsRoot, id);
+  }
+  private prepared?: Promise<ResourceStore>;
+  private async resources(owner: string): Promise<ResourceStore> {
+    this.authorize(owner);
+    const store = this.resourcesOf();
+    this.prepared ??= (async () => {
+      const titles = Object.fromEntries(this.state.threads.filter(t => t.conversationId).map(t => [t.conversationId!, t.title]));
+      if (this.host.resources) await this.host.resources(store.agentId, titles); else await store.init();
+      // Every ready thread has a folder (named after its title), except ones the user deleted.
+      for (const thread of this.state.threads) if (thread.state === 'ready' && thread.agentId === store.agentId && thread.conversationId) store.adopt(thread.conversationId, thread.title);
+      return store;
+    })().catch(error => { this.prepared = undefined; throw error; });
+    return this.prepared;
+  }
+  /** Run a resources operation, with fixed error codes. */
+  private async withResources<T>(owner: string, task: (store: ResourceStore) => T | Promise<T>): Promise<T> {
+    try { return await task(await this.resources(owner)); } catch (error) { throw fileFault(error); }
+  }
+  /**
+   * The resources tree: one folder per conversation (with its thread ID when
+   * this runtime knows it) and the user's own folders. `version` changes with
+   * the content; pass it back as `since` to get `{ unchanged: true }` cheaply.
+   */
+  resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; changes: number }> {
+    return this.withResources(owner, store => {
+      const tree = store.tree();
+      const threads: Record<string, string> = {};
+      for (const { conversationId, path } of store.conversations()) {
+        const thread = this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId);
+        if (thread) threads[path] = thread.id;
+      }
+      return { ...tree, threads, changes: store.commits };
+    });
+  }
+  /** Add a file to a folder (any type, up to the per-file limit). One commit. */
+  resourceUpload(owner: string, folder: unknown, name: unknown, bytes: Uint8Array) {
+    if (typeof folder !== 'string' || typeof name !== 'string' || !name.trim() || name.length > 1024) throw new RuntimeFault('file_name_invalid', 400);
+    return this.withResources(owner, store => store.upload(folder, name, bytes));
+  }
+  /** Create a folder. One commit. */
+  resourceFolder(owner: string, input: unknown) {
+    const { parent, name } = (input ?? {}) as { parent?: unknown; name?: unknown };
+    if (typeof parent !== 'string' || typeof name !== 'string' || !name.trim() || name.length > 255) throw new RuntimeFault('invalid_input', 400);
+    return this.withResources(owner, store => store.createFolder(parent, name));
+  }
+  /** Rename or move. One commit. */
+  resourceMove(owner: string, input: unknown) {
+    const { from, to } = (input ?? {}) as { from?: unknown; to?: unknown };
+    if (typeof from !== 'string' || typeof to !== 'string') throw new RuntimeFault('invalid_input', 400);
+    return this.withResources(owner, store => store.move(from, to));
+  }
+  /** Delete (kept in the history; see {@link resourceRestore}). One commit. */
+  resourceDelete(owner: string, input: unknown) {
+    const { path } = (input ?? {}) as { path?: unknown };
+    if (typeof path !== 'string') throw new RuntimeFault('invalid_input', 400);
+    return this.withResources(owner, store => store.delete(path));
+  }
+  /** Undo a delete: bring `path` back as it was before `commit`. One commit. */
+  resourceRestore(owner: string, input: unknown) {
+    const { path, commit } = (input ?? {}) as { path?: unknown; commit?: unknown };
+    if (typeof path !== 'string' || typeof commit !== 'string') throw new RuntimeFault('invalid_input', 400);
+    return this.withResources(owner, store => store.restore(path, commit));
+  }
+  /** The newest commits of the resources. */
+  resourceHistory(owner: string, limit = 50) { return this.withResources(owner, store => store.log(limit)); }
+  /** One resource's bytes and description (type by content when it is text, PDF or an image). */
+  resourceFile(owner: string, path: unknown, limit: number) {
+    if (typeof path !== 'string') throw new RuntimeFault('invalid_input', 400);
+    return this.withResources(owner, store => {
+      const bytes = store.read(path, limit);
+      let kind: 'text' | 'pdf' | 'image' | 'other' = 'other';
+      let mediaType = 'application/octet-stream';
+      try { const file = store.describe(path); kind = file.kind; mediaType = file.mediaType; } catch { /* not a supported type: downloads only */ }
+      return { name: path.split('/').filter(Boolean).pop()!, kind, mediaType, bytes };
+    });
   }
   /**
    * Validate an upload (type by content, size, PDF text) and stage it until a
@@ -308,7 +413,7 @@ export class ThreadRuntime {
       let files: StoredFile[] = [];
       if (staged.length) {
         if (!session.agent.attachments) throw new RuntimeFault('files_unavailable', 400);
-        try { files = session.agent.attachments.store(staged.map(upload => upload.prepared)); } catch (error) { throw fileFault(error); }
+        try { files = await session.agent.attachments.store(staged.map(upload => upload.prepared)); } catch (error) { throw fileFault(error); }
         this.uploads!.discard(uploadIds);
       }
       const fileMetadata: RunFile[] = files.map(({ name, kind, mediaType, label, bytes, sha256, pages, lines }) => ({ name, kind, mediaType, label, bytes, sha256, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) }));

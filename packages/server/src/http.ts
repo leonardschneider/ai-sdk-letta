@@ -46,7 +46,29 @@ export function contentDisposition(name: string): string {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 /** Content type for a download: text is always served as plain text, never as HTML or script. */
-const downloadType = (file: { kind: string; mediaType: string }) => file.kind === 'pdf' ? 'application/pdf' : file.kind === 'image' ? file.mediaType : file.mediaType === 'text/csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8';
+const downloadType = (file: { kind: string; mediaType: string }) => file.kind === 'pdf' ? 'application/pdf' : file.kind === 'image' ? file.mediaType : file.kind === 'other' ? 'application/octet-stream' : file.mediaType === 'text/csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8';
+
+/** Largest file shown by a preview (downloads are not limited by this). */
+export const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
+/**
+ * Content-Security-Policy of previews: nothing may load, run, or reach the
+ * network. With `sandbox` (no `allow-scripts`, no `allow-same-origin`) the
+ * document is also an opaque origin: no scripts, forms, popups or cookies.
+ */
+export const PREVIEW_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox";
+/**
+ * PDFs are drawn by the browser's own viewer, which does not run in a
+ * sandboxed document; their policy keeps everything else closed. Only bytes
+ * that are a PDF by content get it.
+ */
+export const PDF_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; object-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+/** Media type of a preview, by content and name: HTML only inside the sandbox policy; anything else as text, image or PDF. */
+export function previewType(file: { name: string; kind: string; mediaType: string }): string | undefined {
+  if (file.kind === 'pdf') return 'application/pdf';
+  if (file.kind === 'image') return file.mediaType;
+  if (file.kind !== 'text') return undefined;
+  return /\.html?$/i.test(file.name) ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8';
+}
 
 /** Shared routes; the caller must install its transport-specific authentication first. */
 export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owner: string, shutdown?: () => Promise<void>) {
@@ -54,7 +76,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   const runs = express.json({ limit: RUN_BODY_LIMIT_BYTES });
   // Raw bytes, only on the upload route, only as application/octet-stream, bounded by the per-file limit.
   const upload = express.raw({ limit: UPLOAD_BODY_LIMIT_BYTES, type: 'application/octet-stream' });
-  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && req.path === '/v1/uploads' ? upload : small)(req, res, next));
+  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && (req.path === '/v1/uploads' || req.path === '/v1/resources/upload') ? upload : small)(req, res, next));
   app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: 1, edits: false,
     images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes },
     files: runtime.uploads ? { types: ['text', 'pdf', 'image'], textExtensions: [...TEXT_EXTENSIONS], maxFileBytes: FILE_LIMITS.maxFileBytes, maxFilesPerMessage: FILE_LIMITS.maxFilesPerMessage, maxConversationFiles: FILE_LIMITS.maxConversationFiles, maxConversationBytes: FILE_LIMITS.maxConversationBytes } : null }));
@@ -78,6 +100,44 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     res.set({ 'Content-Type': downloadType(file), 'Content-Disposition': contentDisposition(file.name), 'Content-Length': String(bytes.byteLength),
       'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store' });
     res.end(bytes);
+  });
+  /* ---------------- resources ---------------- */
+  /** The tree: `{ children, truncated, version, threads, changes }`. */
+  app.get('/v1/resources', async (_req, res) => res.json(await runtime.resourceTree(owner)));
+  /** The newest commits. */
+  app.get('/v1/resources/history', async (req, res) => res.json(await runtime.resourceHistory(owner, Math.min(200, Math.max(1, Number(req.query.limit) || 50)))));
+  /** Upload raw bytes into `?folder=` (path from the root), the name URL-encoded in `X-File-Name`. One commit. */
+  app.post('/v1/resources/upload', async (req, res) => {
+    if (!req.is('application/octet-stream') || !Buffer.isBuffer(req.body)) throw new RuntimeFault('invalid_input', 415);
+    let name: string;
+    try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? '')); } catch { throw new RuntimeFault('file_name_invalid', 400); }
+    res.status(201).json(await runtime.resourceUpload(owner, String(req.query.folder ?? ''), name, req.body));
+  });
+  app.post('/v1/resources/folders', async (req, res) => res.status(201).json(await runtime.resourceFolder(owner, req.body)));
+  app.post('/v1/resources/move', async (req, res) => res.json(await runtime.resourceMove(owner, req.body)));
+  app.post('/v1/resources/delete', async (req, res) => res.json(await runtime.resourceDelete(owner, req.body)));
+  app.post('/v1/resources/restore', async (req, res) => res.json(await runtime.resourceRestore(owner, req.body)));
+  /** Download one file (`?path=`), always as an attachment. */
+  app.get('/v1/resources/file', async (req, res) => {
+    const file = await runtime.resourceFile(owner, req.query.path, FILE_LIMITS.maxFileBytes);
+    res.set({ 'Content-Type': downloadType(file), 'Content-Disposition': contentDisposition(file.name), 'Content-Length': String(file.bytes.byteLength),
+      'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store' });
+    res.end(file.bytes);
+  });
+  /**
+   * Show one file (`?path=`) in a frame of the app: inline, under a policy
+   * that allows no script, no network and no same-origin access
+   * ({@link PREVIEW_CSP}; PDFs {@link PDF_PREVIEW_CSP}). Text other than HTML
+   * is served as plain text; types without a preview are refused (415).
+   */
+  app.get('/v1/resources/preview', async (req, res) => {
+    const file = await runtime.resourceFile(owner, req.query.path, PREVIEW_LIMIT_BYTES);
+    const type = previewType(file);
+    if (!type) throw new RuntimeFault('preview_unavailable', 415);
+    res.set({ 'Content-Type': type, 'Content-Disposition': contentDisposition(file.name).replace(/^attachment/, 'inline'), 'Content-Length': String(file.bytes.byteLength),
+      'Content-Security-Policy': file.kind === 'pdf' ? PDF_PREVIEW_CSP : PREVIEW_CSP, 'Cross-Origin-Resource-Policy': 'same-origin', 'X-Frame-Options': 'SAMEORIGIN',
+      'Referrer-Policy': 'no-referrer', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.end(file.bytes);
   });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title)));
@@ -134,7 +194,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   app.use((req, res, next) => {
     const host = `127.0.0.1:${port || req.socket.localPort}`;
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+      // Previews load in frames of this origin (their own responses set a stricter policy); nothing else may frame the app.
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
     if (req.headers.host !== host || (req.headers.origin && req.headers.origin !== `http://${host}`) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
     next();
   });

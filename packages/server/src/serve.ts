@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { createLettaAgent, filesEnabled, resolveStateDirectory, statePaths, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import { createLettaAgent, filesEnabled, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, tokenApiApp } from './http.js';
 
@@ -31,7 +31,7 @@ export interface RunningServer {
 function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
-    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).attachments } : {}),
+    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true });
       const { agent } = runtime;

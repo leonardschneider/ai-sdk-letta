@@ -112,7 +112,8 @@ test('conversation isolation at the server: each thread lists and downloads only
     assert.deepEqual(f.runtime.files('owner', a).map(x => x.name), ['secret.txt']);
     assert.deepEqual(f.runtime.files('owner', b), []);
     assert.throws(() => f.runtime.file('owner', b, 'secret.txt'), (e: Error & { status?: number }) => e.message === 'file_not_found' && e.status === 404);
-    assert.throws(() => f.runtime.file('owner', a, '../conv-2/secret.txt'), /file_name_invalid/);
+    for (const name of ['../B/secret.txt', '/B/secret.txt', '../../../../etc/passwd']) assert.throws(() => f.runtime.file('owner', a, name), /file_not_found|file_name_invalid/, name);
+    assert.throws(() => f.runtime.file('owner', b, '/A/secret.txt'), /file_not_found|file_name_invalid/, 'downloads resolve only files attached to that thread');
     assert.throws(() => f.runtime.files('intruder', a), /forbidden/);
     // Archiving keeps the files.
     f.runtime.updateMetadata('owner', a, { archived: true });
@@ -201,7 +202,7 @@ test('GUI routes: upload, list and download need the session; uploads need Origi
     // List and download: session required, read-only (no CSRF needed for GET).
     assert.equal((await fetch(`${base}/api/v1/threads/${thread}/files`)).status, 401);
     const list = await (await fetch(`${base}/api/v1/threads/${thread}/files`, { headers: { cookie } })).json() as { name: string; pages?: number }[];
-    assert.deepEqual(list.map(x => [x.name, x.pages]), [['Bericht über Q3.pdf', 5], ['_script_.html', undefined]]);
+    assert.deepEqual(list.map(x => [x.name, x.pages]), [['_script_.html', undefined], ['Bericht über Q3.pdf', 5]]);
     const download = await fetch(`${base}/api/v1/threads/${thread}/files/${encodeURIComponent('Bericht über Q3.pdf')}`, { headers: { cookie } });
     assert.equal(download.status, 200);
     assert.equal(download.headers.get('content-type'), 'application/pdf');
@@ -213,7 +214,7 @@ test('GUI routes: upload, list and download need the session; uploads need Origi
     const html = await fetch(`${base}/api/v1/threads/${thread}/files/_script_.html`, { headers: { cookie } });
     assert.equal(html.headers.get('content-type'), 'text/plain; charset=utf-8', 'text is never served as HTML');
     assert.match(html.headers.get('content-disposition')!, /^attachment;/);
-    assert.equal((await fetch(`${base}/api/v1/threads/${thread}/files/${encodeURIComponent('../state.json')}`, { headers: { cookie } })).status, 400);
+    assert.ok([400, 404].includes((await fetch(`${base}/api/v1/threads/${thread}/files/${encodeURIComponent('../state.json')}`, { headers: { cookie } })).status));
     assert.equal((await fetch(`${base}/api/v1/threads/${thread}/files/missing.pdf`, { headers: { cookie } })).status, 404);
     assert.equal((await fetch(`${base}/api/v1/threads/${thread}/files/x`, { headers: { cookie, origin: 'https://evil.test' } })).status, 403);
     assert.equal((await fetch(`${base}/api/v1/threads/${randomUUID()}/files`, { headers: { cookie } })).status, 404);
