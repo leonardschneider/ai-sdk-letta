@@ -5,8 +5,13 @@
   "description": "A persistent, Letta-backed Vercel AI SDK Agent with memory, dreaming, application-owned tools and human-in-the-loop.",
   "license": "Apache-2.0",
   "type": "module",
-  "repository": { "type": "git", "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git" },
-  "engines": { "node": ">=22.19.0" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "workspaces": [
     "packages/provider",
     "packages/ai-sdk-letta",
@@ -22,9 +27,13 @@
     "build": "npm run build --workspaces --if-present",
     "test:live": "AI_SDK_LETTA_LIVE=1 npm run test:live --workspace ai-sdk-letta",
     "tui": "npm run tui --workspace @ai-sdk-letta/example-basic --",
-    "gui": "npm run gui --workspace @ai-sdk-letta/example-basic --"
+    "gui": "npm run gui --workspace @ai-sdk-letta/example-basic --",
+    "check:packages": "node scripts/check-packages.mjs",
+    "changeset": "changeset",
+    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts"
   },
   "devDependencies": {
+    "@changesets/cli": "3.0.3",
     "@types/node": "22.19.15",
     "patch-package": "8.0.1",
     "tsx": "4.21.0",

@@ -1,6 +1,11 @@
-# Changelog
+# @ai-sdk-letta/provider
 
-## Unreleased (ai-sdk-letta)
+Releases are listed first (written by Changesets). The sections headed
+"History" are from before the first release under this name: this package
+starts at 0.1.0, and the fork's "2.0.0" was never published as
+`@ai-sdk-letta/provider`.
+
+## History: absorbed into ai-sdk-letta
 
 - Absorbed into the ai-sdk-letta monorepo as `@ai-sdk-letta/provider`, with
   upstream history preserved. Renamed away from `@letta-ai/...` because this is
@@ -10,7 +15,7 @@
 - Pinned `@letta-ai/letta-agent-sdk` to 0.8.22 to match the rest of the
   workspace.
 
-## 2.0.0
+## History: fork 2.0.0 of @letta-ai/vercel-ai-sdk-provider
 
 The transport moved from the Letta REST client (`@letta-ai/letta-client`) to
 the Letta Agent SDK (`@letta-ai/letta-agent-sdk`), which speaks the Letta Code
