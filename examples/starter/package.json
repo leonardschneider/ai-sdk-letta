@@ -1,0 +1,22 @@
+{
+  "name": "@ai-sdk-letta/example-starter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Starter template: the smallest complete ai-sdk-letta agent, with one custom tool and ask_user. Copy it to build your own.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts",
+    "tui": "node --conditions=ai-sdk-letta-source --import tsx src/tui.ts",
+    "gui": "npm run build --workspace @ai-sdk-letta/web && node --conditions=ai-sdk-letta-source --import tsx src/gui.ts",
+    "script": "node --conditions=ai-sdk-letta-source --import tsx src/script.ts"
+  },
+  "dependencies": {
+    "@ai-sdk-letta/server": "*",
+    "@ai-sdk-letta/tui": "*",
+    "@ai-sdk-letta/web": "*",
+    "ai": "7.0.118",
+    "ai-sdk-letta": "*"
+  }
+}

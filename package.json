@@ -18,7 +18,7 @@
     "packages/server",
     "apps/tui",
     "apps/web",
-    "examples/basic"
+    "examples/*"
   ],
   "scripts": {
     "postinstall": "patch-package --patch-dir apps/tui/patches --error-on-fail",
@@ -29,6 +29,7 @@
     "tui": "npm run tui --workspace @ai-sdk-letta/example-basic --",
     "gui": "npm run gui --workspace @ai-sdk-letta/example-basic --",
     "check:packages": "node scripts/check-packages.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts"
   },

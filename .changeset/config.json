@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@ai-sdk-letta/tui", "@ai-sdk-letta/web", "@ai-sdk-letta/example-basic"]
+  "ignore": ["@ai-sdk-letta/tui", "@ai-sdk-letta/web", "@ai-sdk-letta/example-*"]
 }

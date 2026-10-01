@@ -3,7 +3,7 @@
 //
 //   node scripts/check-packages.mjs
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -12,7 +12,11 @@ const published = [
   { dir: 'packages/server', license: 'Apache-2.0', notice: true },
   { dir: 'packages/provider', license: 'MIT', notice: false },
 ];
-const privateWorkspaces = ['apps/tui', 'apps/web', 'examples/basic'];
+// Every example is a workspace (`examples/*`) and must stay private.
+const examples = readdirSync(join(root, 'examples'), { withFileTypes: true })
+  .filter(entry => entry.isDirectory() && existsSync(join(root, 'examples', entry.name, 'package.json')))
+  .map(entry => `examples/${entry.name}`);
+const privateWorkspaces = ['apps/tui', 'apps/web', ...examples];
 const forbidden = [
   [/(^|\/)test(s)?\//, 'test directory'],
   [/\.test\.[cm]?[jt]sx?$/, 'test file'],
