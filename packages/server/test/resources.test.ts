@@ -97,6 +97,17 @@ test('the tree has one folder per conversation (with its thread), user folders, 
     await f.runtime.folderRenamed();
     const names = (await f.runtime.resourceTree('owner')).children.map(n => n.name);
     assert.ok(names.includes('Porto itinerary') && !names.includes('Lisbon itinerary'), names.join());
+    // Markdown titles: the folder takes the text the title shows, never its syntax or link target.
+    f.runtime.updateMetadata('owner', c, { title: 'Review [Spec](https://example.com) **v2**' });
+    await f.runtime.folderRenamed();
+    const markdown = (await f.runtime.resourceTree('owner')).children.map(n => n.name);
+    assert.ok(markdown.includes('Review Spec v2') && !markdown.includes('Porto itinerary'), markdown.join());
+    assert.equal(f.runtime.list('owner').find(t => t.id === c)!.title, 'Review [Spec](https://example.com) **v2**', 'the title itself keeps its Markdown');
+    // A Markdown-only change that shows the same text leaves the folder alone.
+    const before = f.store().commits;
+    f.runtime.updateMetadata('owner', c, { title: 'Review [Spec](https://example.org) *v2*' });
+    await f.runtime.folderRenamed();
+    assert.equal(f.store().commits, before);
   } finally { await f.cleanup(); }
 });
 

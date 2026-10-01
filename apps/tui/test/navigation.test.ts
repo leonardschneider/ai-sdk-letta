@@ -77,6 +77,9 @@ test('navigation listing scopes every page, rejects other agents and caps enumer
   await assert.rejects(listNavigationEntries(async () => [{ id: 'repeat', agent_id: 'mapped' } as LettaConversation], 'mapped'), /repeated cursor/);
   const controller = new AbortController(); controller.abort();
   await assert.rejects(listNavigationEntries(async () => { throw new Error('must not fetch'); }, 'mapped', controller.signal), { name: 'AbortError' });
+  let page = 0;
+  const markdown = await listNavigationEntries(async () => page++ ? [] : [{ id: 'local-conv-md', agent_id: 'mapped', summary: 'Plan *trip* to [Rome](https://example.com)' } as LettaConversation, { id: 'local-conv-empty', agent_id: 'mapped', summary: '**' } as LettaConversation], 'mapped');
+  assert.deepEqual(markdown.entries.slice(1).map(e => e.title), ['Plan trip to Rome', '**']);
 });
 
 test('snippet includes surrounding context with plain-text terminal control removal', () => {

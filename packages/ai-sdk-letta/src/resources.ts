@@ -7,6 +7,7 @@ import {
 import { isAbsolute, join, posix, resolve } from 'node:path';
 import { FILE_LIMITS, FileInputError, decodeText, detectFileType, metadataOf, numberedName, prepareFile, sanitizeFileName, type FileLimits, type PreparedFile, type StoredFile } from './attachments.js';
 import { sanitizeRepository } from './sandbox.js';
+import { titleText } from './title.js';
 
 /**
  * Resources: every file of an agent, in one git-backed folder.
@@ -162,10 +163,14 @@ const parentOf = (path: string) => path.includes('/') ? path.slice(0, path.lastI
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 const within = (path: string, prefix: string) => path === prefix || path.startsWith(`${prefix}/`);
 
-/** A folder name from a conversation title: a plain name, at most 60 characters. */
+/**
+ * A folder name from a conversation title: a plain name, at most 60
+ * characters. Titles are inline Markdown; the name uses the text the title
+ * shows, never its syntax (`[Spec](https://x) **v2**` → `Spec v2`).
+ */
 export function folderNameFromTitle(title: string | undefined, fallback: string): string {
   // Punctuation that file systems dislike becomes readable separators rather than underscores.
-  const plain = (title ?? '').replace(/\s*[/\\|]\s*/g, ' - ').replace(/\s*:\s*/g, ' - ').replace(/[?*"<>]/g, '').replace(/…+$/u, '');
+  const plain = titleText(title ?? '', { shortUrls: true }).replace(/\s*[/\\|]\s*/g, ' - ').replace(/\s*:\s*/g, ' - ').replace(/[?*"<>]/g, '').replace(/…+$/u, '');
   const name = sanitizeFileName(plain, fallback);
   const short = [...name].length > 60 ? `${[...name].slice(0, 59).join('').trim()}…` : name;
   return short || fallback;

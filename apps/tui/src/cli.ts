@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
-import { sanitizeText, type ConversationChoice, type Identity } from 'ai-sdk-letta';
+import { sanitizeText, titleText, type ConversationChoice, type Identity } from 'ai-sdk-letta';
 
 /** Parsed terminal command-line options. */
 export type TerminalArgs = { list?: boolean; resume?: boolean; newTitle?: string; conversationId?: string; stateDirectory?: string };
@@ -31,7 +31,7 @@ export function parseTerminalArgs(args: string[]): TerminalArgs {
 /** Rows shown by `--list` and the startup picker: `default` first, then non-archived conversations. */
 export function conversationRows(identity: Identity, conversations: LettaConversation[]) {
   return [{ id: 'default', agent_id: identity.agentId, summary: 'Default conversation', last_message_at: null }, ...conversations.filter(c => c.id !== 'default' && !c.archived)]
-    .map(c => ({ id: c.id, title: sanitizeText(c.summary || 'Untitled conversation').replace(/\n/g, ' '), activity: c.last_message_at ?? (c as LettaConversation).updated_at ?? (c as LettaConversation).created_at ?? 'unavailable (default backend thread)' }));
+    .map(c => ({ id: c.id, title: titleText(sanitizeText(c.summary ?? '')) || 'Untitled conversation', activity: c.last_message_at ?? (c as LettaConversation).updated_at ?? (c as LettaConversation).created_at ?? 'unavailable (default backend thread)' }));
 }
 
 export function printConversations(identity: Identity, conversations: LettaConversation[]) {

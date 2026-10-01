@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ThreadListPrimitive, ThreadListItemPrimitive, ThreadListItemMorePrimitive, useAui, useAuiState } from '@assistant-ui/react';
 import { Archive, ArchiveRestore, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, X } from 'lucide-react';
+import { titleText } from 'ai-sdk-letta/title';
 import { groupByDate, matchesSearch, TITLE_LIMIT, validTitle, type ThreadSummary } from './thread-model.js';
+import { TitleView } from './title.js';
 
 /** Row-level UI state shared by every ThreadListItem (the primitives render items by index). */
 type RowContext = { editingId?: string; setEditingId(id?: string): void; busy: boolean; runningId?: string; archivingIds: ReadonlySet<string> };
@@ -84,16 +86,23 @@ function ThreadListItem() {
   const ready = custom?.state === 'ready';
   const archived = status === 'archived';
   const lockedByRun = runningId === id;
-  return <ThreadListItemPrimitive.Root className="thread-row" data-archived={archived || undefined} data-editing={editing || undefined} data-menu-open={menuOpen || undefined}
+  const plain = titleText(title) || 'Untitled';
+  const disabled = busy || !ready;
+  // The trigger covers the whole row; the title is drawn above it and lets clicks
+  // through to it, except on links, which open in a new tab (a link cannot sit inside a button).
+  return <ThreadListItemPrimitive.Root className="thread-row" data-archived={archived || undefined} data-editing={editing || undefined} data-menu-open={menuOpen || undefined} data-disabled={disabled || undefined}
     onContextMenu={event => { if (editing) return; event.preventDefault(); setMenuOpen(true); }}>
     {editing
       ? <RenameField initial={title} onDone={(value) => { setEditingId(undefined); if (value !== undefined && value !== title) aui.threadListItem.rename(value); requestAnimationFrame(() => triggerRef.current?.focus()); }}/>
-      : <ThreadListItemPrimitive.Trigger ref={triggerRef} className="thread-trigger" disabled={busy || !ready} title={title}>
-          <span className="thread-title"><ThreadListItemPrimitive.Title fallback="Untitled"/></span>
-          {!ready && <span className="thread-note">unavailable</span>}
-        </ThreadListItemPrimitive.Trigger>}
+      : <>
+          <ThreadListItemPrimitive.Trigger ref={triggerRef} className="thread-trigger" disabled={disabled} title={plain} aria-label={ready ? plain : `${plain} (unavailable)`}/>
+          <span className="thread-label">
+            <span className="thread-title"><TitleView title={title} shortUrls linkTabIndex={-1}/></span>
+            {!ready && <span className="thread-note">unavailable</span>}
+          </span>
+        </>}
     {!editing && <ThreadListItemMorePrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
-      <ThreadListItemMorePrimitive.Trigger className="row-menu" aria-label={`Options for ${title}`} disabled={!ready}>
+      <ThreadListItemMorePrimitive.Trigger className="row-menu" aria-label={`Options for ${plain}`} disabled={!ready}>
         <Ellipsis size={16} aria-hidden="true"/>
       </ThreadListItemMorePrimitive.Trigger>
       <ThreadListItemMorePrimitive.Content className="menu" align="start" side="bottom" onCloseAutoFocus={event => { if (renaming.current) { event.preventDefault(); renaming.current = false; } }}>

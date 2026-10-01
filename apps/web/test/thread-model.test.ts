@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { activityTimes, dateGroup, deriveTitle, groupByDate, isDefaultTitle, legacyTitleTime, matchesSearch, nextAfterArchive, sortThreads, validTitle, type ThreadSummary } from '../src/thread-model.js';
 
 test('derived titles are short, readable and valid for the backend', () => {
-  assert.equal(deriveTitle('  plan my **trip** to `Rome` next week  '), 'Plan my trip to Rome next week');
+  assert.equal(deriveTitle('  plan my **trip** to `Rome` next week  '), 'Plan my **trip** to `Rome` next week');
   assert.equal(deriveTitle('What is 2+2? And why does it matter so much to people?'), 'What is 2+2?');
   assert.equal(deriveTitle('Use text_stats to count words. Then answer.'), 'Use text_stats to count words');
   assert.equal(deriveTitle('# Heading\n> quoted text'), 'Heading quoted text');
-  assert.equal(deriveTitle('See [the docs](https://example.com) please'), 'See the docs please');
+  assert.equal(deriveTitle('See [the docs](https://example.com) please'), 'See [the docs](https://example.com) please');
   const long = deriveTitle('word '.repeat(40))!;
   assert.ok(long.length <= 61 && long.endsWith('…') && !long.includes('  '), long);
   assert.equal(deriveTitle('```\nonly code\n```'), undefined);
@@ -16,6 +16,29 @@ test('derived titles are short, readable and valid for the backend', () => {
   assert.equal(deriveTitle('   '), undefined);
   assert.equal(deriveTitle('bad\u202etitle'), 'Bad title');
   assert.ok(validTitle(deriveTitle('x'.repeat(500))!));
+});
+test('derived titles keep inline Markdown as typed: a pasted URL stays a link', () => {
+  // The URL is kept whole and not capitalised; it counts as its shortened form (32 characters).
+  assert.equal(deriveTitle('https://example.com/docs/a-rather-long-path/to/the/spec.html please review this'), 'https://example.com/docs/a-rather-long-path/to/the/spec.html please review this');
+  assert.equal(deriveTitle('Look at https://example.com/docs/specification/v2/overview.html and reply with just the word OK.'), 'Look at https://example.com/docs/specification/v2/overview.html and reply with…');
+  assert.equal(deriveTitle('Summarise https://example.com/post. Then compare.'), 'Summarise https://example.com/post');
+  assert.equal(deriveTitle('- item one\n- item two'), 'Item one item two');
+  assert.equal(deriveTitle('![chart](https://x.example/c.png) explain'), 'Chart explain');
+  // A link is never cut in half: it is kept whole or left out.
+  const long = deriveTitle(`${'word '.repeat(9)}[the specification document](https://example.com/spec) and more words after it`)!;
+  assert.ok(long.endsWith('…') && !/\[[^\]]*$/.test(long) && !/\]\([^)]*$/.test(long), long);
+  assert.ok(validTitle(long));
+  // Markdown longer than the backend allows falls back to its text.
+  const huge = deriveTitle(`[x](https://example.com/${'p'.repeat(200)})`)!;
+  assert.ok(validTitle(huge) && !huge.includes('https'), huge);
+  assert.equal(deriveTitle('[](https://example.com)'), undefined);
+});
+test('search matches the text a title shows, not its Markdown syntax or link targets', () => {
+  assert.equal(matchesSearch('Review [Spec](https://example.com) **v2**', 'spec'), true);
+  assert.equal(matchesSearch('Review [Spec](https://example.com) **v2**', 'review v2'), true);
+  assert.equal(matchesSearch('Review [Spec](https://example.com) **v2**', 'example.com'), false);
+  assert.equal(matchesSearch('Review [Spec](https://example.com) **v2**', '**'), false);
+  assert.equal(matchesSearch('Read https://example.com/docs', 'example.com/docs'), true);
 });
 test('only the exact default title is replaced; legacy and custom titles are kept', () => {
   assert.equal(isDefaultTitle('New conversation'), true);

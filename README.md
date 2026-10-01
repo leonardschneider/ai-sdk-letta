@@ -313,7 +313,8 @@ They are enabled by the file tools or the sandbox.
   resources.lock    held during a git operation
 ```
 
-- **Folders are named after the conversation's title** (made a valid,
+- **Folders are named after the conversation's title** (the text it shows,
+  never its Markdown: `[Spec](https://…) **v2**` gives "Spec v2"; made a valid,
   unique name; "Trip planning", "Trip planning (2)") and **follow it**: when
   the conversation is renamed, its folder is renamed too, as one commit
   (`Rename folder Trip planning → Lisbon`), wherever the folder is now, also
@@ -540,6 +541,18 @@ A browser app built with [assistant-ui](https://www.assistant-ui.com):
 threads with rename and archive, streaming replies, tool activity lines with
 collapsed technical details, docked approval and question cards, and safe
 Markdown.
+
+**Conversation names.** Names are one line of inline Markdown, shown in the
+sidebar and the header: links, **bold**, *italic* and `code` (no headings,
+lists or images). Links open in a new tab (`noopener noreferrer`); only
+`http`, `https` and `mailto` links are active, anything else shows as plain
+text. Bare URLs become links, and long URLs are shortened in the sidebar.
+Clicking a link opens it; clicking anywhere else on the row opens the
+conversation. Rename shows the Markdown as written; search matches the text
+a name shows ("Spec" finds `[Spec](https://…)`). A new conversation is
+named after the first message as typed, so a pasted URL stays a link. The
+TUI, window titles and resource folders use the plain text
+(`folderNameFromTitle`, `titleText` from `ai-sdk-letta`).
 
 **Images.** Paste an image (⌘V / Ctrl+V), drop image files on the composer,
 or use the paperclip. Thumbnails can be removed before sending; images

@@ -1,4 +1,6 @@
 /** Pure sidebar model: titles, activity times, date groups and search. No I/O. */
+import { nodesText, parseTitle, titleText } from 'ai-sdk-letta/title';
+
 export type ThreadSummary = { id: string; title: string; state: string; archived?: boolean; createdAt?: string; lastActivityAt?: string };
 export const DEFAULT_TITLE = 'New conversation';
 export const TITLE_LIMIT = 120;
@@ -12,26 +14,63 @@ export function validTitle(title: string): boolean {
   return !!trimmed && trimmed.length <= TITLE_LIMIT && !hidden.test(title);
 }
 
-/** Short, readable title from a first message; undefined when nothing usable remains. */
+/**
+ * Short, readable title from a first message; undefined when nothing usable remains.
+ * Inline Markdown is kept as typed (a pasted URL becomes a link, `**bold**` stays bold);
+ * block syntax (code blocks, headings, quotes, list markers) and images are not.
+ * The first sentence and the length limit (`max` visible characters) are measured
+ * on the text the title shows (a URL as shortened in the sidebar), and a cut never
+ * splits a link or other construct.
+ */
 export function deriveTitle(text: string, max = 60): string | undefined {
-  const plain = text
+  const cleaned = text
     .replace(/```[^\n`]*\n[\s\S]*?(```|$)/g, ' ')
-    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[`*~]+/g, '')
+    .replace(/`{3,}/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]*(?:[#>|]+|[-+*][ \t]|\d{1,9}[.)][ \t])[ \t]*/gm, '')
     .replace(/(^|\s)[#>|]+(?=\s)/g, '$1')
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!plain) return undefined;
-  const sentence = plain.match(/^(.{8,}?[.?!])(\s|$)/u)?.[1] ?? plain;
-  let title = sentence.replace(/[.!]+$/u, '');
-  if (title.length > max) {
-    const cut = title.slice(0, max);
-    const space = cut.lastIndexOf(' ');
-    title = `${(space > max * 0.5 ? cut.slice(0, space) : cut).replace(/[\s,;:–-]+$/u, '')}…`;
+  if (!titleText(cleaned)) return undefined;
+  let title = cut(cleaned, max);
+  title = title.replace(/[.!]+$/u, '');
+  const first = parseTitle(title)[0];
+  if (first?.type === 'text') title = title.charAt(0).toLocaleUpperCase() + title.slice(1);
+  // Markdown that cannot fit the backend's limit falls back to the text it shows.
+  if (title.length > TITLE_LIMIT) return deriveTitle(titleText(cleaned).replace(/[\\`*_[\]<>]/g, ''), max);
+  return validTitle(title) && titleText(title) ? title : undefined;
+}
+
+/** The first sentence of `source` (inline Markdown), at most `max` visible and TITLE_LIMIT raw characters. */
+function cut(source: string, max: number): string {
+  let out = '';
+  let visible = 0;
+  for (const node of parseTitle(source)) {
+    const raw = source.slice(node.start, node.end);
+    if (node.type === 'text') {
+      // A sentence ends at . ? or ! followed by a space, after at least 8 visible characters.
+      const end = /[.?!](?=\s|$)/gu;
+      let stop = -1;
+      for (let m; (m = end.exec(raw));) if (visible + m.index + 1 >= 8) { stop = m.index + 1; break; }
+      const piece = stop >= 0 ? raw.slice(0, stop) : raw;
+      if (visible + piece.length <= max && out.length + piece.length <= TITLE_LIMIT) {
+        out += piece; visible += piece.length;
+        if (stop >= 0) return out.trim();
+        continue;
+      }
+      const room = Math.min(max - visible, TITLE_LIMIT - 1 - out.length);
+      const part = piece.slice(0, Math.max(0, room));
+      const space = part.lastIndexOf(' ');
+      out += space > room * 0.5 || (space >= 0 && visible > 0) ? part.slice(0, space) : visible > 0 ? '' : part;
+      return `${out.replace(/[\s,;:–-]+$/u, '')}…`;
+    }
+    // A URL counts as the shortened form the sidebar shows, so a pasted link fits.
+    const shown = nodesText([node], { shortUrls: true }).length;
+    if (visible + shown <= max && out.length + raw.length <= TITLE_LIMIT) { out += raw; visible += shown; continue; }
+    return out.trim() ? `${out.replace(/[\s,;:–-]+$/u, '')}…` : raw.length < TITLE_LIMIT ? raw : `${nodesText([node]).slice(0, max)}…`;
   }
-  title = title.charAt(0).toLocaleUpperCase() + title.slice(1);
-  return validTitle(title) ? title : undefined;
+  return out.trim();
 }
 
 /** Legacy titles look like "Conversation 9/28/2026, 9:57:54 PM" (local time). */
@@ -92,10 +131,13 @@ export function groupByDate<T extends ThreadSummary>(sorted: readonly T[], times
 }
 
 const fold = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase();
-/** Case- and accent-insensitive match of every search word against the title. */
+/**
+ * Case- and accent-insensitive match of every search word against the text the
+ * title shows (its Markdown syntax and link targets are not searched).
+ */
 export function matchesSearch(title: string, query: string): boolean {
   const words = fold(query).split(/\s+/).filter(Boolean);
-  const haystack = fold(title);
+  const haystack = fold(titleText(title));
   return words.every(word => haystack.includes(word));
 }
 

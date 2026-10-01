@@ -37,4 +37,5 @@ export {
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
 export { createToolBridge, askUserTool, fileTraceWriter, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions } from './tools.js';
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
+export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';

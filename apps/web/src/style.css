@@ -124,12 +124,21 @@ kbd { font-family: inherit; font-size: 11px; color: var(--text-3); border: 1px s
 .thread-row { position: relative; display: flex; align-items: center; border-radius: 9px; min-height: 34px; }
 .thread-row:hover, .thread-row[data-menu-open] { background: var(--hover); }
 .thread-row[data-active] { background: var(--active); }
-.thread-row[data-active] .thread-trigger { font-weight: 550; }
-.thread-trigger { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: transparent; text-align: left; padding: 7px 36px 7px 10px; border-radius: 9px; font-size: 14px; color: var(--text); }
-.thread-trigger:disabled { color: var(--text-3); }
+/* The trigger button covers the row; the label (with its Markdown title) is drawn above it and passes clicks through, except on links. */
+.thread-trigger { position: absolute; inset: 0; border: 0; background: transparent; border-radius: 9px; padding: 0; }
 .thread-trigger:focus-visible { outline-offset: -2px; }
+.thread-label { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 7px 36px 7px 10px; font-size: 14px; color: var(--text); pointer-events: none; }
+.thread-row[data-active] .thread-label { font-weight: 550; }
+.thread-row[data-disabled] .thread-label { color: var(--text-3); }
+.thread-row[data-archived] .thread-label { color: var(--text-2); }
 .thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-row[data-archived] .thread-trigger { color: var(--text-2); }
+.thread-title a { pointer-events: auto; }
+.thread-row[data-disabled] .thread-title a { pointer-events: none; }
+/* Titles: inline Markdown (links, bold, italic, code). */
+.title-link { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 2px; }
+.title-link:hover { color: var(--accent); text-decoration-color: currentColor; }
+.title-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; background: var(--code-bg); border-radius: 4px; padding: 0 .3em; }
+.topbar-title strong, .thread-title strong { font-weight: 700; }
 .thread-note { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 .row-menu { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--text-2); opacity: 0; }
 .thread-row:hover .row-menu, .thread-row:focus-within .row-menu, .thread-row[data-menu-open] .row-menu, .row-menu[data-state="open"] { opacity: 1; }

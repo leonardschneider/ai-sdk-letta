@@ -1,6 +1,6 @@
 import { runAgentTUI } from '@ai-sdk/tui';
 import type { ToolSet } from 'ai';
-import { filesEnabled, openLettaAgent, parseAttachmentNote, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import { filesEnabled, openLettaAgent, parseAttachmentNote, titleText, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
 import type { UIMessage } from 'ai';
 import { localCommandMatches, navigate, NavigationScreen } from './navigation.js';
 import { parseTerminalArgs, pickConversation, printConversations, type TerminalArgs } from './cli.js';
@@ -62,7 +62,7 @@ export async function runTerminal<TOOLS extends ToolSet>(definition: AgentDefini
       let next: string | undefined;
       const files = filesEnabled(definition);
       const initialMessages = [...withFileLabels(presentation.initialMessages), { id: 'session-status', role: 'assistant' as const, parts: [{ type: 'text' as const, text: `${presentation.status}\n${files ? HELP_LINE_FILES : HELP_LINE}` }] }];
-      await runAgentTUI({ agent, title: `${definition.name} · ${presentation.title}`, tools: 'full', reasoning: 'hidden', initialMessages, interaction: agent.interactions, toolView,
+      await runAgentTUI({ agent, title: `${definition.name} · ${titleText(presentation.title) || 'Untitled conversation'}`, tools: 'full', reasoning: 'hidden', initialMessages, interaction: agent.interactions, toolView,
         attachments: terminalAttachments({ files }),
         localCommand: { matches: localCommandMatches, run: async text => {
           next = await navigate(text, navigation, undefined, runtime?.resources ? { store: runtime.resources, conversationId: presentation.conversationId } : undefined);

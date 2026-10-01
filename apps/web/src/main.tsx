@@ -9,6 +9,8 @@ import { historyMessages, observedParts, userContent, withTime, type FileChip } 
 import { api, errorCode, metadataError, setCsrf, uploadFile } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
+import { TitleView } from './title.js';
+import { titleText } from 'ai-sdk-letta/title';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
@@ -210,7 +212,7 @@ function App() {
     setArchiving(set => new Set(set).add(id));
     try {
       const updated = await patch(id, { archived: true });
-      toast(`Archived “${updated.title}”`, { action: { label: 'Undo', run: () => void restore(id) } });
+      toast(`Archived “${titleText(updated.title)}”`, { action: { label: 'Undo', run: () => void restore(id) } });
       if (wasCurrent && currentRef.current.id === id) {
         const next = nextAfterArchive(sorted, id);
         if (next) await select(next); else startDraft();
@@ -219,7 +221,7 @@ function App() {
     finally { setArchiving(set => { const copy = new Set(set); copy.delete(id); return copy; }); }
   }
   async function restore(id: string) {
-    try { const updated = await patch(id, { archived: false }); toast(`Restored “${updated.title}”`); if (currentRef.current.id === id) focusComposer(); }
+    try { const updated = await patch(id, { archived: false }); toast(`Restored “${titleText(updated.title)}”`); if (currentRef.current.id === id) focusComposer(); }
     catch (e) { toast(metadataError(e), { tone: 'error' }); }
   }
 
@@ -347,7 +349,7 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  useEffect(() => { document.title = selected ? `${selected.title} · ${agent.name}` : agent.name; }, [selected, agent.name]);
+  useEffect(() => { document.title = selected ? `${titleText(selected.title)} · ${agent.name}` : agent.name; }, [selected, agent.name]);
 
   const title = current.draft ? 'New chat' : selected?.title ?? '';
   const answer = async (value: InteractionResponse) => {
@@ -371,7 +373,7 @@ function App() {
               <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
               <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
             </>}
-            <h1 className="topbar-title" title={title}>{title}</h1>
+            <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
             {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
