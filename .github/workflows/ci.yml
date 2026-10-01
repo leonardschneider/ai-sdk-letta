@@ -41,3 +41,21 @@ jobs:
       - name: Check published package contents
         # Runs `npm pack --dry-run` on the published packages; never publishes.
         run: npm run check:packages
+
+  audit:
+    name: audit (production dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - name: Audit production dependencies
+        # Fails on high or critical advisories in production dependencies,
+        # unless the advisory is on .github/audit-allowlist.json and the entry
+        # has not expired. Reads the lockfile; no install needed.
+        run: npm run check:audit
+      - name: Full audit report
+        # Dev dependencies and lower severities, for the log only.
+        run: npm audit || true
