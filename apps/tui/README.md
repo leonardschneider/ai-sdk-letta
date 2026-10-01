@@ -9,12 +9,17 @@ process.exitCode = await runTerminal(definition, process.argv.slice(2));
 ```
 
 Options: `--list`, `--resume`, `--new [title]`, `--conversation ID`,
-`--state-dir PATH`. In the UI: `/resume`, `/search`, `/help`, PgUp/PgDn, Esc.
+`--state-dir PATH`. In the UI: `/resume`, `/search`, `/help`, PgUp/PgDn, Esc,
+and **Ctrl+V** or a dropped image path to attach images (shown as
+`[Image 1]`; Backspace removes). Clipboard images need `osascript` (macOS)
+or `wl-paste`/`xclip` (Linux); dropping a file works everywhere.
 
 **Patched dependency.** `@ai-sdk/tui` is pinned at 1.0.119 and patched on
 install by `patch-package` ([patches/](patches)): display-only restored
 history (`initialMessages`), idle-only local slash commands (`localCommand`),
-and an interaction renderer for approvals and questions (`interaction`). These
+an interaction renderer for approvals and questions (`interaction`), and
+generic prompt attachments (`attachments`: `fromClipboard` for Ctrl+V and
+`fromText` for pasted or dropped text; files are sent as `file` parts). These
 changes are being upstreamed through a fork of `vercel/ai`. The PTY tests in
 `test/` exercise the patched renderer offline.
 

@@ -56,3 +56,26 @@ test('live: text, tool call, approval (deny then allow) and question on one pers
     detach();
   } finally { await runtime?.close(); }
 });
+
+test('live: an image reaches the model and restored history returns it', { skip, timeout: 600_000 }, async () => {
+  const { png } = await import('../png.js');
+  let runtime: LettaRuntime<typeof registry> | undefined;
+  const title = `Live image test ${new Date().toISOString()}`;
+  try {
+    runtime = await createLettaAgent(definition, { stateDirectory, newTitle: title });
+    const conversationId = runtime.agent.presentation!.conversationId;
+    // A large red square on white: unambiguous for any vision model.
+    const image = png(96, 96, [220, 0, 0]);
+    const result = await runtime.agent.generate({ messages: [{ role: 'user', content: [
+      { type: 'text', text: 'What single colour fills this image? Answer with one lowercase word.' },
+      { type: 'image', image, mediaType: 'image/png' },
+    ] }], abortSignal: timeout() });
+    assert.match(result.text, /red/i);
+    await runtime.close(); runtime = undefined;
+    runtime = await createLettaAgent(definition, { stateDirectory, conversationId });
+    const restored = runtime.agent.presentation!.initialMessages.find(m => m.role === 'user' && m.parts.some(p => p.type === 'file'));
+    assert.ok(restored, 'restored history should include the user image');
+    const file = restored.parts.find(p => p.type === 'file');
+    assert.equal(file?.type === 'file' && file.url, `data:image/png;base64,${image.toString('base64')}`);
+  } finally { await runtime?.close(); }
+});

@@ -1,14 +1,18 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { UIMessage } from 'ai';
-import { validateResponse, type InteractionRequest, type InteractionResponse, type LettaAgent } from 'ai-sdk-letta';
+import type { UIMessage, UserContent } from 'ai';
+import { IMAGE_PLACEHOLDER, ImageInputError, MAX_INPUT_CHARACTERS, validateImages, validateResponse, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
 export type RuntimeEvent = { sequence: number; type: string; data: Record<string, unknown> };
 // createdAt/lastActivityAt are optional: threads recorded before they existed stay valid.
 type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string };
+/** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
+export type RunImage = { mediaType: string; bytes: number; sha256: string };
 /** A single user turn and the events observed while it ran. */
-export type Run = { id: string; threadId: string; input: string; parentRunId: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string };
+export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; parentRunId: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string };
+/** Input of `POST /v1/runs`. `images` carry base64 data (no data: prefix) and are validated against `IMAGE_LIMITS`. */
+export type RunInput = { id: string; threadId: string; text: string; parentRunId: string | null; images?: { mediaType: string; data: string }[] };
 type State = { version: 1; threads: Thread[]; runs: Run[] };
 /** An opened agent conversation as seen by the runtime. */
 export interface RuntimeSession {
@@ -16,7 +20,7 @@ export interface RuntimeSession {
   conversationId: string;
   history: UIMessage[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: Pick<LettaAgent<any>, 'stream' | 'interactions'>;
+  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'>;
 }
 /** Opens and closes the single agent session the runtime drives. */
 export interface RuntimeHost {
@@ -60,8 +64,12 @@ export function displayRun(run: Run): UIMessage[] {
     if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: `Turn ${run.status}; execution not confirmed.` };
   }
   const metadata = run.startedAt ? { metadata: { createdAt: run.startedAt } } : {};
-  return [{ id: `${run.id}-user`, role: 'user', parts: [{ type: 'text', text: run.input }], ...metadata }, { id: `${run.id}-assistant`, role: 'assistant', parts }];
+  // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
+  const user: UIMessage['parts'] = [...(run.input.trim() ? [{ type: 'text' as const, text: run.input }] : []), ...(run.images ?? []).map(() => ({ type: 'text' as const, text: IMAGE_PLACEHOLDER }))];
+  return [{ id: `${run.id}-user`, role: 'user', parts: user, ...metadata }, { id: `${run.id}-assistant`, role: 'assistant', parts }];
 }
+
+const sameImages = (a: RunImage[] = [], b: RunImage[] = []) => a.length === b.length && a.every((image, index) => image.sha256 === b[index]!.sha256);
 
 /**
  * Single-owner, single-turn thread service over one agent.
@@ -188,7 +196,7 @@ export class ThreadRuntime {
     if (this.active?.run.threadId === id && this.current) return {
       messages: this.current.history.filter(m => m.id !== 'session-status'),
       lastRunId: latest?.id ?? null,
-      live: { id: this.active.run.id, input: this.active.run.input },
+      live: { id: this.active.run.id, input: this.active.run.input, ...(this.active.run.images?.length ? { images: this.active.run.images.length } : {}) },
       status: 'running',
     };
     if (latest && !['running', 'completed'].includes(latest.status)) return {
@@ -202,13 +210,23 @@ export class ThreadRuntime {
     run.events.push(event); this.save();
     for (const listener of this.listeners.get(run.id) ?? []) listener(event);
   }
-  async start(owner: string, input: { id: string; threadId: string; text: string; parentRunId: string | null }) {
+  /**
+   * Start one turn. Text, images or both; images are validated (type by
+   * content, size, count, total) and fail with a fixed `image_*` code.
+   * Only image metadata (type, size, SHA-256) is recorded in runtime state.
+   */
+  async start(owner: string, input: RunInput) {
     this.authorize(owner);
-    if (!input || !uuid.test(input.id) || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 8000 || (input.parentRunId !== null && !uuid.test(input.parentRunId))) throw new RuntimeFault('invalid_input', 400);
+    if (!input || typeof input !== 'object' || !uuid.test(input.id) || typeof input.text !== 'string' || input.text.length > MAX_INPUT_CHARACTERS || (input.parentRunId !== null && !uuid.test(input.parentRunId)) || (input.images !== undefined && !Array.isArray(input.images))) throw new RuntimeFault('invalid_input', 400);
+    let images: DecodedImage[] = [];
+    try { images = validateImages(input.images ?? []); }
+    catch (error) { throw error instanceof ImageInputError ? new RuntimeFault(error.code, error.code === 'image_too_large' || error.code === 'images_too_large' ? 413 : 400) : error; }
+    if (!input.text.trim() && !images.length) throw new RuntimeFault('invalid_input', 400);
+    const imageMetadata: RunImage[] = images.map(({ mediaType, bytes, sha256 }) => ({ mediaType, bytes, sha256 }));
     const thread = this.thread(owner, input.threadId);
     const previous = this.state.runs.find(r => r.id === input.id);
     if (previous) {
-      if (previous.threadId !== input.threadId || previous.input !== input.text || previous.parentRunId !== input.parentRunId) throw new RuntimeFault('id_conflict');
+      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || previous.parentRunId !== input.parentRunId) throw new RuntimeFault('id_conflict');
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
@@ -219,15 +237,19 @@ export class ThreadRuntime {
     return this.exclusive(async () => {
       const session = await this.open(thread);
       const startedAt = new Date().toISOString();
-      const run: Run = { id: input.id, threadId: input.threadId, input: input.text, parentRunId: input.parentRunId, status: 'running', events: [], startedAt };
+      const run: Run = { id: input.id, threadId: input.threadId, input: input.text, ...(imageMetadata.length ? { images: imageMetadata } : {}), parentRunId: input.parentRunId, status: 'running', events: [], startedAt };
       thread.lastActivityAt = startedAt;
       this.state.runs.push(run); this.save();
       const control = new AbortController(); this.active = { run, control };
-      void this.drive(session, run, control);
+      // Exactly the new turn: text (if any) followed by the images, in the order given.
+      const content: UserContent = images.length
+        ? [...(input.text.trim() ? [{ type: 'text' as const, text: input.text }] : []), ...images.map(image => ({ type: 'image' as const, image: image.base64, mediaType: image.mediaType }))]
+        : input.text;
+      void this.drive(session, run, control, content);
       return { id: run.id, status: run.status };
     });
   }
-  private async drive(session: RuntimeSession, run: Run, control: AbortController) {
+  private async drive(session: RuntimeSession, run: Run, control: AbortController, content: UserContent) {
     let timedOut = false;
     const expire = () => { timedOut = true; control.abort(); };
     let remaining = this.deadlineMs;
@@ -268,7 +290,9 @@ export class ThreadRuntime {
         this.emit(run, 'interaction', request);
       }));
       this.emit(run, 'started', { threadId: run.threadId });
-      const result = await session.agent.stream({ prompt: run.input, abortSignal: control.signal });
+      const result = await session.agent.stream(typeof content === 'string'
+        ? { prompt: content, abortSignal: control.signal }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'tool-call') this.emit(run, 'tool_started', { toolCallId: part.toolCallId, name: part.toolName, input: part.input, execution: 'external' });

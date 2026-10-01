@@ -1,5 +1,6 @@
 import express from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { IMAGE_LIMITS, IMAGE_MEDIA_TYPES } from 'ai-sdk-letta';
 import type { RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault } from './runtime.js';
 
@@ -20,10 +21,22 @@ export function tokenApiApp(runtime: ThreadRuntime, token: string, owner: string
   return runtimeRoutes(app, runtime, owner, shutdown);
 }
 
+/** JSON body limit for every route except `POST /v1/runs`. */
+export const BODY_LIMIT_BYTES = 24 * 1024;
+/**
+ * JSON body limit for `POST /v1/runs` only: base64 of the largest allowed
+ * image payload plus room for text and JSON. Still bounded; image limits are
+ * enforced again on the decoded bytes.
+ */
+export const RUN_BODY_LIMIT_BYTES = Math.ceil(IMAGE_LIMITS.maxTotalBytes / 3) * 4 + 64 * 1024;
+
 /** Shared routes; the caller must install its transport-specific authentication first. */
 export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owner: string, shutdown?: () => Promise<void>) {
-  app.use(express.json({ limit: '24kb' }));
-  app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: 1, edits: false }));
+  const small = express.json({ limit: BODY_LIMIT_BYTES });
+  const runs = express.json({ limit: RUN_BODY_LIMIT_BYTES });
+  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : small)(req, res, next));
+  app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: 1, edits: false,
+    images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes } }));
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title)));
   app.patch('/v1/threads/:id', (req, res) => res.json(runtime.updateMetadata(owner, req.params.id, req.body)));
@@ -46,6 +59,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (res.headersSent) return res.end();
+    // Body parser rejections: fixed codes, never parser messages.
+    if ((error as { type?: unknown } | undefined)?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
     res.status(error instanceof RuntimeFault ? error.status : error instanceof SyntaxError ? 400 : 503).json({ error: error instanceof RuntimeFault ? error.code : 'runtime_unavailable' });
   });
   return app;
@@ -74,7 +89,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   app.use((req, res, next) => {
     const host = `127.0.0.1:${port || req.socket.localPort}`;
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
     if (req.headers.host !== host || (req.headers.origin && req.headers.origin !== `http://${host}`) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
     next();
   });

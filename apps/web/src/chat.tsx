@@ -4,6 +4,8 @@ import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, LoaderCircle, 
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { answerLine, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
+import { MessageImage } from './images.js';
+import { IMAGE_PLACEHOLDER } from './attachments.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -40,7 +42,7 @@ export function Message() {
     <MessageAuthor role={role}/>
     <div className="msg-body">
       {role === 'user'
-        ? <div className="bubble"><MessagePrimitive.Parts>{({ part }) => part.type === 'text' ? <p className="user-text">{part.text}</p> : <></>}</MessagePrimitive.Parts></div>
+        ? <UserBubble/>
         : <AssistantParts/>}
     </div>
     {(hasText || time) && <ActionBarPrimitive.Root className="msg-actions" hideWhenRunning autohide="never">
@@ -50,6 +52,20 @@ export function Message() {
       {time && <time dateTime={time} title={fullFormat.format(new Date(time))}>{formatTime(time)}</time>}
     </ActionBarPrimitive.Root>}
   </MessagePrimitive.Root>;
+}
+
+/** Images sit above the text bubble, like the composer shows them; `[Image]` placeholders stay with the images. */
+function UserBubble() {
+  const images = useAuiState(s => s.message.parts.filter(p => p.type === 'image' || (p.type === 'text' && p.text === IMAGE_PLACEHOLDER)).length);
+  const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text !== IMAGE_PLACEHOLDER && p.text.trim()));
+  return <div className="user-turn">
+    {images > 0 && <div className="bubble-images">
+      <MessagePrimitive.Parts>{({ part }) => part.type === 'image' ? <MessageImage src={part.image} name={part.filename}/> : part.type === 'text' && part.text === IMAGE_PLACEHOLDER ? <span className="image-placeholder">{IMAGE_PLACEHOLDER}</span> : <></>}</MessagePrimitive.Parts>
+    </div>}
+    {hasText && <div className="bubble">
+      <MessagePrimitive.Parts>{({ part }) => part.type === 'text' && part.text !== IMAGE_PLACEHOLDER ? <p className="user-text">{part.text}</p> : <></>}</MessagePrimitive.Parts>
+    </div>}
+  </div>;
 }
 
 /** Questions stay ungrouped so they read as part of the conversation. */

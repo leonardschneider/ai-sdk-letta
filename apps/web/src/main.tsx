@@ -1,21 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AssistantRuntimeProvider, ComposerPrimitive, ThreadPrimitive, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { ArchiveRestore, ArrowDown, ArrowUp, Menu, Square, SquarePen, TriangleAlert } from 'lucide-react';
+import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
+import { ArchiveRestore, ArrowDown, ArrowUp, Menu, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, observedParts, withTime } from './messages.js';
+import { historyMessages, observedParts, userContent, withTime } from './messages.js';
 import { api, errorCode, metadataError, setCsrf } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
+import { AttachmentError, IMAGE_LIMITS, ImageAttachmentAdapter, base64Bytes, checkBudget, dataUrlToImage, messages as attachmentMessages, pasteAttaches } from './attachments.js';
+import { ComposerImages, LightboxProvider } from './images.js';
 import './style.css';
 import './markdown.css';
 
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string }; status: string | null };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number }; status: string | null };
 type Current = { id: string; draft: boolean };
 const SAVED = 'ai-sdk-letta-thread';
 const newDraft = (): Current => ({ id: crypto.randomUUID(), draft: true });
@@ -58,14 +60,14 @@ function App() {
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = []) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id);
     const events: RuntimeEvent[] = [];
     let ended = false;
     let endedAt: string | undefined;
     const render = () => setMessages([...base,
-      withTime({ id: `${id}-user`, role: 'user', content: input }, startedAt),
+      withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images) }, startedAt),
       withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt)]);
     render();
     try {
@@ -132,7 +134,8 @@ function App() {
       const base = historyMessages(view.messages); setMessages(base);
       const failed = !!view.status && !['running', 'completed'].includes(view.status);
       setBlocked(failed ? blockedNotice : '');
-      if (view.live) void watch(view.live.id, view.live.input, base);
+      // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
+      if (view.live) void watch(view.live.id, view.live.input, base, undefined, Array.from({ length: view.live.images ?? 0 }, () => ''));
     } catch (e) {
       setCurrent(previous);
       toast(errorCode(e) === 'runtime_busy' ? 'Another reply is still running. Try again when it finishes.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
@@ -211,16 +214,23 @@ function App() {
 
   async function send(message: AppendMessage) {
     const target = currentRef.current;
-    if (operation.current || liveRun.current || blocked || selected?.archived) return;
+    // Anything that stops here hands text and images back to the composer (MessageNotSentError).
+    if (operation.current || liveRun.current || blocked || selected?.archived) throw new MessageNotSentError();
     const text = message.content.filter(p => p.type === 'text').map(p => p.text).join('\n');
-    if (!text.trim()) return;
-    if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); return; }
+    const urls = (message.attachments ?? []).flatMap(a => a.content.flatMap(p => p.type === 'image' ? [p.image] : []));
+    const images = urls.map(dataUrlToImage);
+    if (images.some(image => !image)) { toast(attachmentMessages.unsupported, { tone: 'error' }); throw new MessageNotSentError(); }
+    const wire = images as { mediaType: string; data: string }[];
+    const budget = checkBudget(wire.map(image => base64Bytes(image.data)));
+    if (budget) { toast(budget, { tone: 'error' }); throw new MessageNotSentError(); }
+    if (!text.trim() && !wire.length) throw new MessageNotSentError();
+    if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); throw new MessageNotSentError(); }
     operation.current = true; setRunning(true);
     const startedAt = new Date().toISOString();
     const base = messagesRef.current;
     const first = !base.length;
     const optimisticId = `pending-${startedAt}`;
-    setMessages([...base, withTime({ id: `${optimisticId}-user`, role: 'user', content: text }, startedAt), { id: `${optimisticId}-assistant`, role: 'assistant', content: [], status: { type: 'running' } }]);
+    setMessages([...base, withTime({ id: `${optimisticId}-user`, role: 'user', content: userContent(text, urls) }, startedAt), { id: `${optimisticId}-assistant`, role: 'assistant', content: [], status: { type: 'running' } }]);
     try {
       if (target.draft) {
         try {
@@ -230,21 +240,42 @@ function App() {
           localStorage.setItem(SAVED, target.id); lastRun.current = null;
         } catch (e) {
           setMessages(base); setRunning(false);
-          runtime.thread.composer.setText(text);
           toast(errorCode(e) === 'capacity_reached' ? 'The local server has reached its conversation limit.' : 'Couldn’t start a new conversation. Your message is back in the box — try again.', { tone: 'error' });
-          return;
+          // Nothing reached the agent: return the text and images to the composer.
+          throw new MessageNotSentError();
         }
       }
       const id = crypto.randomUUID();
-      try { await api('/v1/runs', { id, threadId: target.id, text, parentRunId: lastRun.current }); }
+      try { await api('/v1/runs', { id, threadId: target.id, text, parentRunId: lastRun.current, ...(wire.length ? { images: wire } : {}) }); }
       catch (e) {
+        const code = errorCode(e);
+        const rejected = imageRejection(code);
+        if (rejected) {
+          // Validated and refused before delivery: safe to hand the draft back.
+          setMessages(base); setRunning(false);
+          toast(rejected, { tone: 'error' });
+          throw new MessageNotSentError();
+        }
         setRunning(false);
-        setBlocked(`Couldn’t confirm that your message was delivered (${errorCode(e)}). Refresh before doing anything else — it won’t be resent automatically.`);
+        setBlocked(`Couldn’t confirm that your message was delivered (${code}). Refresh before doing anything else — it won’t be resent automatically.`);
         return;
       }
-      if (first) void autoTitle(target.id, text);
-      await watch(id, text, base, startedAt);
+      if (first) void autoTitle(target.id, text.trim() ? text : 'Image');
+      await watch(id, text, base, startedAt, urls);
     } finally { operation.current = false; }
+  }
+  /**
+   * Paste: images attach (screenshots, copied image files); plain or rich text
+   * pastes as text, as before. Handled here instead of assistant-ui's
+   * default, which would also attach the snapshot image that Office-style
+   * apps put next to copied text.
+   */
+  function onPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const data = event.clipboardData;
+    const files = Array.from(data.files);
+    if (!pasteAttaches({ types: [...data.types], text: data.getData('text/plain'), files })) return;
+    event.preventDefault();
+    for (const file of files) void runtime.thread.composer.addAttachment(file).catch(() => { /* reported by AttachmentErrors */ });
   }
   async function cancel() {
     if (!liveRun.current) return;
@@ -254,16 +285,19 @@ function App() {
   const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state } })), [active]);
   const adapterArchived = useMemo<ExternalStoreThreadData<'archived'>[]>(() => archived.map(t => ({ status: 'archived', id: t.id, title: t.title, custom: { state: t.state } })), [archived]);
   const readOnly = !!selected?.archived;
+  const runtimeRef = useRef<AssistantRuntime | undefined>(undefined);
+  const attachments = useMemo(() => new ImageAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? []), []);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages, convertMessage: m => m, isRunning: running, isLoading: loading,
     isDisabled: loading || !!blocked || readOnly || (!current.draft && selected?.state !== 'ready'),
     onNew: send, onCancel: cancel, unstable_enableToolInvocations: false,
-    adapters: { threadList: {
+    adapters: { attachments, threadList: {
       threadId: current.id, isLoading: listLoading, threads: adapterThreads, archivedThreads: adapterArchived,
       onSwitchToThread: id => select(id), onSwitchToNewThread: () => startDraft(),
       onRename: (id, title) => rename(id, title), onArchive: id => archive(id), onUnarchive: id => restore(id),
     } },
   });
+  runtimeRef.current = runtime;
 
   // Global shortcuts: ⌘K new chat, ⌘/ search, Esc stops a reply when nothing else handles it.
   useEffect(() => {
@@ -323,12 +357,21 @@ function App() {
                   {readOnly
                     ? <div className="readonly-bar"><span>This conversation is archived and read-only.</span><button type="button" className="btn primary small" onClick={() => void restore(current.id)}><ArchiveRestore size={15} aria-hidden="true"/>Restore</button></div>
                     : <ComposerPrimitive.Root className="composer" data-disabled={(!!blocked || loading) || undefined}>
-                        <ComposerPrimitive.Input ref={composerRef} className="composer-input" aria-label="Message" rows={1} maxRows={10} maxLength={8000} autoFocus
-                          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && running && !event.nativeEvent.isComposing) event.preventDefault(); }}
-                          placeholder={blocked ? 'Start a new chat to continue' : `Message ${agent.name}`}/>
-                        {running
-                          ? <ComposerPrimitive.Cancel className="send-btn stop" aria-label="Stop generating" title="Stop (Esc)"><Square size={14} fill="currentColor" aria-hidden="true"/></ComposerPrimitive.Cancel>
-                          : <ComposerPrimitive.Send className="send-btn" aria-label="Send message" title="Send (Enter)"><ArrowUp size={18} aria-hidden="true"/></ComposerPrimitive.Send>}
+                        <ComposerPrimitive.AttachmentDropzone className="dropzone" disabled={!!blocked || loading}>
+                          <ComposerImages/>
+                          <div className="composer-row">
+                            <ComposerPrimitive.AddAttachment className="icon-btn attach-btn" aria-label="Attach images" title={`Attach images (up to ${IMAGE_LIMITS.maxImages}) · or paste / drop`} disabled={!!blocked || loading}><Paperclip size={18} aria-hidden="true"/></ComposerPrimitive.AddAttachment>
+                            <ComposerPrimitive.Input ref={composerRef} className="composer-input" aria-label="Message" rows={1} maxRows={10} maxLength={8000} autoFocus
+                              addAttachmentOnPaste={false} onPaste={onPaste}
+                              onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && running && !event.nativeEvent.isComposing) event.preventDefault(); }}
+                              placeholder={blocked ? 'Start a new chat to continue' : `Message ${agent.name}`}/>
+                            {running
+                              ? <ComposerPrimitive.Cancel className="send-btn stop" aria-label="Stop generating" title="Stop (Esc)"><Square size={14} fill="currentColor" aria-hidden="true"/></ComposerPrimitive.Cancel>
+                              : <ComposerPrimitive.Send className="send-btn" aria-label="Send message" title="Send (Enter)"><ArrowUp size={18} aria-hidden="true"/></ComposerPrimitive.Send>}
+                          </div>
+                          <div className="drop-overlay" aria-hidden="true">Drop images to attach</div>
+                        </ComposerPrimitive.AttachmentDropzone>
+                        <AttachmentErrors/>
                       </ComposerPrimitive.Root>}
                   {!readOnly && !blocked && <p className="hint-line" aria-hidden="true">Enter to send · Shift+Enter for a new line{running ? ' · Esc to stop' : ''}</p>}
                 </div>
@@ -341,4 +384,19 @@ function App() {
   </InteractionContext.Provider>;
 }
 
-createRoot(document.getElementById('root')!).render(<ToastProvider><App/></ToastProvider>);
+/** Fixed server codes that mean "refused before delivery" for images, with their toast text. */
+function imageRejection(code: string): string | undefined {
+  return ({ image_unsupported_type: attachmentMessages.unsupported, image_invalid: attachmentMessages.unreadable, image_remote_url: attachmentMessages.unsupported,
+    image_too_large: attachmentMessages.tooLarge, images_too_many: attachmentMessages.tooMany, images_too_large: attachmentMessages.totalTooLarge, payload_too_large: attachmentMessages.totalTooLarge } as Record<string, string>)[code];
+}
+
+/** Attachment problems (wrong type, too large, too many) become the usual error toasts. */
+function AttachmentErrors() {
+  const toast = useToast();
+  useAuiEvent('composer.attachmentAddError', ({ reason, error, message }: { reason: string; error?: Error; message: string }) => {
+    toast(error instanceof AttachmentError ? error.message : reason === 'not-accepted' ? attachmentMessages.unsupported : message || attachmentMessages.unreadable, { tone: 'error' });
+  });
+  return null;
+}
+
+createRoot(document.getElementById('root')!).render(<ToastProvider><LightboxProvider><App/></LightboxProvider></ToastProvider>);

@@ -3,15 +3,17 @@ import type { ToolSet } from 'ai';
 import { openLettaAgent, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
 import { localCommandMatches, navigate, NavigationScreen } from './navigation.js';
 import { parseTerminalArgs, pickConversation, printConversations, type TerminalArgs } from './cli.js';
+import { terminalAttachments } from './attachments.js';
 
-const HELP_LINE = 'PgUp/PgDn scroll history · Esc exits · /resume · /search [text] · /help';
+const HELP_LINE = 'PgUp/PgDn scroll history · Esc exits · Ctrl+V or drop a file to attach an image · /resume · /search [text] · /help';
 
 /**
  * Run the interactive terminal UI for an agent definition until the user exits.
  *
  * Supports a startup conversation picker, `/resume` and `/search` (same agent
- * only), approvals and `ask_user` questions, and restored scrollback that is
- * display-only (never replayed to the agent).
+ * only), approvals and `ask_user` questions, image attachments (Ctrl+V, or a
+ * pasted or dropped image path), and restored scrollback that is display-only
+ * (never replayed to the agent).
  *
  * @param args Parsed options, or raw `process.argv.slice(2)`.
  * @returns the process exit code to use.
@@ -38,6 +40,7 @@ export async function runTerminal<TOOLS extends ToolSet>(definition: AgentDefini
       let next: string | undefined;
       const initialMessages = [...presentation.initialMessages, { id: 'session-status', role: 'assistant' as const, parts: [{ type: 'text' as const, text: `${presentation.status}\n${HELP_LINE}` }] }];
       await runAgentTUI({ agent, title: `${definition.name} · ${presentation.title}`, tools: 'full', reasoning: 'hidden', initialMessages, interaction: agent.interactions,
+        attachments: terminalAttachments(),
         localCommand: { matches: localCommandMatches, run: async text => {
           next = await navigate(text, navigation);
           return next ? 'exit' : undefined;

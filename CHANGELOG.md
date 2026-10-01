@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Image input. `LettaAgent` accepts images (AI SDK `image`/`file` parts) in a
+  new user turn and sends them as Letta `ImageContent`; PNG, JPEG, GIF and
+  WebP, validated by content, with per-image, count and total limits and
+  typed `ImageInputError`s. The no-replay guard compares images by SHA-256
+  and keeps only the hash. Restored history shows user images.
+- `@ai-sdk-letta/server`: `POST /v1/runs` accepts `images` under a raised,
+  still bounded, route-only body limit; state records image metadata only.
+  CSP allows local `blob:` images.
+- `@ai-sdk-letta/web`: paste, drag and drop, and a paperclip picker, with
+  removable thumbnails, client-side downscaling, error toasts, and images in
+  messages with click-to-enlarge.
+- `@ai-sdk-letta/tui`: Ctrl+V reads a clipboard image (macOS `osascript`,
+  Linux `wl-paste`/`xclip`); dropped or pasted image paths attach files;
+  `[Image N]` markers in the prompt. The `@ai-sdk/tui` patch gains a generic
+  `attachments` option.
+
 ## 0.1.0
 
 First public version, extracted from a working prototype.

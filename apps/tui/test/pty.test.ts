@@ -29,3 +29,7 @@ test('patched real TUI intercepts slash navigation, returns intact and switches 
 test('patched real TUI handles active-turn approvals and questions without replay or double execution', { timeout: 40_000, skip }, async () => {
   assert.match((await run('interactions_pty.py', 35_000)).stdout, /PASS actual PTY/);
 });
+
+test('patched real TUI attaches images via Ctrl+V and dropped paths, removes markers, sends only the new turn', { timeout: 40_000, skip }, async () => {
+  assert.match((await run('images_pty.py', 35_000)).stdout, /PASS actual PTY images/);
+});

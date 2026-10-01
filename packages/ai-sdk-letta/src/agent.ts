@@ -1,7 +1,11 @@
 import { generateText, streamText, stepCountIs, type Agent, type AgentCallParameters, type AgentStreamParameters, type ModelMessage, type ToolSet, type UIMessage } from 'ai';
 import type { JSONValue, LanguageModelV4, LanguageModelV4StreamPart, LanguageModelV4Usage } from '@ai-sdk/provider';
-import type { LettaCodeSession } from '@letta-ai/letta-agent-sdk';
+import type { LettaCodeSession, MessageContentItem, SendMessage } from '@letta-ai/letta-agent-sdk';
 import { ToolInteractions } from './interactions.js';
+import { assertImageBudget, compactImagePart, decodeImagePart, imagePartDigest, ImageInputError, isImagePart, toLettaImage, type DecodedImage } from './images.js';
+
+/** Most characters of text in one user turn. */
+export const MAX_INPUT_CHARACTERS = 8000;
 
 /** The subset of a Letta session a turn needs. */
 export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'>;
@@ -43,9 +47,11 @@ type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS>;
 const usage = (): LanguageModelV4Usage => ({ inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined }, outputTokens: { total: undefined, text: undefined, reasoning: undefined } });
 
 /**
- * Canonical key of a semantic transcript (text and completed tool calls),
- * ignoring SDK metadata and step boundaries. Used to reject replayed or edited
- * history: a new call must extend exactly what this process already sent.
+ * Canonical key of a semantic transcript (text, user images and completed tool
+ * calls), ignoring SDK metadata and step boundaries. Used to reject replayed or
+ * edited history: a new call must extend exactly what this process already
+ * sent. Images are compared by a SHA-256 of their bytes, so a transcript may
+ * carry either the image data or a compact reference to it.
  */
 export function historyKey(messages: ModelMessage[]): string {
   const parts: unknown[] = [];
@@ -57,6 +63,9 @@ export function historyKey(messages: ModelMessage[]): string {
         const last = parts.at(-1) as { role?: string; text?: string } | undefined;
         if (last?.role === message.role && typeof last.text === 'string') last.text += part.text;
         else parts.push({ role: message.role, text: part.text });
+      } else if (message.role === 'user' && isImagePart(part)) {
+        // A boundary like text: an image between two texts is not the same turn as the joined text.
+        parts.push({ role: message.role, text: null, image: imagePartDigest(part) });
       } else if (part.type === 'tool-call' && message.role === 'assistant') {
         parts.push({ call: part.toolCallId, name: part.toolName, input: part.input });
       } else if (part.type === 'tool-result' && (message.role === 'assistant' || message.role === 'tool')) {
@@ -68,7 +77,7 @@ export function historyKey(messages: ModelMessage[]): string {
           try { output = { ...output, value: JSON.parse(output.value) }; } catch { /* plain error text */ }
         }
         parts.push({ result: part.toolCallId, name: part.toolName, output });
-      } else throw new Error('Only text and completed application tool history are supported');
+      } else throw new Error('Only text, user image and completed application tool history are supported');
     }
   }
   // Parallel calls arrive call/call/result/result, while UI cards convert as
@@ -89,6 +98,46 @@ export function historyKey(messages: ModelMessage[]): string {
   }
   flush();
   return JSON.stringify(canonical);
+}
+
+/** Replace user image data with content-hash references so the retained transcript never duplicates image bytes. */
+function compactTranscript(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map(message => message.role === 'user' && typeof message.content !== 'string'
+    ? { ...message, content: message.content.map(part => isImagePart(part) ? compactImagePart(part) : part) }
+    : message);
+}
+
+/**
+ * Validate the new user turn and build the single Letta message to send:
+ * a plain string for text-only turns, or text and `ImageContent` items in
+ * their original order.
+ * @throws {ImageInputError} for unsupported, invalid or oversized images
+ */
+export function userTurnContent(content: ModelMessage['content']): { message: SendMessage; text: string; images: DecodedImage[] } {
+  const parts = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content;
+  if (!Array.isArray(parts)) throw new Error('Expected a new user turn');
+  const items: MessageContentItem[] = [];
+  const images: DecodedImage[] = [];
+  for (const part of parts) {
+    if (part.type === 'text') {
+      const last = items.at(-1);
+      if (last?.type === 'text') last.text += part.text;
+      else items.push({ type: 'text', text: part.text });
+    } else if (isImagePart(part)) {
+      const image = decodeImagePart(part);
+      images.push(image);
+      assertImageBudget(images);
+      items.push(toLettaImage(image));
+    } else if (part.type === 'file') {
+      throw new ImageInputError('image_unsupported_type', `Unsupported attachment type ${String(part.mediaType) || 'unknown'}; only PNG, JPEG, GIF and WebP images are supported`);
+    } else throw new Error('Only text and image input is supported');
+  }
+  const text = items.map(item => item.type === 'text' ? item.text : '').join('');
+  if (text.length > MAX_INPUT_CHARACTERS) throw new Error(`Input text can be up to ${MAX_INPUT_CHARACTERS} characters`);
+  if (!text.trim() && !images.length) throw new Error('Input must contain text or an image');
+  // Whitespace-only text next to images carries nothing; keep text-only turns byte-identical to before.
+  const message: SendMessage = images.length ? items.filter(item => item.type !== 'text' || item.text.trim()) : text;
+  return { message, text, images };
 }
 
 /**
@@ -133,6 +182,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.modelId = options.modelId ?? 'letta';
   }
 
+  /**
+   * A copy of the transcript this instance has sent and received (images as
+   * content-hash references, never bytes). To send a multimodal turn without
+   * keeping your own history, pass `messages: [...agent.transcript, newUserMessage]`.
+   */
+  get transcript(): ModelMessage[] { return structuredClone(this.history); }
+
   /** Abort any running turn, cancel pending prompts, and refuse further turns. */
   close(): void { this.unusable = true; this.active?.abort(); this.interactions.close(); }
 
@@ -146,20 +202,21 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const messages = typeof options.prompt === 'string' ? [...this.history, { role: 'user' as const, content: options.prompt }] : options.messages ?? options.prompt;
     if (!Array.isArray(messages) || !messages.length) throw new Error('Expected a new user turn');
     const last = messages.at(-1)!;
-    if (last.role !== 'user' || historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
-    const content = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content;
-    if (!Array.isArray(content) || content.some(p => p.type !== 'text')) throw new Error('Only text input is supported');
-    const text = content.map(p => p.type === 'text' ? p.text : '').join('');
-    if (!text.trim() || text.length > 8000) throw new Error('Input must contain 1–8000 characters');
+    if (last.role !== 'user') throw new Error('History edits, replay, and regeneration are not supported');
+    // Validate the new turn first, so an oversized or unsupported image is reported as such.
+    const turn = userTurnContent(last.content);
+    if (historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
     options.abortSignal?.throwIfAborted();
     this.busy = true;
     const control = new AbortController();
     this.active = control;
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;
-    return { messages: structuredClone(messages), text, signal };
+    // The retained transcript keeps images as hashes only; Letta already holds the bytes.
+    // (Compact before cloning: URL objects in image parts are not cloneable.)
+    return { messages: structuredClone(compactTranscript(messages)), message: turn.message, prompt: turn.text.trim() ? turn.text : '[Image]', signal };
   }
 
-  private model(text: string, signal: AbortSignal): LanguageModelV4 {
+  private model(message: SendMessage, signal: AbortSignal): LanguageModelV4 {
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
       let session: TurnSession | undefined;
       let completed = false;
@@ -175,7 +232,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         session = this.open(signal);
         signal.addEventListener('abort', abort, { once: true });
         this.delivery?.begin();
-        await session.send(text);
+        await session.send(message);
         signal.throwIfAborted();
         for await (const event of session.stream()) {
           signal.throwIfAborted();
@@ -252,7 +309,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   async generate(options: Call<TOOLS>) {
     const turn = this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.text, turn.signal), prompt: turn.text, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      const result = await generateText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
       this.history = [...turn.messages, ...result.response.messages];
       return result;
@@ -263,7 +320,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS>) {
     const turn = this.prepare(options);
-    return streamText({ model: this.model(turn.text, turn.signal), prompt: turn.text, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+    return streamText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; },
       onAbort: () => { this.close(); this.busy = false; },
       onFinish: result => {
