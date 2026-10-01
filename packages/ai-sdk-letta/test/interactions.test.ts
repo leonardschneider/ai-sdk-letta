@@ -16,6 +16,16 @@ test('policy is fail-closed: every tool needs a permission; deny and unknown too
   assert.throws(() => defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i' } as never), /tools must be an object/);
   assert.deepEqual(defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: {} }).permissions, {});
   assert.equal(defineAgent({ id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: registry, permissions: { text_stats: 'deny', approval_demo: 'deny' } }).permissions.ask_user, 'allow');
+  // ui: browser presentation settings, validated and frozen; LaTeX is on unless the agent turns it off.
+  const base = { id: 'x', name: 'X', model: 'a/b', instructions: 'i', tools: {} };
+  assert.deepEqual(defineAgent(base).ui, { latex: true });
+  assert.deepEqual(defineAgent({ ...base, ui: {} }).ui, { latex: true });
+  assert.deepEqual(defineAgent({ ...base, ui: { latex: false } }).ui, { latex: false });
+  assert.ok(Object.isFrozen(defineAgent({ ...base, ui: { latex: false } }).ui));
+  assert.throws(() => defineAgent({ ...base, ui: { latex: 'yes' } as never }), /ui.latex must be true or false/);
+  assert.throws(() => defineAgent({ ...base, ui: { math: true } as never }), /Unknown ui setting\(s\): math/);
+  assert.throws(() => defineAgent({ ...base, ui: null as never }), /ui must be an object/);
+  assert.throws(() => defineAgent({ ...base, ui: [] as never }), /ui must be an object/);
   const interactions = new ToolInteractions();
   let prompts = 0;
   interactions.connect(async request => { prompts++; return { id: request.id, approved: true }; });

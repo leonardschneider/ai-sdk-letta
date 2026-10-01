@@ -30,11 +30,14 @@
     "ai": "7.0.118",
     "ai-sdk-letta": "*",
     "hast-util-to-jsx-runtime": "2.3.6",
+    "katex": "0.16.47",
     "lowlight": "3.3.0",
     "lucide-react": "1.48.0",
     "radix-ui": "1.6.7",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "react-markdown": "10.1.0",
+    "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.1",
     "vite": "7.3.6"
   }

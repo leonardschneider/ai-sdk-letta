@@ -12,6 +12,9 @@ import { Sidebar } from './sidebar.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
 import { InteractionContext, InteractionDock, Message } from './chat.js';
+import { LatexContext } from './markdown.js';
+import { resolveLatex, type LatexOverride } from './latex.js';
+import { LatexMenu } from './latex-menu.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
@@ -31,7 +34,7 @@ const blockedNotice = 'This conversation has an unfinished or uncertain turn, so
 
 function App() {
   const toast = useToast();
-  const [agent, setAgent] = useState<{ id: string; name: string; approvalTools: string[]; files?: boolean }>({ id: '', name: 'Connecting…', approvalTools: [] });
+  const [agent, setAgent] = useState<{ id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean } }>({ id: '', name: 'Connecting…', approvalTools: [] });
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const [filesEnabled, setFilesEnabled] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
@@ -174,7 +177,7 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[]; files?: boolean } }>('/session'); setCsrf(session.csrf); setAgent(session.agent); setFilesEnabled(!!session.agent.files);
+        const session = await api<{ csrf: string; agent: { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean } } }>('/session'); setCsrf(session.csrf); setAgent(session.agent); setFilesEnabled(!!session.agent.files);
         const list = await api<ThreadSummary[]>('/v1/threads'); setThreads(list); setListLoading(false);
         const saved = localStorage.getItem(SAVED);
         const sorted = sortThreads(list);
@@ -194,7 +197,7 @@ function App() {
   const selected = threads.find(t => t.id === current.id);
   const busy = running || loading;
 
-  async function patch(id: string, body: { title?: string; archived?: boolean }) {
+  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
@@ -223,6 +226,11 @@ function App() {
   async function restore(id: string) {
     try { const updated = await patch(id, { archived: false }); toast(`Restored “${titleText(updated.title)}”`); if (currentRef.current.id === id) focusComposer(); }
     catch (e) { toast(metadataError(e), { tone: 'error' }); }
+  }
+
+  /** A conversation's LaTeX override; the open conversation re-renders at once. */
+  async function setLatex(id: string, value: LatexOverride) {
+    try { await patch(id, { latex: value }); } catch (e) { toast(metadataError(e), { tone: 'error' }); }
   }
 
   /** Title from the first message, only while the conversation still has the default title. */
@@ -352,6 +360,8 @@ function App() {
   useEffect(() => { document.title = selected ? `${titleText(selected.title)} · ${agent.name}` : agent.name; }, [selected, agent.name]);
 
   const title = current.draft ? 'New chat' : selected?.title ?? '';
+  const agentLatex = agent.ui?.latex;
+  const latex = resolveLatex(agentLatex, current.draft ? undefined : selected?.latex);
   const answer = async (value: InteractionResponse) => {
     // Exactly one POST per request; the card locks before this runs and never retries.
     await api(`/v1/runs/${currentInteraction.current?.runId}/answer`, value);
@@ -359,11 +369,13 @@ function App() {
   };
   return <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer }}>
     <FileLinkContext.Provider value={fileLink}>
+    <LatexContext.Provider value={latex}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && filesEnabled) || undefined}
         data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
-          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent}/>
+          <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent}
+            agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
@@ -374,6 +386,7 @@ function App() {
               <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
             </>}
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+            {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
@@ -425,6 +438,7 @@ function App() {
         </aside>}
       </div>
     </AssistantRuntimeProvider>
+    </LatexContext.Provider>
     </FileLinkContext.Provider>
   </InteractionContext.Provider>;
 }
