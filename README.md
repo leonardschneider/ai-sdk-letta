@@ -286,13 +286,110 @@ agent includes them.
   (`{ type: 'file', mediaType, filename, data }`, with bytes, base64 or a
   `data:` URL; remote URLs are never fetched).
 
+### Shell commands (sandbox)
+
+Add the built-in sandbox tools and a `sandbox` option to let the agent run
+shell commands, for example to compute with Python, search with `rg` or use
+git, in an isolated Linux sandbox:
+
+```ts
+import { defineAgent, fileTools, FILE_TOOL_PERMISSIONS, sandboxTools, SANDBOX_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...fileTools, ...sandboxTools },                          // run_command, run_command_online
+  permissions: { ...FILE_TOOL_PERMISSIONS, ...SANDBOX_TOOL_PERMISSIONS }, // run_command: 'allow', run_command_online: 'ask'
+  sandbox: { provider: 'apple-container' },                          // or 'docker', or your own factory
+});
+```
+
+```sh
+# macOS 26 on Apple silicon (brew install container && container system start):
+npm install --save-exact @lgrammel/apple-container-sandbox@1.1.0 @ai-sdk/harness@1.0.128
+# or Docker:
+npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
+```
+
+- **Two tools.** `run_command(command, cwd?)` runs a bash command with **no
+  network** and returns the exit code and output. `run_command_online` is the
+  same with internet access (for `pip install` or a download); it **always
+  asks** the user, who sees the exact command, and its permission cannot be
+  `'allow'`. Commands run through the AI SDK's standard
+  `Experimental_SandboxSession` (`run()`), which the runtime also passes to
+  every tool as `experimental_sandbox`.
+- **Why two tools rather than a `network` flag.** Docker and Apple Container
+  fix a container's network when it starts. A network command therefore runs
+  in its own short-lived sandbox that mounts the same workspace and is
+  removed right after; everything else runs in the conversation's sandbox,
+  which never has a network interface. A separate tool also makes the
+  approval policy per tool (allow vs. ask) instead of per argument.
+- **Workspace.** `/workspace` is the conversation's attachment folder (the
+  same folder the file tools read), read-write except its `.meta/` and
+  `.text/` sidecars. Files the agent creates appear there, owned by your
+  user. An optional project folder is mounted at `/project`
+  (`sandbox.project`, or `{ path, readOnly: true }`).
+- **Python packages persist.** Commands use a virtual environment in
+  `/workspace/.venv` (created on first start); `pip install` puts packages
+  there, so a later turn, or a later run, still has them.
+- **One sandbox per conversation**, started on the first command, reused
+  across turns, stopped after 10 minutes without commands (`idleTimeoutMs`)
+  and when the agent closes. Commands of a conversation run one at a time.
+  Containers are labelled `ai-sdk-letta.sandbox`; containers left by a
+  process that died (`kill -9`, a crash) are removed the next time a sandbox
+  starts on that machine.
+- **Timeouts and Stop.** Each command has a timeout (`timeoutMs`, default 2
+  minutes, at most 4). On timeout, or when the user stops the turn, the
+  command and everything it started are killed inside the sandbox (the
+  container CLIs only kill their local client).
+- **Output** is capped at about 14,000 characters: the start and end of
+  stdout and stderr are kept, with a notice saying how much was omitted.
+- **Isolation.** Only the workspace (and the project, if set) is mounted: no
+  home folder, `~/.ssh`, git config or Docker socket. Commands start from an
+  empty environment plus a fixed set (`PATH`, `HOME=/workspace/.home`, ...);
+  nothing from your process leaks in. The container runs as your UID with
+  no capabilities, `no-new-privileges` (Docker), a read-only root file system
+  and a private `/tmp`, 2 CPUs and 2 GB of memory by default.
+- **Git** works on mounted repositories with `GIT_CONFIG_GLOBAL=/dev/null`
+  and `GIT_CONFIG_NOSYSTEM=1`; commits use the identity in `sandbox.git`
+  (default `Sandbox <sandbox@localhost>`). There is no push tool and no
+  credentials, by design: **pushing stays with you**.
+- **Project folders with credentials are refused.** Before mounting, the
+  project's `.git/config` is checked: a remote URL with user info
+  (`https://token@...`), any `credential` setting, `http.extraHeader` or an
+  `include` refuse the mount with a `SandboxError` (`project_has_credentials`).
+  Home folders, the file system root and folders containing `.ssh`, `.aws`,
+  `.netrc` and similar are refused too (`project_unsafe`). Because git on
+  your computer obeys the repository's settings, `.git/hooks` is mounted
+  read-only and changes to `.git/config` made by a command are reverted.
+- **Image.** The built-in providers use `python:3.12-slim-bookworm` pinned by
+  digest plus Python 3, pip, git, ripgrep, jq, poppler-utils and curl
+  (`SANDBOX_DOCKERFILE`). It is built once per machine and cached as
+  `SANDBOX_IMAGE`; the first build takes about 30 seconds to 2 minutes
+  depending on the network. `prepareSandbox(config)` does it ahead of time.
+  Starting a sandbox takes about 1 second (Apple Container) or less (Docker).
+- **Providers** are optional peer dependencies, pinned exactly because the AI
+  SDK sandbox APIs are experimental:
+  [`@lgrammel/apple-container-sandbox`](https://www.npmjs.com/package/@lgrammel/apple-container-sandbox)
+  1.1.0 (MIT; Apple Container micro-VMs) and
+  [`ai-sdk-sandbox-docker`](https://www.npmjs.com/package/ai-sdk-sandbox-docker)
+  0.1.2 (Apache-2.0, community). Install only the one you use, with
+  `@ai-sdk/harness` 1.0.128 (the release built on `ai` 7.0.118; without the
+  pin, the Apple package's `^1.0.10` range pulls a newer harness and a second
+  copy of `ai`). A custom
+  `provider` is a function that receives `{ network, mounts, labels, image }`
+  and returns `{ session, stop }` with any `Experimental_SandboxSession`; it
+  must honour `network: false`.
+- **Without a sandbox** (no `sandbox` option, or no provider available) the
+  tools are never exposed to the model, whatever the permissions say. The
+  example picks Apple Container if it runs, else Docker, else disables the
+  tools with a startup message (`SANDBOX_PROVIDER=apple-container|docker|off`).
+
 What a definition controls, and when:
 
 | Field | Applied |
 | --- | --- |
 | `id`, `name` | Every start: the mapping and the Letta agent name must match, or startup fails. |
 | `model`, `instructions` | At creation only. To change them, create a new logical ID (or change the agent in Letta). |
-| `tools`, `permissions`, `toolTimeoutMs` | Every start. |
+| `tools`, `permissions`, `toolTimeoutMs`, `sandbox` | Every start. |
 | `dreaming` | Every start, scoped to this project (see below), then verified. |
 
 ## TUI
@@ -308,6 +405,8 @@ npm run tui -- --list              # list conversations and exit (no TTY needed)
 Inside: `/resume [title or ID]`, `/search [text]` (this agent's
 conversations only), `/help`; PgUp/PgDn scroll restored history; Esc exits.
 Approvals and questions appear as prompts during the turn that needs them.
+Shell commands show as "Ran `command`" cards with the exit code, the command
+and the first lines of output (verbatim).
 
 **Images.** Press **Ctrl+V** to attach an image from the clipboard, or drag
 an image file into the terminal (or paste its path; shell-escaped, quoted
@@ -353,6 +452,12 @@ over 5 MB). Sent images appear in your message, also after a reload, and
 open larger on click. Pasting text still pastes text, including rich text
 copied with a snapshot image (as Office apps do). Unsupported, oversized or
 too many images show a notice and are not attached.
+
+**Commands.** Shell commands read as one line each, "Ran `rg budget`",
+collapsed by default, with "exit 1" or "timed out" when a command failed.
+Expanding shows the exact command, the exit code and the output in
+monospace, with "show more" for long output. Approval cards for
+`run_command_online` show the exact command.
 
 **Files.** With the file tools, the same paperclip, drop and paste attach
 PDFs and text files (Markdown, CSV, JSON, code). Each is uploaded and
@@ -401,6 +506,9 @@ token-authenticated server-to-server API with the same routes.
   `nosniff`, a sandboxing CSP), so a file never runs as part of the app.
 - **Files are confined** to their conversation's folder (see
   [Files](#files)); the file tools only read.
+- **Shell commands run in a sandbox** without network, credentials or host
+  environment; network commands always ask (see
+  [Shell commands](#shell-commands-sandbox)).
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
 - **Audit.** Tool activity is logged as metadata only (tool, status, duration,
@@ -486,6 +594,15 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default).
+- **The sandbox is experimental.** It relies on the AI SDK's
+  `Experimental_SandboxSession` and on two young provider packages, all
+  marked experimental and pinned exactly (`@lgrammel/apple-container-sandbox`
+  1.1.0, `ai-sdk-sandbox-docker` 0.1.2, with `@ai-sdk/harness` 1.0.128, the
+  release that matches `ai` 7.0.118). Network access is all or nothing for an
+  approved command (no domain allowlist). Apple Container needs macOS 26 on
+  Apple silicon. On Linux with rootful Docker, files are owned by your UID
+  as on macOS; with user-namespace remapping they may not be. Each network
+  command starts a fresh sandbox (about 1 to 2 seconds).
 - **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22,
   `unpdf` at 1.8.1 and `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
   this repository tests 7.0.118). Some workarounds depend on SDK behaviour at
@@ -504,7 +621,12 @@ npm run typecheck
 npm test                 # offline; PTY tests need python3 and skip without it
 npm run build
 AI_SDK_LETTA_LIVE=1 AI_SDK_LETTA_LIVE_STATE_DIR=/tmp/ai-sdk-letta-live npm run test:live
+AI_SDK_LETTA_SANDBOX_TEST=docker,apple-container npm run test:sandbox --workspace ai-sdk-letta
 ```
+
+The sandbox tests start real containers (and install a small package from
+PyPI); they are opt-in, and the offline tests use `@ai-sdk/sandbox-just-bash`
+and fakes instead.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Releases use Changesets and npm
 trusted publishing; see [RELEASING.md](RELEASING.md).
