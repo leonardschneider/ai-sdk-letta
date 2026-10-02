@@ -1,5 +1,5 @@
 import { tool, jsonSchema } from 'ai';
-import { askUserTool, defineAgent, detectSandboxProvider, fileTools, FILE_TOOL_PERMISSIONS, prepareSandbox, sandboxTools, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig, type SandboxProviderName } from 'ai-sdk-letta';
+import { askUserTool, atlassianTools, ATLASSIAN_TOOL_PERMISSIONS, defineAgent, detectSandboxProvider, fileTools, FILE_TOOL_PERMISSIONS, prepareSandbox, sandboxTools, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig, type SandboxProviderName } from 'ai-sdk-letta';
 
 /**
  * One custom tool: pure, no side effects. It runs in this process when the
@@ -43,6 +43,13 @@ async function chooseSandbox(): Promise<SandboxConfig | undefined> {
 const sandbox = await chooseSandbox();
 
 /**
+ * Jira and Confluence, with each user's own API token (ATLASSIAN=1). Each
+ * person connects their account in the browser app (sidebar → Connect
+ * Atlassian); the tools act as whoever sent the message.
+ */
+const atlassian = process.env.ATLASSIAN === '1';
+
+/**
  * The example agent. `id` is your stable logical identity: the first run
  * creates a Letta agent and records its generated ID in the state directory;
  * later runs reopen the same agent, memory and conversations.
@@ -57,12 +64,13 @@ export const agent = defineAgent({
   instructions: 'You are a helpful, concise assistant. Use text_stats when asked to count text. When a decision needs the user\'s input, you may call ask_user with clear options. '
     + 'The user can attach files; a message then ends with lines like "Attached: report.pdf (PDF, 12 pages, 2.1 MB)". Use list_files, search_files and read_file to work with them, reading only the pages or lines you need, and cite the page or line you used. '
     + 'When available, run_command runs shell commands in an isolated sandbox without network, where /workspace holds the attached files: use it for calculations (write a Python script), searching with rg, and git. '
-    + 'For anything that needs the internet, such as pip install, use run_command_online; the user approves each call. Never push to remote repositories; the user does that.',
+    + 'For anything that needs the internet, such as pip install, use run_command_online; the user approves each call. Never push to remote repositories; the user does that.'
+    + (atlassian ? ' For Jira and Confluence, use atlassian_fetch to read an issue or page (it saves a .md you can edit), atlassian_update to write an edited .md back (the user approves each change), and atlassian_request for anything else (searches, comments). Keep blocks with @mentions, statuses, images or macros unchanged.' : ''),
   // fileTools adds list_files, read_file and search_files, restricted to the current conversation's attachments.
   // sandboxTools adds run_command (no network) and run_command_online (asks every time); they are only exposed with a sandbox.
-  tools: { text_stats: textStats, ask_user: askUserTool, ...fileTools, ...sandboxTools },
+  tools: { text_stats: textStats, ask_user: askUserTool, ...fileTools, ...sandboxTools, ...(atlassian ? atlassianTools : {}) },
   // Fail-closed: every tool is listed. Try 'ask' to require approval per call.
-  permissions: { text_stats: process.env.TEXT_STATS_PERMISSION === 'ask' ? 'ask' : 'allow', ask_user: 'allow', ...FILE_TOOL_PERMISSIONS, ...SANDBOX_TOOL_PERMISSIONS },
+  permissions: { text_stats: process.env.TEXT_STATS_PERMISSION === 'ask' ? 'ask' : 'allow', ask_user: 'allow', ...FILE_TOOL_PERMISSIONS, ...SANDBOX_TOOL_PERMISSIONS, ...(atlassian ? ATLASSIAN_TOOL_PERMISSIONS : {}) },
   ...(sandbox ? { sandbox } : {}),
   dreaming: { trigger: 'step-count', stepCount: 25 },
 });

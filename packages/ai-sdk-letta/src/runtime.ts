@@ -15,6 +15,8 @@ import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
 import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout } from './sandbox.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
+import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
+import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -53,6 +55,13 @@ export interface OpenAgentOptions {
   foregroundExternalTools?: boolean;
   /** Tool audit trail: `true` writes private NDJSON under the state directory, or pass a sink. @default true */
   traces?: boolean | ((event: ToolActivity) => void);
+  /**
+   * Who turns act for when a call names no `actor` (personal credentials,
+   * such as Atlassian tokens). Single-user apps act for the local user
+   * ({@link LOCAL_ACTOR}); a shared server passes each turn's author
+   * instead, and `null` means "nobody" (unattended runs). @default LOCAL_ACTOR
+   */
+  defaultActor?: TurnActor | null;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -157,7 +166,7 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -223,7 +232,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     release = lease.release;
     // Files of earlier versions are moved into the resources once; their folders are named after the conversations' titles.
     let resources: ResourceStore | undefined;
-    if (filesEnabled(definition) || sandboxEnabled(definition)) {
+    if (filesEnabled(definition) || sandboxEnabled(definition) || atlassianEnabled(definition)) {
       let titles: Record<string, string> = {};
       if (ResourceStore.open(paths.resources, identity.agentId).pendingMigration(paths.attachments).length) {
         const manager = managementClient();
@@ -233,6 +242,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       resources = await openResources(paths, identity.agentId, titles);
     }
     const persist = options.traces === false ? undefined : typeof options.traces === 'function' ? options.traces : fileTraceWriter(paths.traces);
+    // Per-user secrets (Atlassian tokens) live outside the resources, so neither the agent nor the sandbox can read them.
+    const credentials = atlassianEnabled(definition) ? new CredentialStore(paths.credentials) : undefined;
+    const defaultActor = options.defaultActor === undefined ? LOCAL_ACTOR : options.defaultActor ?? undefined;
     // Conversation creation writes one pending-intent file per agent: create one at a time.
     let creating: Promise<unknown> = Promise.resolve();
     const opened = new Set<string>();
@@ -276,15 +288,19 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       })();
       try {
         let turnSignal: AbortSignal | undefined;
+        // Who the running turn acts for (read by tools that use personal credentials).
+        let turnActor: TurnActor | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
         // Resources: every file of the agent in one git-backed folder, one folder
         // per conversation. The current conversation is bound here (never from
         // tool arguments); tools may read other conversations' folders too.
         let attachments: AttachmentStore | undefined;
+        let folder: AttachmentStore | undefined;
         if (resources) {
           const workspace = new AttachmentStore(resources, conversationId, { title: conversationTitle });
           workspace.path; // create the conversation's folder now, named after its title
+          folder = workspace;
           if (filesEnabled(definition)) attachments = workspace;
           // Shell commands: one sandbox per conversation, created on the first
           // command, with all resources at /workspace and the conversation's folder as the working directory.
@@ -293,7 +309,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}` });
           }
         }
-        const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
+        const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}),
+          ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
+        const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;
@@ -304,9 +322,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const bridge = createToolBridge({
           tools: exposed, permissions: listening ? { ...definition.permissions, [STAY_SILENT_TOOL]: 'allow' } : definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
           ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
-          ...(sandboxTimeout ? { toolTimeouts: Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) } : {}),
+          toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
-          context: () => toolContext,
+          context: toolContext,
           sandbox: () => shell?.session,
         });
         let memoryRoot: string | undefined;
@@ -344,10 +362,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         agent = new LettaAgent<TOOLS>({
           id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; } } };
+            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor;
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; } } };
           },
-          listening, name: definition.name,
+          listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
           delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
           // Whatever the agent changed in the resources during the turn becomes one commit.

@@ -14,7 +14,7 @@ rename the ID, edit the tools.
 - [4. Write tools](#4-write-tools)
 - [5. Define the agent](#5-define-the-agent)
 - [6. Human in the loop](#6-human-in-the-loop)
-- [7. Optional built-ins: files, shell, images](#7-optional-built-ins-files-shell-images)
+- [7. Optional built-ins: files, shell, images, Atlassian](#7-optional-built-ins-files-shell-images-atlassian)
 - [8. Memory and dreaming](#8-memory-and-dreaming)
 - [9. Run it](#9-run-it)
 - [10. State, identity, starting fresh](#10-state-identity-starting-fresh)
@@ -321,7 +321,7 @@ the conversation blocked as an uncertain delivery (see
 handler receives an `AbortSignal` as second argument that fires when a prompt
 is withdrawn; stop showing the prompt then.
 
-## 7. Optional built-ins: files, shell, images
+## 7. Optional built-ins: files, shell, images, Atlassian
 
 All built-ins are opt-in, like every tool.
 
@@ -385,6 +385,46 @@ try {
   await close();
 }
 ```
+
+**Jira and Confluence (Atlassian Cloud).** `atlassianTools` lets the agent
+read and edit issues and pages with **each user's own API token**: people
+connect their account in the browser app (sidebar → **Connect Atlassian**),
+and a tool call always acts as the person whose message started the turn.
+Reads run at once; every change shows the user what will change and needs
+their approval.
+
+```ts
+import { atlassianTools, ATLASSIAN_TOOL_PERMISSIONS, defineAgent, fileTools, FILE_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+export const planner = defineAgent({
+  id: 'sprint-planner',
+  name: 'Sprint Planner',
+  model: 'openai-codex/gpt-5.5',
+  instructions: 'You help with Jira and Confluence. Read an issue or page with atlassian_fetch (it saves a .md you can edit), '
+    + 'write an edited .md back with atlassian_update, and use atlassian_request for searches and comments. '
+    + 'Keep blocks with @mentions, statuses, images or macros unchanged.',
+  tools: { ...atlassianTools, ...fileTools },
+  // atlassian_request and atlassian_fetch: 'allow' (any method but GET still asks); atlassian_update: 'ask'.
+  permissions: { ...ATLASSIAN_TOOL_PERMISSIONS, ...FILE_TOOL_PERMISSIONS },
+  toolTimeoutMs: 10_000, // Atlassian calls get at least 60 s anyway
+});
+```
+
+- `atlassian_fetch(ref)` saves an issue (`KAN-12.md` + `KAN-12.adf.json`) or
+  a page (`<title>.md` + `.adf.json`) in the conversation's folder and
+  returns it as Markdown. `atlassian_update(file, edits?)` writes the `.md`
+  back: only the blocks that changed are rewritten, everything else is kept
+  exactly as it is in Atlassian, and edits that would lose a mention, status,
+  image, macro or similar are refused, naming them. `atlassian_request(method,
+  path, body?)` reaches the user's site's Jira (`/rest/api/3/`) and
+  Confluence (`/wiki/api/v2/`, `/wiki/rest/api/`) REST APIs only.
+- Single-user apps (GUI, TUI) act as the local user; a team server acts as
+  each turn's author; turns without a person (`openAgentHost(definition, {
+  defaultActor: null })` and no `actor`) cannot use the tools. From code,
+  pass `actor` with a turn, and save credentials with `connectAtlassian`.
+- Use it only on your own self-hosted server: Atlassian does not allow
+  distributed apps to collect API tokens (OAuth may come later). The README
+  has the details: [Atlassian](../README.md#atlassian-jira-and-confluence).
 
 ## 8. Memory and dreaming
 

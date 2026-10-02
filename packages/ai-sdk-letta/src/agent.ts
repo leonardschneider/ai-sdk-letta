@@ -7,6 +7,7 @@ import { assertImageBudget, compactImagePart, decodeImagePart, IMAGE_REFERENCE_P
 import { attachmentNote, decodeFilePart, FileInputError, type StoredFile } from './attachments.js';
 import type { AttachmentStore } from './resources.js';
 import { REPLY_MODES, STAY_SILENT_TOOL, turnNote, type ReplyMode, type TurnSpeaker } from './listening.js';
+import type { TurnActor } from './credentials.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -14,7 +15,7 @@ export const MAX_INPUT_CHARACTERS = 8000;
 /** The subset of a Letta session a turn needs. */
 export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'>;
 /** What a turn allows, passed to {@link LettaAgentOptions.open}: `silence` is true when the agent may listen without replying. */
-export type TurnOptions = { silence: boolean };
+export type TurnOptions = { silence: boolean; actor?: TurnActor };
 
 /** Display-only state restored when the agent was opened. Never sent to the model. */
 export interface AgentPresentation {
@@ -70,6 +71,8 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   listening?: boolean;
   /** The agent's display name, as people mention it (used in the turn note). */
   name?: string;
+  /** Who a turn acts for when the call names no `actor` (the local user in single-user apps). @default none */
+  defaultActor?: TurnActor;
 }
 
 /**
@@ -98,6 +101,13 @@ export type LettaCallOptions = {
   replyMode?: ReplyMode;
   /** The turn mentions the agent: it must reply whatever the `replyMode`. */
   addressed?: boolean;
+  /**
+   * The person this turn acts for: tools that use personal credentials (such
+   * as the Atlassian tools) use this user's. Defaults to the agent's
+   * `defaultActor` (the local user in the single-user GUI and the TUI); a
+   * turn without an actor (an unattended run) cannot use them.
+   */
+  actor?: TurnActor;
 };
 /** Letta-specific result metadata of a turn (`providerMetadata.letta`). `listened`: the agent chose not to reply; `reason` is its private note. */
 export type LettaTurnMetadata = { listened?: boolean; reason?: string };
@@ -316,6 +326,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** The session exposes `stay_silent`; turns may listen without replying. */
   readonly listening: boolean;
   private readonly name?: string;
+  private readonly defaultActor?: TurnActor;
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
   private readonly afterTurn?: () => Promise<void>;
@@ -341,6 +352,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.beforeTurn = options.beforeTurn;
     this.listening = !!options.listening;
     this.name = options.name;
+    this.defaultActor = options.defaultActor ? Object.freeze({ ...options.defaultActor }) : undefined;
   }
   private settled?: Promise<void>;
   /** Resolves when the work after the last turn (see `afterTurn`) is done. */
@@ -361,7 +373,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+    }
+    if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
+    {
     }
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
     if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
@@ -392,10 +407,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const preface = options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '';
     const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
-    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence };
+    const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}) }) : this.defaultActor;
+    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor };
   }
 
-  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false): LanguageModelV4 {
+  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false, actor?: TurnActor): LanguageModelV4 {
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
       let session: TurnSession | undefined;
       let completed = false;
@@ -415,7 +431,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       const endReasoning = () => { if (reasoningOpen) { emit({ type: 'reasoning-end', id: `reasoning-${reasoningId}` }); reasoningOpen = false; } };
       try {
         signal.throwIfAborted();
-        session = this.open(signal, { silence });
+        session = this.open(signal, { silence, ...(actor ? { actor } : {}) });
         signal.addEventListener('abort', abort, { once: true });
         this.delivery?.begin();
         await (otid ? session.send(message, { otid }) : session.send(message));
@@ -522,7 +538,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
       this.history = [...turn.messages, ...result.response.messages];
       return result;
@@ -533,7 +549,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
-    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
       onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
       onFinish: result => {

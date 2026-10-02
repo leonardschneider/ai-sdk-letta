@@ -50,3 +50,16 @@ test('layout is persisted defensively: bad or missing values fall back, width is
   assert.match(resourceError('file_exists'), /already there/);
   assert.match(resourceError('whatever'), /Nothing was changed/);
 });
+
+test('Atlassian documents (.adf.json) preview with the Atlassian renderer; saved and bare documents parse', async () => {
+  const { parseAtlassianDocument } = await import('../src/resources-model.js');
+  assert.equal(previewKind('KAN-1.adf.json'), 'atlassian');
+  assert.equal(previewKind('data.json'), 'text');
+  assert.equal(iconKind('KAN-1.adf.json'), 'atlassian');
+  const saved = { format: 'ai-sdk-letta/atlassian@1', source: { product: 'jira', url: 'https://a.atlassian.net/browse/KAN-1', title: 'T', key: 'KAN-1' }, media: {}, document: { type: 'doc', version: 1, content: [] } };
+  assert.equal(parseAtlassianDocument(JSON.stringify(saved))?.source?.key, 'KAN-1');
+  assert.deepEqual(parseAtlassianDocument('{"type":"doc","version":1,"content":[]}')?.document.content, []);
+  assert.equal(parseAtlassianDocument('{"type":"paragraph"}'), undefined);
+  assert.equal(parseAtlassianDocument('not json'), undefined);
+  assert.equal(resourceError('atlassian_not_connected'), 'Connect Atlassian to load its images.');
+});

@@ -386,6 +386,93 @@ They are enabled by the file tools or the sandbox.
   `restore()`, `log()` and `commitAll()`; `LettaRuntime.resources` is the
   open agent's store.
 
+### Atlassian (Jira and Confluence)
+
+Add the Atlassian tools to let the agent read and edit Jira issues and
+Confluence pages (Atlassian Cloud) **as each user**, with their own API token:
+
+```ts
+import { atlassianTools, ATLASSIAN_TOOL_PERMISSIONS, defineAgent, fileTools, FILE_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...atlassianTools, ...fileTools },                              // atlassian_request, atlassian_fetch, atlassian_update
+  permissions: { ...ATLASSIAN_TOOL_PERMISSIONS, ...FILE_TOOL_PERMISSIONS }, // reads 'allow'; atlassian_update 'ask'
+});
+```
+
+The example agent includes them with `ATLASSIAN=1` (`ATLASSIAN=1 npm run gui`).
+
+- **Each person connects their own account.** In the browser app, the
+  sidebar shows **Connect Atlassian**: site (`https://<name>.atlassian.net`),
+  email and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens).
+  The server checks them (`GET /rest/api/3/myself`) and stores them for that
+  person only: `<state>/credentials/atlassian/<hash of the user ID>.json`,
+  0600 in a 0700 folder, written atomically. The token is never sent back to
+  the browser (the dialog shows site, email, account and the last check),
+  never given to the agent, its tools' results, the sandbox, logs or other
+  people. **Test connection**, **Replace token** and **Disconnect** are in
+  the same dialog. When Atlassian answers 401 (the token expired or was
+  revoked), the connection is marked, the sidebar says *Replace token*, and
+  the tools tell the agent to ask the user to replace it.
+- **The tools act as the person whose message started the turn**: the local
+  user in the single-user GUI and the TUI, each message's author on a team
+  server. A person who has not connected gets "Atlassian is not connected
+  for Mia…" through the agent, never someone else's token. Turns without a
+  person (unattended or scheduled runs) cannot use the tools. On a team
+  server, an approval that uses someone's account can be answered only by
+  that person (not even by an admin).
+- **Three tools, few tokens.**
+  - `atlassian_fetch(ref)`: an issue key (`KAN-12`), a page ID, or a link.
+    Saves the issue description or the page in the conversation's folder as
+    `<name>.md` (Markdown, to read and edit) and `<name>.adf.json` (the
+    original Atlassian document, with its source: site, key or ID, version
+    or update time, URL), and returns the issue's fields and the text as
+    Markdown. Both are versioned with the resources like any file.
+  - `atlassian_update(file, edits?)`: writes an edited `.md` back. `edits`
+    are exact find/replace pairs (or edit the file first, for example in the
+    sandbox). The user sees a before/after of each changed block and must
+    approve. Right before writing, the issue or page is checked again; if it
+    changed since it was fetched, nothing is written and the agent is told
+    to fetch it again (Confluence: `version.number` must still be the fetched
+    one, and the update sends it + 1; Jira has no version check, so its
+    description and update time are compared instead).
+  - `atlassian_request(method, path, body?)`: anything else (JQL search with
+    `GET /rest/api/3/search/jql`, comments, transitions, Confluence search).
+    Only the user's own site, and only the Jira REST API v3
+    (`/rest/api/3/`) and the Confluence REST API v2 and v1 (`/wiki/api/v2/`,
+    `/wiki/rest/api/`); no other host, no `..`, redirects never followed with
+    the token. `GET` runs at once; any other method shows the method, path
+    and a readable body to the user, who must approve, even though the
+    tool's permission is `'allow'` (a tool can make its policy stricter,
+    never looser). Atlassian documents in responses come back as Markdown,
+    noise (avatars, self links) is dropped, and results are cut at about
+    12,000 characters with a notice. In a body, `{"$markdown": "..."}` stands
+    for an ADF document.
+- **Edits never lose what Markdown cannot express.** Mentions, images and
+  files, statuses, dates, emoji, smart links, macros, panels, expands,
+  layouts, tasks and decisions, colours, inline comments and table cell
+  formatting appear in the Markdown as readable tokens (`@Jane Doe`,
+  `[status: IN PROGRESS]`, `[image: shot.png]`, `[macro: toc]`, `> **[info
+  panel]**`, `- [x]`). Writes are **block splices**: the original document
+  is the source of truth; top-level blocks whose Markdown did not change are
+  kept exactly (every attribute and ID); blocks the agent changed, added or
+  removed are converted from Markdown; and if a changed block held any of
+  those elements, the update is refused, naming them ("This edit would
+  remove or change mention @Jane Doe, status "IN PROGRESS"… Nothing was
+  written"). Such blocks are effectively read-only for the agent. The result
+  is validated against Atlassian's ADF JSON schema before anything is sent.
+- **Previews.** In the Resources panel, a `.adf.json` opens in Atlassian's
+  own renderer (`@atlaskit/renderer`, loaded only when you open one), light
+  or dark like the app, with a link to the issue or page. Images of a Jira
+  issue are loaded through this server with your own account
+  (`/v1/resources/atlassian-media`), so the browser never contacts
+  Atlassian; others show a placeholder. The `.md` uses the usual Markdown
+  preview.
+- **For your own server only.** This uses personal API tokens, which act with
+  the user's full rights. Atlassian does not allow distributed apps to
+  collect API tokens; run it for yourself or your team on your own machine.
+  OAuth (3LO) may come later.
+
 ### Shell commands (sandbox)
 
 Add the built-in sandbox tools and a `sandbox` option to let the agent run
@@ -604,9 +691,18 @@ also F2), Move to…, New folder, Upload and Delete (with a confirmation, and
 an Undo in the notice). Files the agent creates appear while it works.
 Click a file to **preview** it: CSV and TSV as a table (the first 500 rows),
 Markdown with the same safe renderer as the chat, text, images, PDFs in the
-browser's viewer, and HTML in a sandboxed frame without scripts. Previews
+browser's viewer, HTML in a sandboxed frame without scripts, and Jira issues
+and Confluence pages (`.adf.json`) as Atlassian draws them (see
+[Atlassian](#atlassian-jira-and-confluence)). Previews
 are served under a policy that allows no script, no network and no access to
 the app (`default-src 'none'; sandbox`); HTML is shown only inside it.
+
+**Atlassian.** With the Atlassian tools, the foot of the sidebar shows
+**Connect Atlassian** (or your connected site): a dialog for site, email and
+API token, with Test connection, Replace token and Disconnect. Approval cards
+for Atlassian changes show the issue or page (linked), the account used, and
+a before/after of each changed block, or the method, path and body of a
+request; the exact request stays one click away.
 
 **Files.** With the file tools, the same paperclip, drop and paste attach
 PDFs and text files (Markdown, CSV, JSON, code). Each is uploaded and
@@ -760,6 +856,15 @@ conversation's queue), and a conversation queues up to 10 messages.
   The resources routes (`/v1/resources...`) need the session, every change
   needs Origin and CSRF, and paths are checked on the server (no `..`, hidden
   names or symlinks).
+- **Personal credentials stay with their owner.** Atlassian API tokens are
+  stored per person (0600, atomic, outside the resources, so neither the
+  agent, its file tools nor the sandbox can read them), never returned to
+  the browser or written to logs or tool results, and used only for the
+  turns that person started, only against their own `*.atlassian.net` site
+  and its Jira and Confluence REST APIs. Every change asks that person
+  first. Redirects are never followed with a token, and the app's own
+  Atlassian previews never let the browser contact Atlassian (or Sentry: the
+  renderer's error reporting is built out).
 - **Files are confined** to the agent's [resources](#resources); the file
   tools only read, and the sandbox mounts the work tree but never its git
   history.
@@ -802,6 +907,7 @@ State lives in one directory, resolved in this order:
                            all files, git-versioned: files/ (one folder per conversation), git/, cache/, state.json
   attachments/<letta agent ID>/.migrated/
                            files of 0.3 kept aside after they were moved into resources/
+  credentials/atlassian/   each person's Atlassian site, email and API token (0600; one file per person)
 ```
 
 **Files** stay in the agent's resources, including after a conversation is
@@ -876,6 +982,17 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   browser displays the newest 48 MB per conversation and `[Image]` for the
   rest; the terminal always shows `[Image]`. A reply that is still running
   after a browser refresh shows `[Image]` until it completes.
+- **Atlassian.** Cloud sites only (`*.atlassian.net`), personal API tokens
+  only (no OAuth yet; for self-hosted use). Only the issue description and
+  page bodies are edited through Markdown (other fields and comments through
+  `atlassian_request`); blocks with mentions, images, statuses, macros and
+  similar are read-only for the agent. Markdown loses some formatting of
+  the blocks the agent rewrites (for example underline or text alignment;
+  the refusal names them). Jira images in previews need the viewer's own
+  connection; Confluence images, and media whose attachment cannot be
+  matched, show as placeholders. Jira has no optimistic locking: a change
+  made in the instant between the final check and the write can still be
+  overwritten.
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default,
@@ -898,6 +1015,19 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   through a protocol command).
 - **The TUI and the browser app are not on npm yet.** Run them from a
   checkout (see [Install](#install)).
+- **The Atlassian renderer is heavy and only in the browser app.**
+  `@atlaskit/renderer` 147 (with `@atlaskit/editor-common` 128) works with
+  React 19 through npm `overrides` (`react`/`react-dom` set to the app's
+  version; several Atlaskit packages still declare React 18 only). It adds
+  about 470 KB gzipped, loaded only when an `.adf.json` preview opens, and
+  about 500 MB to a development `node_modules` (none of it in the published
+  packages). `npm audit` reports moderate advisories in its dependencies
+  (DOMPurify, PrismJS, React Router, Sentry; none high or critical), in code
+  paths the preview does not use (link datasources, code syntax highlight,
+  team profiles, error reporting, which is replaced by a stub at build time).
+  The library converts Markdown with [`marked`](https://marked.js.org) and
+  validates documents against Atlassian's ADF JSON schema (vendored from
+  `@atlaskit/adf-schema`, Apache-2.0) with Ajv.
 - **Live tests are opt-in** (`AI_SDK_LETTA_LIVE=1 npm run test:live`) and
   consume model usage.
 

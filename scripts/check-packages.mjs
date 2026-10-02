@@ -30,8 +30,10 @@ const forbidden = [
   [/(^|\/)vitest[^/]*$|(^|\/)tsup\.config|(^|\/)tsconfig[^/]*\.json$/, 'build config'],
 ];
 // A guard against accidentally shipping large files, not a budget: ai-sdk-letta
-// ships src, dist and source maps (just over 1 MB since the title parser).
-const maxUnpacked = 1_250_000;
+// ships src, dist and source maps (just over 1 MB since the title parser,
+// about 1.5 MB since the Atlassian tools, their ADF conversion and the
+// vendored ADF JSON schema).
+const maxUnpacked = 1_650_000;
 const failures = [];
 const fail = (name, message) => failures.push(`${name}: ${message}`);
 

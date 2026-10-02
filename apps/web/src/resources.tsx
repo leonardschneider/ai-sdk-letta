@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TextMessagePartProvider } from '@assistant-ui/react';
 import { ContextMenu, DropdownMenu } from 'radix-ui';
 import {
@@ -9,9 +9,12 @@ import { Modal } from './modal.js';
 import { Markdown } from './markdown.js';
 import { useToast } from './toasts.js';
 import {
-  ancestors, baseName, canDrop, find, iconKind, joinPath, parentPath, parseDelimited, previewKind, resourceError, shortSize, validName, walk,
+  ancestors, baseName, canDrop, find, iconKind, joinPath, parentPath, parseAtlassianDocument, parseDelimited, previewKind, resourceError, shortSize, validName, walk,
   type ResourceNode, type ResourceTree,
 } from './resources-model.js';
+
+/** The Atlassian renderer is large: loaded only when an `.adf.json` preview opens. */
+const AdfView = lazy(() => import('./adf-view.js'));
 
 const DRAG_TYPE = 'application/x-ai-sdk-letta-resource';
 const POLL_MS = 2500;
@@ -19,6 +22,7 @@ const PREVIEW_ROWS = 500;
 
 const fileUrl = (path: string) => apiPath(`/v1/resources/file?path=${encodeURIComponent(path)}`);
 const previewUrl = (path: string) => apiPath(`/v1/resources/preview?path=${encodeURIComponent(path)}`);
+const atlassianMediaUrl = (path: string, id: string) => apiPath(`/v1/resources/atlassian-media?path=${encodeURIComponent(path)}&id=${encodeURIComponent(id)}`);
 
 /** File icon by name; folders open/closed; conversation folders get a chat badge. */
 export function ResourceIcon({ node, open }: { node: Pick<ResourceNode, 'name' | 'type' | 'conversationId'>; open?: boolean }) {
@@ -27,7 +31,7 @@ export function ResourceIcon({ node, open }: { node: Pick<ResourceNode, 'name' |
     return <span className="res-icon" data-kind={node.conversationId ? 'conversation' : 'folder'} aria-hidden="true"><Icon size={16}/>{node.conversationId && <MessageSquare className="res-badge" size={9}/>}</span>;
   }
   const kind = iconKind(node.name);
-  const Icon = kind === 'pdf' ? FileType : kind === 'table' ? FileSpreadsheet : kind === 'image' ? FileImage : kind === 'markdown' || kind === 'text' ? FileText : kind === 'code' || kind === 'html' ? FileCode : File;
+  const Icon = kind === 'pdf' ? FileType : kind === 'table' ? FileSpreadsheet : kind === 'image' ? FileImage : kind === 'markdown' || kind === 'text' || kind === 'atlassian' ? FileText : kind === 'code' || kind === 'html' ? FileCode : File;
   return <span className="res-icon" data-kind={kind} aria-hidden="true"><Icon size={16}/></span>;
 }
 
@@ -439,14 +443,14 @@ function Preview({ path, node, onClose }: { path: string; node?: ResourceNode; o
       {kind === 'pdf' && <iframe title={`PDF ${name}`} src={previewUrl(path)}/>}
       {/* No allow-scripts and no allow-same-origin: the page cannot run code, reach the app or the network. */}
       {kind === 'html' && <iframe title={`HTML ${name}`} src={previewUrl(path)} sandbox="" referrerPolicy="no-referrer"/>}
-      {(kind === 'table' || kind === 'markdown' || kind === 'text') && <TextPreview path={path} kind={kind} name={name}/>}
+      {(kind === 'table' || kind === 'markdown' || kind === 'text' || kind === 'atlassian') && <TextPreview path={path} kind={kind} name={name}/>}
       {kind === 'none' && <p className="preview-empty">No preview for this type. <a href={fileUrl(path)} download={name}>Download it</a> instead.</p>}
     </div>
   </Modal>;
 }
 
 const MAX_TEXT = 400_000;
-function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'markdown' | 'text'; name: string }) {
+function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'markdown' | 'text' | 'atlassian'; name: string }) {
   const [text, setText] = useState<string>();
   const [failed, setFailed] = useState('');
   useEffect(() => {
@@ -466,9 +470,35 @@ function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'mark
   if (text === undefined) return <p className="preview-empty muted">Loading…</p>;
   const cut = text.length > MAX_TEXT;
   const shown = cut ? text.slice(0, MAX_TEXT) : text;
+  if (kind === 'atlassian') return <AtlassianPreview path={path} text={text}/>;
   if (kind === 'table') return <TablePreview text={shown} tab={/\.tsv$/i.test(name)} cut={cut}/>;
   if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown latex={false}/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
   return <><pre className="preview-text">{shown}</pre>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</>;
+}
+
+/**
+ * A Jira issue or Confluence page saved by the Atlassian tools, drawn by
+ * Atlassian's own renderer (lazily loaded). Images come through this app
+ * (with your Atlassian account); the browser never contacts Atlassian.
+ */
+function AtlassianPreview({ path, text }: { path: string; text: string }) {
+  const parsed = useMemo(() => parseAtlassianDocument(text), [text]);
+  const mediaSrc = useCallback((id: string) => atlassianMediaUrl(path, id), [path]);
+  const media = useMemo(() => parsed?.media ?? {}, [parsed]);
+  if (!parsed) return <pre className="preview-text">{text.slice(0, MAX_TEXT)}</pre>;
+  const source = parsed.source;
+  const raw = <pre className="preview-text">{text.slice(0, MAX_TEXT)}</pre>;
+  return <div className="adf-preview">
+    {source && <div className="adf-source">
+      <span className="adf-source-kind">{source.product === 'jira' ? `Jira · ${source.key ?? ''}` : 'Confluence page'}</span>
+      <span className="adf-source-title">{source.title}</span>
+      <span className="adf-source-meta">{source.product === 'confluence' && source.version ? `version ${source.version}` : source.updated ? `updated ${new Date(source.updated).toLocaleString()}` : ''}{parsed.fetchedAt ? ` · fetched ${new Date(parsed.fetchedAt).toLocaleString()}` : ''}</span>
+      <a className="btn small" href={source.url} target="_blank" rel="noopener noreferrer">Open in {source.product === 'jira' ? 'Jira' : 'Confluence'}<ExternalLink size={13} aria-hidden="true"/></a>
+    </div>}
+    <Suspense fallback={<p className="preview-empty muted">Loading the Atlassian renderer…</p>}>
+      <AdfView document={parsed.document} media={media} mediaSrc={mediaSrc} fallback={<><p className="preview-empty">This document couldn’t be drawn. Its content:</p>{raw}</>}/>
+    </Suspense>
+  </div>;
 }
 
 function TablePreview({ text, tab, cut }: { text: string; tab: boolean; cut: boolean }) {

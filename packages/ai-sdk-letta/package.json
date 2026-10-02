@@ -69,6 +69,7 @@
   "dependencies": {
     "@letta-ai/letta-agent-sdk": "0.8.22",
     "ajv": "^8.20.0",
+    "marked": "18.0.14",
     "unpdf": "1.8.1"
   },
   "peerDependencies": {

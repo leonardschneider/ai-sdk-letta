@@ -23,6 +23,7 @@ import { LatexMenu } from './latex-menu.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
+import { AtlassianDialog, AtlassianRow, useAtlassianStatus } from './integrations.js';
 import { LAYOUT_KEY, RESOURCES_WIDTH, clampWidth, readLayout, type Layout } from './resources-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
@@ -83,6 +84,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const toast = useToast();
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const filesEnabled = !!agent.files;
+  // The Resources panel: files, or documents saved by integrations (Atlassian) without attachments.
+  const resourcesEnabled = filesEnabled || !!agent.resources;
+  const atlassianEnabled = !!agent.integrations?.includes('atlassian');
+  const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
   const SAVED_THREAD = team ? `${SAVED}:${agent.id}` : SAVED;
   const isAdmin = agent.role === 'admin';
@@ -112,6 +117,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
   const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
   const [turns, setTurns] = useState(0);
+  const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
@@ -563,12 +569,13 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     <FileLinkContext.Provider value={fileLink}>
     <LatexContext.Provider value={latex}>
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && filesEnabled) || undefined}
+      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
         data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/>, footer: <CurrentUser user={team.user} role={agent.role}/> } : {})}/>
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : {})}
+            footer={<>{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
@@ -582,7 +589,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
-            {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
+            {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
           <ThreadPrimitive.Root className="thread">
@@ -646,13 +653,14 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
         </main>
-        {filesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
+        {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
           {!narrow && <Resizer width={layout.resourcesWidth} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
           <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
             onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
+        {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
       </div>
     </AssistantRuntimeProvider>
     </LatexContext.Provider>

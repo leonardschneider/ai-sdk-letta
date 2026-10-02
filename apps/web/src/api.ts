@@ -70,6 +70,10 @@ export async function uploadResource(folder: string, file: File): Promise<{ path
 export type Person = { id?: string; login: string; name: string; avatar?: string };
 /** An agent as the browser knows it (team servers add the viewer's role). */
 export type AgentInfo = { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
+  /** The agent has resources (a Resources panel) without accepting attachments. */
+  resources?: boolean;
+  /** Integrations whose accounts each person connects (`'atlassian'`). */
+  integrations?: string[];
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */
@@ -80,3 +84,21 @@ export type Session =
 export type Member = Person & { id: string; role: 'admin' | 'member'; pending: boolean; you?: boolean };
 
 export { uuid } from './uuid.js';
+
+/** `GET /api/integrations/atlassian`: your own connection (never the token). */
+export type AtlassianStatus = { connected: false } | { connected: true; site: string; email: string; accountName?: string; savedAt: string; checkedAt?: string; status: 'ok' | 'rejected'; rejectedAt?: string };
+/** A JSON call to `/api/integrations/...` (the server's, not an agent's), with the server's message on failure. */
+export async function integrationApi<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
+  let response: Response;
+  try { response = await fetch(`/api/integrations${path}`, { method, credentials: 'same-origin', headers: { 'X-CSRF-Token': csrf, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }); }
+  catch { throw new IntegrationError('network', 'Couldn’t reach the local server. Check that it is running.'); }
+  let data: { error?: string; message?: string } = {};
+  try { data = await response.json(); } catch { /* no body */ }
+  if (!response.ok) throw new IntegrationError(data.error ?? `http_${response.status}`, data.message ?? integrationMessage(data.error ?? ''));
+  return data as T;
+}
+export class IntegrationError extends Error { constructor(readonly code: string, message: string) { super(message); } }
+const integrationMessage = (code: string) => ({
+  session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
+  integration_busy: 'Still checking the previous attempt. Try again in a moment.', payload_too_large: 'That is too long.', invalid_input: 'Check the site, email and token.',
+} as Record<string, string>)[code] ?? 'That didn’t work. Nothing was changed.';

@@ -4,8 +4,34 @@ import type { AgentToolResultContent, AnyAgentTool } from '@letta-ai/letta-agent
 import { appendFileSync, mkdirSync, chmodSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { validateQuestion, type Question, type ToolInteractions } from './interactions.js';
+import { validateQuestion, type ApprovalPreview, type Question, type ToolInteractions } from './interactions.js';
 import type { ToolPermission } from './definition.js';
+
+/**
+ * Optional per-call preparation of a tool, attached as `tool[PREPARE_CALL]`
+ * (see {@link withPreparation}). It runs after the arguments are validated
+ * and before any approval, under the call's deadline, and decides:
+ *
+ * - `{ output }`: answer the call now (for example, a refusal the model can
+ *   correct); nothing else runs and nobody is asked.
+ * - `{ approval: 'required', preview }`: ask the human even if the tool's
+ *   permission is `'allow'` (a tool can only make its policy stricter), and
+ *   show `preview` (what the call will do) in the approval card.
+ * - `state`: passed to `execute` as `options.context[PREPARED_CONTEXT]` (for
+ *   example, the exact request that was approved).
+ *
+ * With permission `'ask'`, every call asks, with the preview when there is one.
+ */
+export type PrepareCall = (input: unknown, options: { toolCallId: string; abortSignal: AbortSignal; context: Readonly<Record<string, unknown>> }) => Promise<PreparedCall> | PreparedCall;
+export type PreparedCall = { output?: unknown; approval?: 'required' | 'default'; preview?: ApprovalPreview; onBehalfOf?: string; state?: unknown };
+/** Key of a tool's {@link PrepareCall}. */
+export const PREPARE_CALL: unique symbol = Symbol.for('ai-sdk-letta.prepareCall');
+/** Key under which `execute` receives the prepared state (`options.context[PREPARED_CONTEXT]`). */
+export const PREPARED_CONTEXT = 'ai-sdk-letta.prepared';
+/** Attach a {@link PrepareCall} to an AI SDK tool. */
+export function withPreparation<T extends object>(definition: T, prepare: PrepareCall): T & { [PREPARE_CALL]: PrepareCall } {
+  return Object.assign(definition, { [PREPARE_CALL]: prepare });
+}
 
 /** Name of the built-in human question tool. */
 export const ASK_USER_TOOL = 'ask_user';
@@ -161,12 +187,37 @@ export function createToolBridge(options: ToolBridgeOptions) {
     const signal = AbortSignal.any([control.signal, ...[options.signal, sdkSignal].filter((s): s is AbortSignal => !!s)]);
     if (!await validateArguments(name, args)) return denied(name, id, 'invalid_arguments');
     const started = Date.now();
-    if (permissions[name] === 'ask' || name === ASK_USER_TOOL) {
+    const deadline = (Object.hasOwn(options.toolTimeouts ?? {}, name) ? options.toolTimeouts![name] : undefined) ?? options.timeoutMs ?? 5000;
+    // Optional preparation (see PrepareCall): may answer now, or require approval with a preview.
+    const prepare = (definition as { [PREPARE_CALL]?: PrepareCall })[PREPARE_CALL];
+    let prepared: PreparedCall = {};
+    if (typeof prepare === 'function') {
+      const control = new AbortController();
+      const timer = setTimeout(() => control.abort(), deadline);
+      const prepareSignal = AbortSignal.any([signal, control.signal]);
+      try {
+        prepared = await Promise.race([Promise.resolve().then(() => prepare(args, { toolCallId: id, abortSignal: prepareSignal, context: options.context?.() ?? {} })),
+          new Promise<never>((_, reject) => prepareSignal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))]) ?? {};
+      } catch {
+        const code = signal.aborted ? 'tool_cancelled' : control.signal.aborted ? 'tool_timeout' : 'tool_failed';
+        emit(name, id, 'error', started, code);
+        return { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true };
+      } finally { clearTimeout(timer); }
+      if (prepared.output !== undefined) {
+        try {
+          const result = await modelContent(definition, id, args, prepared.output);
+          emit(name, id, result.isError ? 'error' : 'completion', started, result.isError ? 'tool_reported_error' : 'prepared');
+          return result;
+        } catch { emit(name, id, 'error', started, 'tool_failed'); return { content: [{ type: 'text', text: JSON.stringify({ error: 'tool_failed' }) }], isError: true }; }
+      }
+    }
+    const asks = permissions[name] === 'ask' || prepared.approval === 'required';
+    if (asks || name === ASK_USER_TOOL) {
       try {
         signal.throwIfAborted();
         if (!options.interactions) return denied(name, id, 'interaction_unavailable');
-        if (permissions[name] === 'ask') {
-          const answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args) }, signal);
+        if (asks) {
+          const answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}) }, signal);
           signal.throwIfAborted();
           if (answer.approved !== true) return denied(name, id, answer.cancelled ? 'approval_cancelled' : 'user_denied');
           emit(name, id, 'approved', started, 'approved_once');
@@ -181,7 +232,7 @@ export function createToolBridge(options: ToolBridgeOptions) {
         }
       } catch { return denied(name, id, signal.aborted ? 'tool_cancelled' : 'interaction_unavailable'); }
     }
-    emit(name, id, 'start', started, permissions[name] === 'ask' ? 'approved_once' : 'static_allow');
+    emit(name, id, 'start', started, asks ? 'approved_once' : 'static_allow');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: (() => void) | undefined;
     try {
@@ -189,9 +240,10 @@ export function createToolBridge(options: ToolBridgeOptions) {
       const interrupted = new Promise<never>((_, reject) => {
         abort = () => reject(new Error(control.signal.aborted ? 'tool_timeout' : 'tool_cancelled'));
         signal.addEventListener('abort', abort, { once: true });
-        timer = setTimeout(() => control.abort(), (Object.hasOwn(options.toolTimeouts ?? {}, name) ? options.toolTimeouts![name] : undefined) ?? options.timeoutMs ?? 5000);
+        timer = setTimeout(() => control.abort(), deadline);
       });
-      const context = options.context?.() ?? {};
+      const base = options.context?.() ?? {};
+      const context = prepared.state !== undefined ? Object.freeze({ ...base, [PREPARED_CONTEXT]: prepared.state }) : base;
       const sandbox = options.sandbox?.();
       const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal, context, ...(sandbox ? { experimental_sandbox: sandbox } : {}) }); }), interrupted]);
       const result = await modelContent(definition, id, args, output);

@@ -4,10 +4,12 @@ export type ResourceNode = { name: string; path: string; type: 'file' | 'folder'
 export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; changes: number };
 
 /** What a preview shows, by extension (the server decides by content again). */
-export type PreviewKind = 'table' | 'markdown' | 'text' | 'html' | 'pdf' | 'image' | 'none';
+export type PreviewKind = 'table' | 'markdown' | 'text' | 'html' | 'pdf' | 'image' | 'atlassian' | 'none';
 const extension = (name: string) => { const dot = name.lastIndexOf('.'); return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''; };
 const TEXT = new Set(['txt', 'text', 'log', 'json', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'xml', 'css', 'scss', 'svg', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'py', 'rb', 'go', 'rs', 'java', 'kt', 'swift', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'sql', 'r', 'lua', 'tex', 'bib', 'diff', 'patch', 'rst', 'adoc', 'env', 'gitignore', 'dockerfile', 'makefile']);
 export function previewKind(name: string): PreviewKind {
+  // A Jira issue or Confluence page saved by the Atlassian tools: rendered as Atlassian does.
+  if (/\.adf\.json$/i.test(name)) return 'atlassian';
   const ext = extension(name);
   if (ext === 'csv' || ext === 'tsv') return 'table';
   if (ext === 'md' || ext === 'markdown' || ext === 'mdx') return 'markdown';
@@ -18,11 +20,11 @@ export function previewKind(name: string): PreviewKind {
   return 'none';
 }
 /** Icon family for a file name. */
-export type IconKind = 'pdf' | 'table' | 'image' | 'markdown' | 'html' | 'code' | 'text' | 'other';
+export type IconKind = 'pdf' | 'table' | 'image' | 'markdown' | 'html' | 'code' | 'text' | 'atlassian' | 'other';
 export function iconKind(name: string): IconKind {
   const ext = extension(name);
   const kind = previewKind(name);
-  if (kind === 'pdf' || kind === 'image' || kind === 'table' || kind === 'markdown' || kind === 'html') return kind;
+  if (kind === 'pdf' || kind === 'image' || kind === 'table' || kind === 'markdown' || kind === 'html' || kind === 'atlassian') return kind;
   if (['txt', 'text', 'log', 'rst', 'adoc', ''].includes(ext)) return 'text';
   if (kind === 'text') return 'code';
   return 'other';
@@ -124,7 +126,20 @@ export function resourceError(code: string): string {
     files_unavailable: 'This agent has no files.',
     resources_empty: 'Start a conversation first; its files appear here.',
     preview_unavailable: 'No preview for this type. Download it instead.',
+    atlassian_not_connected: 'Connect Atlassian to load its images.',
     session_required: 'The local server restarted. Refresh the page.',
     csrf_required: 'The local server restarted. Refresh the page.',
   } as Record<string, string>)[code] ?? 'That didn’t work. Nothing was changed.';
+}
+
+/** A saved Jira issue or Confluence page (`.adf.json` written by `atlassian_fetch`), as the preview reads it. */
+export type SavedAtlassianDocument = { format: string; source: { product: 'jira' | 'confluence'; url: string; title: string; key?: string; version?: number; updated?: string }; fetchedAt?: string; media?: Record<string, { name: string; mediaType?: string; download?: string }>; document: { type: 'doc'; content: unknown[] } };
+/** Parse a `.adf.json` preview: a saved document, or a bare ADF document. */
+export function parseAtlassianDocument(text: string): SavedAtlassianDocument | { document: { type: 'doc'; content: unknown[] }; source?: undefined; media?: undefined } | undefined {
+  try {
+    const value = JSON.parse(text) as Partial<SavedAtlassianDocument> & { type?: string; content?: unknown };
+    if (value?.format === 'ai-sdk-letta/atlassian@1' && value.source && value.document?.type === 'doc' && Array.isArray(value.document.content)) return value as SavedAtlassianDocument;
+    if (value?.type === 'doc' && Array.isArray(value.content)) return { document: value as { type: 'doc'; content: unknown[] } };
+  } catch { /* not JSON */ }
+  return undefined;
 }

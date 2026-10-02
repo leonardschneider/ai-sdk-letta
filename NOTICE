@@ -14,6 +14,11 @@ This product includes software developed by Letta:
     license text is kept in packages/provider/LICENSE. Modifications in that
     directory remain available under the same MIT License.
 
+This product includes the Atlassian Document Format JSON schema from
+@atlaskit/adf-schema (https://www.npmjs.com/package/@atlaskit/adf-schema),
+Copyright Atlassian, licensed under the Apache License, Version 2.0, in
+packages/ai-sdk-letta/src/adf-schema.json.
+
 This product patches, at install time, the following third-party package:
 
   @ai-sdk/tui (https://github.com/vercel/ai), Copyright Vercel, Inc.,
