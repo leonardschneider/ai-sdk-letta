@@ -518,7 +518,7 @@ export class ThreadRuntime {
       const written = typed && sanitizeFileName(typed) === name && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(typed) ? typed : name;
       // Metadata only: the folder already has its name, so this never renames it again (no title ↔ folder loop).
       const title = titleFromFolderName(thread.title, written);
-      if (title !== thread.title) { thread.title = title; this.save(); }
+      if (title !== thread.title) { thread.title = title; this.save(); this.changed(); }
       return { ...moved, thread: this.summary(thread) };
     });
   }
