@@ -24,7 +24,7 @@ export {
   type FileLimits, type FileInputErrorCode, type FileKind, type StoredFile, type StagedFile, type StagedUpload, type PreparedFile,
 } from './attachments.js';
 export {
-  ResourceStore, AttachmentStore, RESOURCE_LIMITS, RESOURCES_GITIGNORE, splitResourcePath, joinResourcePath, folderNameFromTitle, readRegularFile,
+  ResourceStore, AttachmentStore, RESOURCE_LIMITS, RESOURCES_GITIGNORE, splitResourcePath, joinResourcePath, folderNameFromTitle, titleFromFolderName, readRegularFile,
   type ResourceNode, type ResourceTree, type ResourceFile, type ResourceCommit,
 } from './resources.js';
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';

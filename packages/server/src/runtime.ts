@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSyn
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import {
-  AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, validateImages, validateResponse,
+  AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
   type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
 
@@ -213,7 +213,8 @@ export class ThreadRuntime {
     if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {
       const conversationId = thread.conversationId;
       const store = this.resourcesOf(thread.agentId);
-      this.renaming = this.renaming.then(() => store.retitle(conversationId, title)).then(() => {}, () => {});
+      // The title when the rename runs: a folder renamed in the panel meanwhile already set it (and is not renamed back).
+      this.renaming = this.renaming.then(() => store.retitle(conversationId, thread.title)).then(() => {}, () => {});
     }
     return this.summary(thread);
   }
@@ -348,11 +349,30 @@ export class ThreadRuntime {
     if (typeof parent !== 'string' || typeof name !== 'string' || !name.trim() || name.length > 255) throw new RuntimeFault('invalid_input', 400);
     return this.withResources(owner, store => store.createFolder(parent, name));
   }
-  /** Rename or move. One commit. */
+  /**
+   * Rename or move. One commit. Renaming a conversation's own folder renames
+   * the conversation too, to the name as typed (see {@link titleFromFolderName});
+   * the result then has the updated `thread`, as listed. A move that keeps
+   * the name does not.
+   */
   resourceMove(owner: string, input: unknown) {
     const { from, to } = (input ?? {}) as { from?: unknown; to?: unknown };
     if (typeof from !== 'string' || typeof to !== 'string') throw new RuntimeFault('invalid_input', 400);
-    return this.withResources(owner, store => store.move(from, to));
+    return this.withResources(owner, async (store): Promise<{ path: string; from: string; commit?: string; thread?: ReturnType<ThreadRuntime['summary']> }> => {
+      const moved = await store.move(from, to);
+      const name = moved.path.slice(moved.path.lastIndexOf('/') + 1);
+      if (name === moved.from.slice(moved.from.lastIndexOf('/') + 1)) return moved;
+      const conversationId = store.conversations().find(c => c.path === moved.path)?.conversationId;
+      const thread = conversationId && this.state.threads.find(t => t.owner === owner && t.agentId === store.agentId && t.conversationId === conversationId);
+      if (!thread) return moved;
+      // The name as the user typed it, when the folder only got a file-system-safe spelling of it ("Porto: day trips" → "Porto_ day trips").
+      const typed = to.split('/').filter(Boolean).pop()?.trim() ?? '';
+      const written = typed && sanitizeFileName(typed) === name && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(typed) ? typed : name;
+      // Metadata only: the folder already has its name, so this never renames it again (no title ↔ folder loop).
+      const title = titleFromFolderName(thread.title, written);
+      if (title !== thread.title) { thread.title = title; this.save(); }
+      return { ...moved, thread: this.summary(thread) };
+    });
   }
   /** Delete (kept in the history; see {@link resourceRestore}). One commit. */
   resourceDelete(owner: string, input: unknown) {

@@ -162,6 +162,87 @@ test('renaming a conversation during a turn renames its folder after the turn; t
   } finally { await runtime.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('renaming a conversation\'s folder in the panel renames the conversation; moves, other folders and the agent\'s renames do not; no loop', async () => {
+  const f = fixture();
+  try {
+    const [a, b] = [randomUUID(), randomUUID()];
+    await f.runtime.create('owner', a, 'Trip');
+    await f.runtime.resourceUpload('owner', 'Trip', 'notes.md', Buffer.from('x'));
+    // A user folder already has the name: the new conversation's folder gets a uniqueness suffix.
+    await f.runtime.resourceFolder('owner', { parent: '', name: 'Spec v2' });
+    await f.runtime.create('owner', b, '[Spec](https://example.com/spec) **v2**');
+    const title = (id: string) => f.runtime.list('owner').find(t => t.id === id)!.title;
+    const folder = (conversationId: string) => f.store().folderOf(conversationId);
+    const log = () => subjects(f.store());
+    assert.equal(folder('conv-2'), 'Spec v2 (2)');
+    await f.runtime.resourceUpload('owner', 'Spec v2 (2)', 'spec.md', Buffer.from('x'));
+    assert.equal(title(b), '[Spec](https://example.com/spec) **v2**', 'the suffix is never put into the title');
+
+    // Rename: the title follows; the result has the thread as listed; the folder rename is the only commit.
+    const renamed = await f.runtime.resourceMove('owner', { from: 'Trip', to: 'Lisbon' });
+    assert.equal(renamed.path, 'Lisbon');
+    assert.deepEqual(renamed.thread && [renamed.thread.id, renamed.thread.title], [a, 'Lisbon']);
+    assert.equal(title(a), 'Lisbon');
+    await f.runtime.folderRenamed();
+    assert.equal(log()[0], 'Rename Trip to Lisbon');
+    assert.equal(folder('conv-1'), 'Lisbon', 'not renamed again by the title');
+
+    // The name as typed, when the folder only got a file-system-safe spelling of it.
+    const typed = await f.runtime.resourceMove('owner', { from: 'Lisbon', to: 'Lisbon: day trips' });
+    assert.deepEqual([typed.path, typed.thread?.title], ['Lisbon_ day trips', 'Lisbon: day trips']);
+    await f.runtime.folderRenamed();
+    assert.equal(folder('conv-1'), 'Lisbon_ day trips', 'not renamed again by the title');
+    await f.runtime.resourceMove('owner', { from: 'Lisbon_ day trips', to: 'Lisbon' });
+    assert.equal(title(a), 'Lisbon');
+
+    // A move to another parent with the same name: no rename.
+    await f.runtime.resourceFolder('owner', { parent: '', name: 'Archive' });
+    const moved = await f.runtime.resourceMove('owner', { from: 'Spec v2 (2)', to: 'Archive/Spec v2 (2)' });
+    assert.equal(moved.thread, undefined);
+    assert.equal(title(b), '[Spec](https://example.com/spec) **v2**');
+    // Renamed to the text the title shows: the Markdown title is kept.
+    const same = await f.runtime.resourceMove('owner', { from: 'Archive/Spec v2 (2)', to: 'Archive/Spec v2' });
+    assert.equal(same.thread?.title, '[Spec](https://example.com/spec) **v2**');
+    assert.equal(title(b), '[Spec](https://example.com/spec) **v2**');
+    // Another text, if only by case: the new title, as written.
+    assert.equal((await f.runtime.resourceMove('owner', { from: 'Archive/Spec v2', to: 'Archive/spec v2' })).thread?.title, 'spec v2');
+    assert.equal(title(b), 'spec v2');
+
+    // Files in a conversation folder, a parent of one, and other folders: no title changes.
+    assert.equal((await f.runtime.resourceMove('owner', { from: 'Lisbon/notes.md', to: 'Lisbon/plan.md' })).thread, undefined);
+    assert.equal((await f.runtime.resourceMove('owner', { from: 'Archive', to: 'Old' })).thread, undefined);
+    assert.equal((await f.runtime.resourceMove('owner', { from: 'Spec v2', to: 'Specs' })).thread, undefined);
+    assert.deepEqual([title(a), title(b), folder('conv-2')], ['Lisbon', 'spec v2', 'Old/spec v2']);
+
+    // No loop with uniqueness suffixes: a title that collides gives the folder "Lisbon (2)"; the title stays "Lisbon" and nothing moves again.
+    await f.runtime.resourceMove('owner', { from: 'Old/spec v2', to: 'spec v2' });
+    f.runtime.updateMetadata('owner', b, { title: 'Lisbon' });
+    await f.runtime.folderRenamed();
+    assert.deepEqual([folder('conv-2'), title(b)], ['Lisbon (2)', 'Lisbon']);
+    const commits = log().length;
+    f.runtime.updateMetadata('owner', b, { title: 'Lisbon' });
+    await f.runtime.folderRenamed();
+    assert.equal(log().length, commits, 'the same title again: nothing to do');
+    // A suffix the user types is a name like any other: the title takes it as written, and the folder keeps it.
+    assert.equal((await f.runtime.resourceMove('owner', { from: 'Lisbon (2)', to: 'Lisbon (3)' })).thread?.title, 'Lisbon (3)');
+    await f.runtime.folderRenamed();
+    assert.deepEqual([folder('conv-2'), title(b)], ['Lisbon (3)', 'Lisbon (3)']);
+    assert.equal(log().length, commits + 1, 'one commit, the folder rename');
+
+    // The agent renames its folder in the sandbox: found again and committed at the end of the turn; the title stays.
+    const store = f.store();
+    execFileSync('mv', [join(store.files, 'Lisbon'), join(store.files, 'Renamed by agent')]);
+    const run = { id: randomUUID(), threadId: a, text: 'go', parentRunId: null };
+    await f.runtime.start('owner', run);
+    await until(() => f.runtime.events('owner', run.id, 0).status === 'completed');
+    await until(() => /^Agent changes in /.test(log()[0]!));
+    assert.equal(folder('conv-1'), 'Renamed by agent');
+    assert.ok(store.tree().children.some(n => n.name === 'Renamed by agent' && n.children!.some(c => c.name === 'plan.md')));
+    assert.equal(title(a), 'Lisbon');
+    assert.equal((await f.runtime.resourceTree('owner')).threads['Renamed by agent'], a);
+  } finally { await f.cleanup(); }
+});
+
 test('operations: upload, folder, move, rename, delete and restore are one commit each; chips in old messages still download after moves', async () => {
   const f = fixture();
   try {
@@ -249,6 +330,11 @@ test('HTTP: resources need the session, mutations need Origin and CSRF; previews
     assert.equal((await post('restore', { path: 'Archive/page.html', commit: removed.commit })).status, 409);
     const history = await (await fetch(`${base}/api/v1/resources/history`, { headers: { cookie } })).json() as { message: string }[];
     assert.deepEqual(history.slice(0, 4).map(c => c.message), ['Restore Archive/page.html', 'Delete Archive/page.html', 'Move Alpha/page.html to Archive', 'Create folder Archive']);
+    // Renaming the conversation's folder renames the conversation: the answer has the thread, the list shows it.
+    const renamed = await (await post('move', { from: 'Alpha', to: 'Lisbon' })).json() as { path: string; thread: { id: string; title: string } };
+    assert.deepEqual([renamed.path, renamed.thread.id, renamed.thread.title], ['Lisbon', a, 'Lisbon']);
+    const threads = await (await fetch(`${base}/api/v1/threads`, { headers: { cookie } })).json() as { id: string; title: string }[];
+    assert.equal(threads.find(t => t.id === a)!.title, 'Lisbon');
     // The app may frame previews from itself; nothing else may frame the app.
     const app = await fetch(base);
     assert.match(app.headers.get('content-security-policy')!, /frame-src 'self'/);
