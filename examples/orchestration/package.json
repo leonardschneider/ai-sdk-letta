@@ -1,0 +1,17 @@
+{
+  "name": "@ai-sdk-letta/example-orchestration",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run ai-sdk-letta agents from n8n or Conductor OSS: Conductor workflow definitions, a Conductor worker for long waits, and helper scripts.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --conditions=ai-sdk-letta-source --import tsx --test test/*.test.ts",
+    "worker": "node --conditions=ai-sdk-letta-source --import tsx src/conductor-worker.ts",
+    "register": "node --conditions=ai-sdk-letta-source --import tsx src/register-conductor.ts"
+  },
+  "dependencies": {
+    "@io-orkes/conductor-javascript": "4.0.0"
+  }
+}

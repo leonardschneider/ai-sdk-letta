@@ -1,0 +1,14 @@
+{
+	"node": "n8n-nodes-ai-sdk-letta.aiSdkLetta",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["AI", "Development"],
+	"resources": {
+		"credentialDocumentation": [
+			{ "url": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/n8n-nodes-ai-sdk-letta#credentials" }
+		],
+		"primaryDocumentation": [
+			{ "url": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/n8n-nodes-ai-sdk-letta#readme" }
+		]
+	}
+}

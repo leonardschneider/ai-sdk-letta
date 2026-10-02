@@ -7,6 +7,10 @@ import { runtimeVersions } from './versions.js';
 import { authorOf, servedOrigin, tailscaleIdentity, type TailscaleIdentity, type TeamDirectory, type TeamUser } from './team.js';
 import { atlassianMediaRoute, integrationError, integrationRoutes } from './integrations.js';
 import { LOCAL_USER_ID, type CredentialStore } from 'ai-sdk-letta';
+import { automationAdminRoutes, type AutomationEndpoint, type AutomationService } from './automation.js';
+
+/** The automation API of a server, for the app's Automations dialog. */
+export type AppAutomation = { service: AutomationService; endpoint: AutomationEndpoint };
 
 /**
  * Server-to-server API: bearer token (256-bit hex) plus an owner header, on
@@ -237,6 +241,8 @@ export interface GuiAgentInfo {
   replyMode?: string;
   /** Integrations the agent uses, whose accounts each person connects (`['atlassian']`). */
   integrations?: readonly string[];
+  /** The server serves the automation API: admins manage its tokens (Automations). */
+  automations?: boolean;
 }
 
 /**
@@ -250,7 +256,7 @@ export interface GuiAgentInfo {
  * `@ai-sdk-letta/server` and Letta SDK versions, read once here from their
  * `package.json` ({@link runtimeVersions}).
  */
-export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }) {
+export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
@@ -267,7 +273,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
@@ -277,7 +283,10 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     if (!cookie || !/^[a-f0-9]{64}$/.test(cookie) || !timingSafeEqual(Buffer.from(cookie), Buffer.from(session))) return res.status(401).json({ error: 'session_required' });
     if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== `http://127.0.0.1:${port || req.socket.localPort}` || req.headers['x-csrf-token'] !== csrf)) return res.status(403).json({ error: 'csrf_required' });
     next();
-  }, ...(integrations ? [integrationsApp(integrations)] : []), runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
+  }, ...(integrations ? [integrationsApp(integrations)] : []),
+  // The local user owns the single-user app: they manage its automation tokens.
+  ...(automation ? [express.Router().use('/automations', automationAdminRoutes(automation.service, () => agent.id, { actor: () => ({ id: LOCAL_USER_ID, name: 'You' }), isAdmin: () => true }, automation.endpoint))] : []),
+  runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;
 }
@@ -302,6 +311,8 @@ export interface TeamAppOptions {
   credentials?: CredentialStore;
   /** Tests: the `fetch` used to reach Atlassian. */
   integrationOptions?: { fetch?: typeof fetch };
+  /** The automation API: each agent's admins manage its tokens at `/api/agents/<id>/automations`. */
+  automation?: AppAutomation;
   /**
    * Origins the app is served under by `tailscale serve`, for example
    * `https://machine.tailnet.ts.net` (or `http://machine.tailnet.ts.net:8443`
@@ -362,7 +373,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}) }; };
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
   app.get('/api/session', (req, res) => {
     const { identity, user } = who(req)!;
@@ -386,6 +397,14 @@ export function teamApp(options: TeamAppOptions) {
   // Each person's own integration accounts: only signed-in people with a user record (members of some agent).
   const integrations = options.credentials ? { store: options.credentials, userOf: (req: express.Request) => actor(req).id, ...(options.integrationOptions ? { options: options.integrationOptions } : {}) } : undefined;
   if (integrations) app.use('/api', (req, res, next) => { if (req.path.startsWith('/integrations/') && !who(req)?.user) return res.status(404).json({ error: 'not_found' }); next(); }, integrationsApp(integrations));
+  if (options.automation) {
+    const automation = options.automation;
+    const AGENT = Symbol('automation agent');
+    const routes = automationAdminRoutes(automation.service, r => (r as unknown as Record<symbol, string>)[AGENT]!, {
+      actor: r => { const user = actor(r); return { id: user.id, name: user.name, login: user.login }; }, isAdmin: r => isAdmin(r),
+    }, automation.endpoint);
+    app.use('/api/agents/:agent/automations', member, (req, res, next) => { (req as unknown as Record<symbol, string>)[AGENT] = String(req.params.agent); routes(req, res, next); });
+  }
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
   // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
   const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();

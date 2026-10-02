@@ -25,6 +25,15 @@ export type RunImage = { mediaType: string; bytes: number; sha256: string };
  */
 export type RunAuthor = { id: string; login: string; name: string; avatar?: string };
 /**
+ * What started a turn that no person typed: an automation (a workflow in n8n
+ * or Conductor, a script) through the automation API, or a task the agent
+ * scheduled itself. `via` is what the browser app shows ("via n8n"); `name`
+ * the automation's (token's) name. Never a secret.
+ */
+export type RunSource = { kind: 'automation' | 'schedule'; via: 'n8n' | 'conductor' | 'api'; tokenId: string; name: string };
+/** How an automation's turn runs: unattended (nobody is asked), with the tools pre-approved for it and the reply mode it asks for. */
+export type RunAutomation = { source: RunSource; preApproved: readonly string[]; onBehalfOf?: string; replyMode?: ReplyMode };
+/**
  * A single user turn and the events observed while it ran. In a shared runtime
  * a run may first wait in its conversation's queue (`queued`); `author` names
  * who wrote it.
@@ -37,7 +46,17 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** Queued messages delivered together as one turn: on the first (which carries the turn's events), every message's run ID in order. */
   batch?: string[];
   /** On the other messages of such a turn: the first message's run ID. */
-  batchOf?: string };
+  batchOf?: string;
+  /** Started by an automation (see {@link RunSource}); such turns are unattended. */
+  source?: RunSource;
+  /** Unattended turns: tools whose approvals are given in advance, and by whom. */
+  unattended?: { preApproved: string[]; onBehalfOf?: string };
+  /** The reply mode an automation asked for (instead of the conversation's). */
+  replyModeOverride?: ReplyMode;
+  /** When the turn ended (completed, failed, cancelled or withdrawn). */
+  endedAt?: string;
+  /** An unattended turn needed a person: the first refused call (`approval_required` or `question_required`) and its tool. The turn itself ended normally. */
+  refused?: { code: string; tool: string } };
 /** Metadata of a file sent with a run (as stored in the conversation's folder). */
 export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
 /**
@@ -120,7 +139,7 @@ export class RuntimeFault extends Error {
 }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 /** Only app-defined, fixed failure codes (e.g. user_denied) are surfaced; never free-form error text. */
-const failureReasons = new Set(['user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
+const failureReasons = new Set(['approval_required', 'question_required', 'unattended_stopped', 'user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
 /** HTTP status for a refused file. */
 const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : ['conversation_files_full', 'files_too_many', 'file_exists', 'resources_full'].includes(code) ? 409 : code === 'resources_busy' ? 503 : 400;
 /** A FileInputError as a fixed-code RuntimeFault; anything else unchanged. */
@@ -162,7 +181,7 @@ export function displayRun(run: Run): UIMessage[] {
     const part = parts[i];
     if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: `Turn ${run.status}; execution not confirmed.` };
   }
-  const metadata = run.startedAt || run.author ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}) } } : {};
+  const metadata = run.startedAt || run.author || run.source ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}) } } : {};
   // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
   // Files are shown by the same "Attached: ..." note the agent received.
   const note = run.files?.length ? attachmentNote(run.files) : '';
@@ -171,6 +190,10 @@ export function displayRun(run: Run): UIMessage[] {
   return [{ id: `${run.id}-user`, role: 'user', parts: user, ...metadata }, { id: `${run.id}-assistant`, role: 'assistant', parts }];
 }
 
+/** Run fields of an automation's turn. */
+const automationFields = (automation?: RunAutomation): Partial<Run> => automation ? { source: { ...automation.source }, unattended: { preApproved: [...automation.preApproved], ...(automation.onBehalfOf ? { onBehalfOf: automation.onBehalfOf } : {}) }, ...(automation.replyMode ? { replyModeOverride: automation.replyMode } : {}) } : {};
+/** What the browser may know about a run's source (no token ID). */
+export const publicSource = (source: RunSource) => ({ kind: source.kind, via: source.via, name: source.name });
 const sameImages = (a: RunImage[] = [], b: RunImage[] = []) => a.length === b.length && a.every((image, index) => image.sha256 === b[index]!.sha256);
 const sameUploads = (a: string[] = [], b: string[] = []) => a.length === b.length && a.every((id, index) => id === b[index]);
 
@@ -466,7 +489,16 @@ export class ThreadRuntime {
    * messages sent as one) is shown as its messages again, each with its author.
    */
   private annotate(threadId: string, messages: UIMessage[]): UIMessage[] {
-    if (!this.queueing) return messages;
+    if (!this.queueing) {
+      // Single-user runtimes tag only automation turns (their OTID is the run ID), to show what started them.
+      const sources = new Map(this.state.runs.filter(r => r.threadId === threadId && r.source).map(r => [r.id, r.source!]));
+      if (!sources.size) return messages;
+      return messages.map(message => {
+        const otid = (message.metadata as { otid?: unknown } | undefined)?.otid;
+        const source = message.role === 'user' && typeof otid === 'string' ? sources.get(otid) : undefined;
+        return source ? { ...message, metadata: { ...(message.metadata as object), source: publicSource(source) } } : message;
+      });
+    }
     const runs = new Map(this.state.runs.filter(r => r.threadId === threadId).map(r => [r.id, r]));
     return this.markListened(runs, messages.flatMap(message => {
       const otid = (message.metadata as { otid?: unknown } | undefined)?.otid;
@@ -475,7 +507,7 @@ export class ThreadRuntime {
       const members = run.batch?.map(id => runs.get(id)).filter((r): r is Run => !!r && r.threadId === threadId);
       if (members && members.length > 1) return members.map((member, index): UIMessage => ({ id: `${message.id}-${index}`, role: 'user', parts: [{ type: 'text', text: member.input }],
         metadata: { ...(message.metadata as object), otid: member.id, ...(member.author ? { author: member.author } : {}) } }));
-      return [run.author ? { ...message, metadata: { ...(message.metadata as object), author: run.author } } : message];
+      return [run.author || run.source ? { ...message, metadata: { ...(message.metadata as object), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}) } } : message];
     }));
   }
   /**
@@ -535,7 +567,7 @@ export class ThreadRuntime {
   }
   /** Turns waiting in a thread's queue, oldest first (shared runtimes). */
   private queueOf(threadId: string) {
-    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}), ...(this.sending.has(r.id) ? { sending: true } : {}),
+    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}), ...(r.source ? { source: publicSource(r.source) } : {}), ...(this.sending.has(r.id) ? { sending: true } : {}),
       ...(r.images?.length ? { images: r.images.length } : {}), ...(r.uploads?.length ? { files: r.uploads.length } : {}), ...(r.queuedAt ? { queuedAt: r.queuedAt } : {}) }));
   }
   async view(owner: string, id: string): Promise<Awaited<ReturnType<ThreadRuntime['viewOnce']>>> {
@@ -554,7 +586,7 @@ export class ThreadRuntime {
     if (active && lane.current) return {
       messages: this.annotate(id, lane.current.history.filter(m => m.id !== 'session-status')),
       lastRunId: latest?.id ?? null,
-      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}),
+      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}), ...(active.source ? { source: publicSource(active.source) } : {}),
         // A combined turn: the other messages sent with it, in order.
         ...(active.batch && active.batch.length > 1 ? { batch: active.batch.slice(1).flatMap(id => { const r = this.state.runs.find(x => x.id === id); return r ? [{ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}) }] : []; }) } : {}), ...(active.startedAt && this.queueing ? { startedAt: active.startedAt } : {}), ...(active.images?.length ? { images: active.images.length } : {}), ...(active.files?.length ? { files: active.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
       status: 'running', ...queue,
@@ -752,7 +784,7 @@ export class ThreadRuntime {
    * told to the agent), and a turn sent while another of its conversation is
    * running or waiting is queued (status `queued`) instead of refused.
    */
-  async start(owner: string, input: RunInput, author?: RunAuthor) {
+  async start(owner: string, input: RunInput, author?: RunAuthor, automation?: RunAutomation) {
     this.authorize(owner);
     if (!input || typeof input !== 'object' || !uuid.test(input.id) || typeof input.text !== 'string' || input.text.length > MAX_INPUT_CHARACTERS || (input.parentRunId !== null && !uuid.test(input.parentRunId)) || (input.images !== undefined && !Array.isArray(input.images))
       || (input.files !== undefined && (!Array.isArray(input.files) || input.files.some(id => typeof id !== 'string' || !uuid.test(id))))) throw new RuntimeFault('invalid_input', 400);
@@ -767,38 +799,60 @@ export class ThreadRuntime {
     const thread = this.thread(owner, input.threadId);
     const previous = this.state.runs.find(r => r.id === input.id);
     if (previous) {
-      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || !sameUploads(previous.uploads, uploadIds) || (!this.queueing && previous.parentRunId !== input.parentRunId) || previous.author?.id !== author?.id) throw new RuntimeFault('id_conflict');
+      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || !sameUploads(previous.uploads, uploadIds) || (!this.queueing && previous.parentRunId !== input.parentRunId) || previous.author?.id !== author?.id || previous.source?.tokenId !== automation?.source.tokenId) throw new RuntimeFault('id_conflict');
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
     if (this.queueing && author) this.stopTyping(thread.id, author.id);
-    if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author);
+    if (automation && (automation.replyMode !== undefined && !(['always', 'when-addressed', 'agent-decides'] as string[]).includes(automation.replyMode))) throw new RuntimeFault('invalid_input', 400);
+    if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author, automation);
     const latest = this.delivered(thread.id).at(-1);
     if (input.parentRunId !== (latest?.id ?? null)) throw new RuntimeFault('history_conflict');
     if (latest && latest.status !== 'completed') throw new RuntimeFault('delivery_uncertain');
-    if (this.state.runs.length >= 200) throw new RuntimeFault('capacity_reached');
+    if (!this.retain(ThreadRuntime.MAX_RUNS)) throw new RuntimeFault('capacity_reached');
     // Re-validate staged uploads (exist, unchanged, within the per-message count) before opening anything.
     let staged: ReturnType<UploadStaging['load']> = [];
     try { staged = uploadIds.length ? this.uploads!.load(uploadIds) : []; } catch (error) { throw fileFault(error); }
     const lane = this.lane(thread.id);
     return this.exclusive(lane, async () => {
-      const run = await this.launch(lane, thread, { id: input.id, threadId: input.threadId, input: input.text, parentRunId: input.parentRunId, status: 'running', events: [] }, images, input.images?.map(image => image?.name), staged, uploadIds, imageMetadata);
+      const run = await this.launch(lane, thread, { id: input.id, threadId: input.threadId, input: input.text, parentRunId: input.parentRunId, status: 'running', events: [], ...automationFields(automation) }, images, input.images?.map(image => image?.name), staged, uploadIds, imageMetadata);
       return { id: run.id, status: run.status };
     });
   }
-  /** Most runs a shared runtime keeps (a single-owner runtime keeps 200). */
+  /** Most runs a shared runtime keeps (a single-owner runtime keeps {@link MAX_RUNS}). Older finished turns are forgotten first (see {@link retain}). */
   static readonly MAX_SHARED_RUNS = 2000;
-  private enqueue(thread: Thread, input: RunInput, images: DecodedImage[], imageMetadata: RunImage[], uploadIds: string[], author?: RunAuthor) {
+  /** Most runs a single-owner runtime keeps. */
+  static readonly MAX_RUNS = 200;
+  /**
+   * Make room for one more run: when `limit` is reached, forget the oldest
+   * finished runs (never a conversation's latest delivered turn, nor a
+   * running or queued one), a tenth of the limit at a time. Their messages
+   * stay in Letta history; only the runtime's record of them (author shown
+   * above old messages, source badge, transport events) goes.
+   * @returns false if nothing can be forgotten
+   */
+  private retain(limit: number): boolean {
+    if (this.state.runs.length < limit) return true;
+    const keep = new Set<string>();
+    for (const thread of this.state.threads) { const latest = this.delivered(thread.id).at(-1); if (latest) { keep.add(latest.id); for (const id of latest.batch ?? []) keep.add(id); if (latest.batchOf) keep.add(latest.batchOf); } }
+    const finished = this.state.runs.filter(r => !keep.has(r.id) && r.status !== 'running' && r.status !== 'queued' && !this.sending.has(r.id));
+    const drop = new Set(finished.slice(0, Math.max(1, Math.ceil(limit / 10))).map(r => r.id));
+    if (!drop.size) return false;
+    this.state.runs = this.state.runs.filter(r => !drop.has(r.id));
+    this.save();
+    return this.state.runs.length < limit;
+  }
+  private enqueue(thread: Thread, input: RunInput, images: DecodedImage[], imageMetadata: RunImage[], uploadIds: string[], author?: RunAuthor, automation?: RunAutomation) {
     const latest = this.delivered(thread.id).at(-1);
     // A conversation whose last turn did not finish stays read-only; queued turns behind it are never sent.
     if (latest && latest.status !== 'completed' && latest.status !== 'running') throw new RuntimeFault('delivery_uncertain');
     if (this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued').length >= MAX_QUEUED) throw new RuntimeFault('queue_full', 429);
-    if (this.state.runs.length >= ThreadRuntime.MAX_SHARED_RUNS) throw new RuntimeFault('capacity_reached');
+    if (!this.retain(ThreadRuntime.MAX_SHARED_RUNS)) throw new RuntimeFault('capacity_reached');
     // Uploads are checked now (exist, unchanged) and stored when the turn is sent.
     try { if (uploadIds.length) this.uploads!.load(uploadIds); } catch (error) { throw fileFault(error); }
     const queuedAt = new Date().toISOString();
     const run: Run = { id: input.id, threadId: thread.id, input: input.text, ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(uploadIds.length ? { uploads: uploadIds } : {}),
-      parentRunId: input.parentRunId, status: 'queued', events: [], queuedAt, ...(author ? { author } : {}) };
+      parentRunId: input.parentRunId, status: 'queued', events: [], queuedAt, ...(author ? { author } : {}), ...automationFields(automation) };
     this.queued.set(run.id, { images, names: input.images?.map(image => image?.name) ?? [], uploads: uploadIds });
     thread.lastActivityAt = queuedAt;
     this.state.runs.push(run); this.save(); this.changed();
@@ -824,7 +878,7 @@ export class ThreadRuntime {
   /** Withdraw a queued run that was never sent. */
   private withdraw(run: Run, code: string) {
     this.queued.delete(run.id);
-    run.status = 'cancelled'; run.notSent = true;
+    run.status = 'cancelled'; run.notSent = true; run.endedAt = new Date().toISOString();
     this.emit(run, 'failed', { code });
   }
   /**
@@ -834,7 +888,8 @@ export class ThreadRuntime {
    * turn. Messages with images or files are always sent on their own.
    */
   private batchOf(thread: Thread, run: Run): Run[] {
-    const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length;
+    // Automation turns are always sent on their own: they run unattended, with their own reply mode and pre-approvals.
+    const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length && !r.source;
     if (this.replyMode === undefined || this.memberCount() < 2 || !textOnly(run)) return [run];
     const batch = [run];
     for (const next of this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued' && r !== run)) {
@@ -889,7 +944,7 @@ export class ThreadRuntime {
     const startedAt = new Date().toISOString();
     // Reply mode of this turn (sessions that can listen): a mention always gets a reply.
     const turn = [run, ...others];
-    const replyMode = this.replyMode !== undefined && session.agent.listening ? this.modeOf(thread) : undefined;
+    const replyMode = this.replyMode !== undefined && session.agent.listening ? run.replyModeOverride ?? this.modeOf(thread) : undefined;
     const addressed = !!this.agentName && turn.some(r => mentionsAgent(r.input, this.agentName!));
     Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt, ...(replyMode ? { replyMode } : {}), ...(others.length ? { batch: turn.map(r => r.id) } : {}) });
     // The other messages of a combined turn are sent with it: they follow its state, and its events are the turn's.
@@ -966,31 +1021,38 @@ export class ThreadRuntime {
       const shared = this.queueing ? { otid: run.id, ...actor,
         ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
         ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
+      // Automation turns are unattended: nothing prompts anyone (see UnattendedPolicy), and they carry their run ID to show their source in history.
+      const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via } } : {};
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...shared }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared });
+        ? { prompt: content, abortSignal: control.signal, ...shared, ...unattended }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared, ...unattended });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
         else if (part.type === 'tool-call') this.emit(run, 'tool_started', { toolCallId: part.toolCallId, name: part.toolName, input: part.input, execution: 'external' });
         else if (part.type === 'tool-result') this.emit(run, 'tool_completed', { toolCallId: part.toolCallId, name: part.toolName, output: part.output, execution: 'external' });
-        else if (part.type === 'tool-error') this.emit(run, 'tool_failed', { toolCallId: part.toolCallId, name: part.toolName, code: 'tool_failed', ...toolFailureReason(part.error), execution: 'external' });
+        else if (part.type === 'tool-error') {
+          const failure = toolFailureReason(part.error);
+          this.emit(run, 'tool_failed', { toolCallId: part.toolCallId, name: part.toolName, code: 'tool_failed', ...failure, execution: 'external' });
+          // An unattended turn needed a person: remember the first such call (the agent then ends the turn).
+          if (run.source && !run.refused && (failure.reason === 'approval_required' || failure.reason === 'question_required')) { run.refused = { code: failure.reason, tool: part.toolName }; this.emit(run, 'refused', { ...run.refused }); }
+        }
         else if (part.type === 'error' || part.type === 'abort') throw new RuntimeFault('runtime_failed');
       }
       if (lane.pending?.runId === run.id) throw new RuntimeFault('interaction_incomplete');
       if (control.signal.aborted || await result.finishReason !== 'stop') throw new RuntimeFault('runtime_failed');
       const letta = (await result.providerMetadata)?.letta as { listened?: unknown; reason?: unknown } | undefined;
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
-      run.status = 'completed'; this.compact(run); this.emit(run, 'completed', {});
+      run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
-      run.status = control.signal.aborted ? 'cancelled' : 'failed';
+      run.status = control.signal.aborted ? 'cancelled' : 'failed'; run.endedAt = new Date().toISOString();
       const code = timedOut ? 'timed_out' : run.status === 'cancelled' ? 'cancelled' : error instanceof RuntimeFault && error.message === 'interaction_incomplete' ? 'interaction_incomplete' : 'runtime_failed';
       if (lane.pending?.runId === run.id) this.emit(run, 'interaction_ended', { id: lane.pending.request.id, code });
       this.emit(run, 'failed', { code });
     } finally {
       // The other messages of a combined turn end with it (they were delivered together).
       for (const other of turn.others) {
-        other.status = run.status;
+        other.status = run.status; other.endedAt = run.endedAt;
         if (run.status === 'completed') this.emit(other, 'completed', {}); else this.emit(other, 'failed', { code: String(run.events.at(-1)?.data.code ?? 'runtime_failed') });
       }
       // Keep the pre-run display snapshot current for browser reconnects without
@@ -1065,6 +1127,54 @@ export class ThreadRuntime {
     const lead = run.batchOf ?? id;
     const lane = this.laneOfRun(lead);
     if (lane?.active?.run.id === lead) lane.active.control.abort();
+  }
+  /**
+   * Files in the agent's resources that were created or changed between two
+   * times (for example, while a run ran), newest first, at most `limit`.
+   * Hidden entries are never listed.
+   */
+  async changedFiles(owner: string, from: string, to: string, limit = 50): Promise<{ path: string; bytes: number; modifiedAt: string }[]> {
+    this.authorize(owner);
+    if (!this.host.attachmentsRoot || !this.state.threads.some(t => t.agentId)) return [];
+    const start = Date.parse(from) - 1000, end = Date.parse(to) + 2000;
+    return this.withResources(owner, store => {
+      const found: { path: string; bytes: number; modifiedAt: string }[] = [];
+      const walk = (nodes: ResourceTree['children']) => { for (const node of nodes) {
+        if (node.type === 'folder') walk(node.children ?? []);
+        else { const time = Date.parse(node.modifiedAt); if (time >= start && time <= end) found.push({ path: node.path, bytes: node.bytes ?? 0, modifiedAt: node.modifiedAt }); }
+      } };
+      walk(store.tree().children);
+      return found.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, limit);
+    });
+  }
+  /** A run's record (a copy), for the automation service. */
+  runRecord(owner: string, id: string): Run | undefined {
+    this.authorize(owner);
+    const run = this.state.runs.find(r => r.id === id);
+    return run ? structuredClone(run) : undefined;
+  }
+  /** The thread a conversation title names (exact, not archived, ready), newest first. */
+  threadByTitle(owner: string, title: string) {
+    this.authorize(owner);
+    const thread = this.state.threads.filter(t => t.owner === owner && t.title === title && !t.archived && t.state === 'ready').sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))[0];
+    return thread ? this.summary(thread) : undefined;
+  }
+  /** A thread's summary, or undefined when it does not exist (or is not ready). */
+  threadSummary(owner: string, id: string) {
+    this.authorize(owner);
+    const thread = this.state.threads.find(t => t.id === id && t.owner === owner);
+    return thread ? this.summary(thread) : undefined;
+  }
+  /** The thread's Letta conversation ID (for tools that schedule work in it). */
+  threadOfConversation(owner: string, conversationId: string) {
+    this.authorize(owner);
+    return this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId && t.state === 'ready')?.id;
+  }
+  /** The latest turn of a thread that reached the agent, and its status (what a new turn's `parentRunId` must name). */
+  latestRun(owner: string, threadId: string): { id: string; status: Run['status'] } | undefined {
+    this.thread(owner, threadId);
+    const latest = this.delivered(threadId).at(-1);
+    return latest ? { id: latest.id, status: latest.status } : undefined;
   }
   private closing = false;
   async close() {

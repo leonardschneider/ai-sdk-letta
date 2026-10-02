@@ -140,6 +140,9 @@ export function toolLabel(name: string, phase: ToolPhase, result?: unknown, args
   const reason = phase === 'error' ? failureReason(result) : undefined;
   if (reason === 'user_denied') return COMMAND_TOOLS.has(name) && commandPreview(args.command) ? `Denied: \`${commandPreview(args.command)}\`` : `Denied: ${friendlyName(name)}`;
   if (reason === 'approval_cancelled') return `Cancelled: ${friendlyName(name)}`;
+  if (reason === 'approval_required') return `Needed approval: ${friendlyName(name)}`;
+  if (reason === 'question_required') return 'Needed an answer (unattended)';
+  if (reason === 'unattended_stopped') return `Skipped: ${friendlyName(name)}`;
   const shell = commandLabel(name, phase, args, result);
   if (shell) return shell;
   const file = fileToolLabel(name, phase, args);
@@ -179,6 +182,9 @@ const reasonText: Record<string, string> = {
   interrupted: 'The server restarted before this finished; it was not replayed.',
   failed: 'The turn failed before this finished.',
   delivery_uncertain: 'Delivery could not be confirmed; nothing was replayed.',
+  approval_required: 'Not run: this turn was started by an automation and nobody could approve it. Pre-approve the tool for that automation, or do it here.',
+  question_required: 'Not asked: this turn was started by an automation and nobody could answer.',
+  unattended_stopped: 'Not run: the automation’s turn had already stopped for approval.',
 };
 export function failureText(result: unknown): string {
   const reason = failureReason(result);

@@ -9,7 +9,8 @@ import { assertHistorySettled, historyPage, listConversations, loadHistory, proj
 import { allowMemoryTool, memoryCommitCommand } from './memory.js';
 import { listNavigationEntries, type NavigationSource } from './navigation.js';
 import { ToolInteractions } from './interactions.js';
-import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge } from './tools.js';
+import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge, type UnattendedPolicy } from './tools.js';
+import { SCHEDULER_CONTEXT, schedulingEnabled, type TaskScheduler } from './scheduling.js';
 import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
@@ -62,6 +63,12 @@ export interface OpenAgentOptions {
    * instead, and `null` means "nobody" (unattended runs). @default LOCAL_ACTOR
    */
   defaultActor?: TurnActor | null;
+  /**
+   * Where the `schedule_task` tool creates its jobs (an orchestrator adapter;
+   * the server passes one when it is configured). Without it the tool answers
+   * `scheduler_unavailable`.
+   */
+  scheduler?: TaskScheduler;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -166,7 +173,7 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -290,6 +297,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         let turnSignal: AbortSignal | undefined;
         // Who the running turn acts for (read by tools that use personal credentials).
         let turnActor: TurnActor | undefined;
+        // Unattended turns (automations): nobody is asked; see UnattendedPolicy.
+        let turnUnattended: UnattendedPolicy | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
         // Resources: every file of the agent in one git-backed folder, one folder
@@ -311,7 +320,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         }
         const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}),
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
-        const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}) });
+        const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
+        const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
+          ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;
@@ -324,6 +335,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
           toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
+          unattended: () => turnUnattended,
           context: toolContext,
           sandbox: () => shell?.session,
         });
@@ -362,8 +374,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         agent = new LettaAgent<TOOLS>({
           id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; } } };
+            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended;
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },

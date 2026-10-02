@@ -44,6 +44,17 @@ export function knownAuthor(message: Pick<UIMessage, 'metadata'>): MessageAuthor
 export function withAuthor(message: ThreadMessageLike, author: MessageAuthor | undefined): ThreadMessageLike {
   return author ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, author } } } : message;
 }
+/** What started a user turn that no person typed (an automation, or a task the agent scheduled). */
+export type MessageSource = { kind: 'automation' | 'schedule'; via: 'n8n' | 'conductor' | 'api'; name: string };
+/** The source recorded by the server on a history message, when it is well formed. */
+export function knownSource(message: Pick<UIMessage, 'metadata'>): MessageSource | undefined {
+  const value = (message.metadata as { source?: Partial<MessageSource> } | undefined)?.source;
+  return value && (value.kind === 'automation' || value.kind === 'schedule') && (value.via === 'n8n' || value.via === 'conductor' || value.via === 'api') && typeof value.name === 'string'
+    ? { kind: value.kind, via: value.via, name: value.name.slice(0, 80) } : undefined;
+}
+export function withSource(message: ThreadMessageLike, source: MessageSource | undefined): ThreadMessageLike {
+  return source ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, source } } } : message;
+}
 
 /** A turn the agent listened to without replying: its private note (the agent's own words), if any. */
 export type Listened = { reason?: string };
@@ -85,7 +96,8 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     const result = text.match(/<result>([\s\S]*?)<\/result>/)?.[1];
     if (id && result) { try { completions.set(id, JSON.parse(result)); } catch { /* Unstructured notifications stay hidden. */ } }
   }
-  const converted = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && !message.parts.some(p => p.type === 'text' && /^\s*<(task-notification|system-reminder)>/.test(p.text))).map(message => withAuthor(withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
+  const visible = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && !message.parts.some(p => p.type === 'text' && /^\s*<(task-notification|system-reminder)>/.test(p.text)));
+  const converted = visible.map(message => withAuthor(withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
     if (part.type === 'reasoning' && message.role === 'assistant') return part.text.trim() ? [{ type: 'reasoning', text: part.text }] : [];
     if ((part.type as string) === LISTENED && message.role === 'assistant') return [{ type: LISTENED, data: (part as { data?: unknown }).data ?? {} } as unknown as Part];
     if (part.type === 'text') {
@@ -103,7 +115,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined));
   return mergeAssistantRuns(converted).map(markListened);
 }
 

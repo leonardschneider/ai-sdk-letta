@@ -1,0 +1,98 @@
+{
+  "name": "ai_sdk_letta_run_turn",
+  "version": 1,
+  "description": "Run one turn of an ai-sdk-letta agent and wait for the reply, with Conductor's own HTTP tasks (no worker). The token comes from the CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN environment variable of the Conductor server.",
+  "schemaVersion": 2,
+  "ownerEmail": "ai-sdk-letta@example.invalid",
+  "inputParameters": [
+    "serverUrl",
+    "text",
+    "title"
+  ],
+  "timeoutSeconds": 1800,
+  "timeoutPolicy": "TIME_OUT_WF",
+  "tasks": [
+    {
+      "name": "start_turn",
+      "taskReferenceName": "start",
+      "type": "HTTP",
+      "description": "Start the turn. Idempotent: a retried task returns the same run. Waits up to 50 s for a quick reply.",
+      "inputParameters": {
+        "uri": "${workflow.input.serverUrl}/v1/automation/runs?wait=50",
+        "method": "POST",
+        "headers": {
+          "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}",
+          "Idempotency-Key": "${workflow.workflowId}"
+        },
+        "body": {
+          "text": "${workflow.input.text}",
+          "title": "${workflow.input.title}"
+        },
+        "accept": "application/json",
+        "contentType": "application/json",
+        "connectionTimeOut": 5000,
+        "readTimeOut": 60000
+      },
+      "retryCount": 3
+    },
+    {
+      "name": "wait_for_turn",
+      "taskReferenceName": "wait",
+      "type": "HTTP_POLL",
+      "description": "Poll the run until it ended (the server's minimum interval applies, 60 s by default).",
+      "inputParameters": {
+        "http_request": {
+          "uri": "${workflow.input.serverUrl}/v1/automation/runs/${start.output.response.body.id}",
+          "method": "GET",
+          "headers": {
+            "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
+          },
+          "accept": "application/json",
+          "terminationCondition": "(function(){ var s = $.output.response.body.status; return s === 'completed' || s === 'failed' || s === 'cancelled'; })();",
+          "pollingInterval": 60,
+          "pollingStrategy": "FIXED",
+          "maxPollCount": 30,
+          "connectionTimeOut": 5000,
+          "readTimeOut": 30000
+        }
+      }
+    },
+    {
+      "name": "check_turn",
+      "taskReferenceName": "check",
+      "type": "SWITCH",
+      "evaluatorType": "value-param",
+      "expression": "status",
+      "inputParameters": {
+        "status": "${wait.output.response.body.status}"
+      },
+      "decisionCases": {
+        "completed": []
+      },
+      "defaultCase": [
+        {
+          "name": "turn_failed",
+          "taskReferenceName": "turn_failed",
+          "type": "TERMINATE",
+          "inputParameters": {
+            "terminationStatus": "FAILED",
+            "terminationReason": "${wait.output.response.body.error.code}: ${wait.output.response.body.error.message}",
+            "workflowOutput": {
+              "error": "${wait.output.response.body.error}",
+              "runId": "${wait.output.response.body.id}",
+              "conversation": "${wait.output.response.body.conversation}"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "outputParameters": {
+    "runId": "${wait.output.response.body.id}",
+    "status": "${wait.output.response.body.status}",
+    "reply": "${wait.output.response.body.text}",
+    "conversation": "${wait.output.response.body.conversation}",
+    "tools": "${wait.output.response.body.tools}",
+    "files": "${wait.output.response.body.files}"
+  }
+}

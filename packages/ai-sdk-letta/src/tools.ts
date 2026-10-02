@@ -104,7 +104,37 @@ export interface ToolBridgeOptions {
    * `stay_silent`, which a long-lived shared conversation calls on many turns.
    */
   uncounted?: readonly string[];
+  /**
+   * The running turn is unattended (started by an automation, nobody is
+   * watching), read at call time. Its calls never prompt anyone: a call that
+   * needs approval is refused with `approval_required`, unless its tool is
+   * pre-approved; an `ask_user` question is refused with `question_required`.
+   * The tool is never executed, and every later call of the same turn is
+   * refused with `unattended_stopped`, so the agent ends the turn.
+   */
+  unattended?: () => UnattendedPolicy | undefined;
 }
+
+/**
+ * How an unattended turn treats approvals (see {@link ToolBridgeOptions.unattended}).
+ * Pass the same object for the whole turn: the bridge remembers a refusal per object.
+ *
+ * - `preApproved`: tools whose `'ask'` calls run without asking. `'deny'`
+ *   tools stay denied, and questions (`ask_user`) can never be pre-approved.
+ * - `onBehalfOf`: the person who pre-approved them. A call that uses
+ *   someone's own account (`PreparedCall.onBehalfOf`, for example their
+ *   Atlassian token) runs without asking only when it is that same person.
+ * - `source`: what started the turn (for example `n8n`), told to the agent.
+ */
+export type UnattendedPolicy = { readonly preApproved: readonly string[]; readonly onBehalfOf?: string; readonly source?: string };
+/** Fixed codes of calls refused in an unattended turn. */
+export const UNATTENDED_CODES = Object.freeze(['approval_required', 'question_required', 'unattended_stopped'] as const);
+export type UnattendedCode = typeof UNATTENDED_CODES[number];
+const UNATTENDED_TEXT: Record<UnattendedCode, string> = {
+  approval_required: 'Not run: this turn is unattended (started by an automation) and nobody can approve this call. Do not retry and do not call other tools. End the turn now with one short sentence saying which action needs approval.',
+  question_required: 'Not asked: this turn is unattended (started by an automation) and nobody can answer questions. Do not call other tools. End the turn now with one short sentence saying what you would need to know.',
+  unattended_stopped: 'Not run: an earlier call of this unattended turn needed a person. End the turn now.',
+};
 
 /** One item of a tool result as sent to Letta (the Agent SDK's `AgentToolResultContent`): text, or a base64 image. */
 type ToolOutput = { content: AgentToolResultContent[]; isError: boolean };
@@ -175,8 +205,17 @@ export function createToolBridge(options: ToolBridgeOptions) {
     options.onTool?.(event);
   };
   const denied = (name: string, id: string, code: string): ToolOutput => { emit(name, id, 'denied', Date.now(), code); return { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true }; };
+  // Unattended turns whose calls were already refused once (by policy object, so per turn).
+  const stopped = new WeakSet<UnattendedPolicy>();
+  const refuse = (policy: UnattendedPolicy, name: string, id: string, code: UnattendedCode): ToolOutput => {
+    stopped.add(policy);
+    emit(name, id, 'denied', Date.now(), code);
+    return { content: [{ type: 'text', text: JSON.stringify({ error: code, tool: name, message: UNATTENDED_TEXT[code] }) }], isError: true };
+  };
   const execute = async (name: string, id: string, args: unknown, sdkSignal?: AbortSignal): Promise<ToolOutput> => {
     if (!allowed.has(name)) return denied(name, id, 'tool_denied');
+    const unattended = options.unattended?.();
+    if (unattended && stopped.has(unattended)) return refuse(unattended, name, id, 'unattended_stopped');
     const counted = !options.uncounted?.includes(name);
     if (seen.has(id) || uncountedSeen.has(id) || (counted && seen.size >= 100) || uncountedSeen.size >= 100_000) return denied(name, id, 'duplicate_or_limit');
     (counted ? seen : uncountedSeen).add(id);
@@ -212,7 +251,15 @@ export function createToolBridge(options: ToolBridgeOptions) {
       }
     }
     const asks = permissions[name] === 'ask' || prepared.approval === 'required';
-    if (asks || name === ASK_USER_TOOL) {
+    let preApproved = false;
+    if (unattended && (asks || name === ASK_USER_TOOL)) {
+      // Nobody can answer: never prompt. A pre-approved tool runs, unless the call uses someone else's account.
+      if (name === ASK_USER_TOOL) return refuse(unattended, name, id, 'question_required');
+      if (!unattended.preApproved.includes(name) || (prepared.onBehalfOf !== undefined && prepared.onBehalfOf !== unattended.onBehalfOf)) return refuse(unattended, name, id, 'approval_required');
+      emit(name, id, 'approved', started, 'pre_approved');
+      preApproved = true;
+    }
+    if ((asks || name === ASK_USER_TOOL) && !preApproved) {
       try {
         signal.throwIfAborted();
         if (!options.interactions) return denied(name, id, 'interaction_unavailable');
@@ -232,7 +279,7 @@ export function createToolBridge(options: ToolBridgeOptions) {
         }
       } catch { return denied(name, id, signal.aborted ? 'tool_cancelled' : 'interaction_unavailable'); }
     }
-    emit(name, id, 'start', started, asks ? 'approved_once' : 'static_allow');
+    emit(name, id, 'start', started, preApproved ? 'pre_approved' : asks ? 'approved_once' : 'static_allow');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: (() => void) | undefined;
     try {

@@ -1,0 +1,24 @@
+[
+  {
+    "name": "ai_sdk_letta_turn",
+    "description": "One turn of an ai-sdk-letta agent (worker: src/conductor-worker.ts). Not retried on failure: a failed turn is a fact (approval_required, question_required), not a glitch.",
+    "ownerEmail": "ai-sdk-letta@example.invalid",
+    "retryCount": 0,
+    "timeoutSeconds": 1800,
+    "responseTimeoutSeconds": 120,
+    "timeoutPolicy": "TIME_OUT_WF",
+    "inputKeys": [
+      "text",
+      "title"
+    ],
+    "outputKeys": [
+      "id",
+      "status",
+      "text",
+      "conversation",
+      "tools",
+      "files",
+      "error"
+    ]
+  }
+]

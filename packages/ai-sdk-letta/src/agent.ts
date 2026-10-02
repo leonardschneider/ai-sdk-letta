@@ -8,6 +8,7 @@ import { attachmentNote, decodeFilePart, FileInputError, type StoredFile } from 
 import type { AttachmentStore } from './resources.js';
 import { REPLY_MODES, STAY_SILENT_TOOL, turnNote, type ReplyMode, type TurnSpeaker } from './listening.js';
 import type { TurnActor } from './credentials.js';
+import type { UnattendedPolicy } from './tools.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -15,7 +16,7 @@ export const MAX_INPUT_CHARACTERS = 8000;
 /** The subset of a Letta session a turn needs. */
 export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'>;
 /** What a turn allows, passed to {@link LettaAgentOptions.open}: `silence` is true when the agent may listen without replying. */
-export type TurnOptions = { silence: boolean; actor?: TurnActor };
+export type TurnOptions = { silence: boolean; actor?: TurnActor; unattended?: UnattendedPolicy };
 
 /** Display-only state restored when the agent was opened. Never sent to the model. */
 export interface AgentPresentation {
@@ -108,7 +109,24 @@ export type LettaCallOptions = {
    * turn without an actor (an unattended run) cannot use them.
    */
   actor?: TurnActor;
+  /**
+   * The turn is unattended: an automation (a workflow in n8n or Conductor, a
+   * script) started it and nobody is watching. The agent is told so in a
+   * short note, and no call of this turn prompts anyone: a tool that needs
+   * approval is refused with `approval_required` (unless it is in
+   * `preApproved`), and `ask_user` with `question_required`; the tool never
+   * runs, and the agent is told to end the turn. See `UnattendedPolicy`.
+   */
+  unattended?: UnattendedPolicy;
 };
+/**
+ * The note an unattended turn starts with (display history never shows it).
+ * `source` names what started it, for example `n8n`.
+ */
+export function unattendedNote(source?: string): string {
+  const from = source ? source.replace(/[\p{Cc}\p{Cf}<>]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+  return `<system-reminder>\nThis turn was started by an automation${from ? ` (${from})` : ''}, not by a person in the chat, and nobody is watching it live. Do the task and reply with the result; the reply is read later. Nobody can answer questions or approve actions now: do not call ask_user, and if a tool says approval is required, stop and say which action needs approval.\n</system-reminder>\n`;
+}
 /** Letta-specific result metadata of a turn (`providerMetadata.letta`). `listened`: the agent chose not to reply; `reason` is its private note. */
 export type LettaTurnMetadata = { listened?: boolean; reason?: string };
 /** The line that tells the agent who is speaking (see {@link LettaCallOptions}). Names are cleaned of markup and controls. */
@@ -373,11 +391,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
     if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
-    {
-    }
+    if (options.unattended !== undefined && (!options.unattended || typeof options.unattended !== 'object' || !Array.isArray(options.unattended.preApproved) || options.unattended.preApproved.some(name => typeof name !== 'string'))) throw new Error('Invalid unattended policy');
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
     if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
     if (options.otid !== undefined && (typeof options.otid !== 'string' || !OTID.test(options.otid))) throw new Error('Invalid otid');
@@ -404,14 +421,17 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) throw new Error('Invalid speaker');
     const speakers = options.speakers ?? (options.speaker ? [options.speaker] : []);
     // Without a reply mode or several speakers, exactly the note shared runtimes always sent.
-    const preface = options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '';
+    const preface = (options.unattended ? unattendedNote(options.unattended.source) : '')
+      + (options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '');
     const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
     const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}) }) : this.defaultActor;
-    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor };
+    // The same policy object for the whole turn (the bridge remembers a refusal per object).
+    const unattended = options.unattended ? Object.freeze({ preApproved: Object.freeze([...options.unattended.preApproved]), ...(typeof options.unattended.onBehalfOf === 'string' ? { onBehalfOf: options.unattended.onBehalfOf } : {}), ...(typeof options.unattended.source === 'string' ? { source: options.unattended.source } : {}) }) : undefined;
+    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor, unattended };
   }
 
-  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false, actor?: TurnActor): LanguageModelV4 {
+  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false, actor?: TurnActor, unattended?: UnattendedPolicy): LanguageModelV4 {
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
       let session: TurnSession | undefined;
       let completed = false;
@@ -431,7 +451,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       const endReasoning = () => { if (reasoningOpen) { emit({ type: 'reasoning-end', id: `reasoning-${reasoningId}` }); reasoningOpen = false; } };
       try {
         signal.throwIfAborted();
-        session = this.open(signal, { silence, ...(actor ? { actor } : {}) });
+        session = this.open(signal, { silence, ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}) });
         signal.addEventListener('abort', abort, { once: true });
         this.delivery?.begin();
         await (otid ? session.send(message, { otid }) : session.send(message));
@@ -538,7 +558,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor, turn.unattended), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
       this.history = [...turn.messages, ...result.response.messages];
       return result;
@@ -549,7 +569,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
-    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor, turn.unattended), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
       onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
       onFinish: result => {

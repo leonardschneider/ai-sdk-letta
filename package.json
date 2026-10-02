@@ -16,6 +16,7 @@
     "packages/provider",
     "packages/ai-sdk-letta",
     "packages/server",
+    "packages/n8n-nodes-ai-sdk-letta",
     "apps/tui",
     "apps/web",
     "examples/*"
@@ -32,7 +33,8 @@
     "check:docs": "node scripts/check-docs.mjs",
     "check:audit": "node scripts/check-audit.mjs",
     "changeset": "changeset",
-    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts"
+    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
+    "tokens": "npm run tokens --workspace @ai-sdk-letta/example-basic --"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.3",
