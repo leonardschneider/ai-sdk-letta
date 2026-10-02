@@ -25,16 +25,17 @@ npm install @ai-sdk-letta/server ai-sdk-letta ai
   admin (`not_your_turn`, 403). `GET /v1/changes?since=N` long-polls for
   changes made by others. `ThreadRuntime` takes `{ queue, parallel }` for this.
 - Group conversations (team servers; `ThreadRuntime` option `replyMode`, the
-  agent's setting, and `agentName`): each turn is sent with the reply mode in
-  effect (`'always'`, `'when-addressed'`, `'agent-decides'`; the agent's
-  `'auto'` resolves by the conversation's distinct authors) and whether it
+  agent's setting, `agentName`, and `members`, how many people share the
+  agent): each turn is sent with the reply mode in effect (`'always'`,
+  `'when-addressed'`, `'agent-decides'`; the agent's `'auto'` is always with
+  one member, agent decides with several) and whether it
   mentions the agent. The agent may listen without replying (the
   `stay_silent` tool): the run then has a `listened` event (`{ reason? }`)
   and `reasoning` events when the model shares them, and no text. Threads are
   listed with `replyMode` (the override, `'inherit'` by default),
-  `replyModeInEffect`, `participants` and `typing` (`[{ id, name }]`), and
-  `PATCH /v1/threads/:id` accepts `replyMode`. Queued text messages of a
-  conversation with several people are sent together as one turn (the first
+  `replyModeInEffect`, `members` and `typing` (`[{ id, name }]`), and
+  `PATCH /v1/threads/:id` accepts `replyMode`. Queued text messages of an
+  agent with several members are sent together as one turn (the first
   run has `batch`, the others `batchOf`; each keeps its author in history);
   a queued message being sent can no longer be withdrawn (`already_sent`).
   `POST /v1/threads/:id/typing` takes exactly `{ typing: boolean }` (a

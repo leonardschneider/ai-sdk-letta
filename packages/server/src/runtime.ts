@@ -60,12 +60,14 @@ export type RuntimeOptions = { deadlineMs?: number; humanWaitMs?: number; queue?
   /**
    * Shared runtimes whose sessions can listen (the agent was opened with
    * `listening`): the agent's reply mode setting (`'auto'` by default:
-   * always while one person talks in a conversation, agent decides once
-   * several do). Each conversation can override it (`PATCH { replyMode }`).
-   * Several queued messages of a conversation with several people are then
-   * delivered together as one turn.
+   * always when the agent has one member, agent decides when it has
+   * several, from the first message). Each conversation can override it
+   * (`PATCH { replyMode }`). With several members, queued messages of a
+   * conversation are delivered together as one turn.
    */
   replyMode?: ReplyModeSetting;
+  /** How many people share the agent now (its members); read on every turn. @default () => 1 */
+  members?: () => number;
   /** The agent's name, to recognise mentions (`@Name` or its name), which always get a reply. */
   agentName?: string;
   /** How long a typing signal lasts without a new one. @default 5000 */
@@ -203,6 +205,7 @@ export class ThreadRuntime {
   readonly replyMode?: ReplyModeSetting;
   private readonly agentName?: string;
   private readonly typingMs: number;
+  private readonly members: () => number;
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -217,6 +220,7 @@ export class ThreadRuntime {
       this.replyMode = options.replyMode;
     }
     this.agentName = options.agentName;
+    this.members = options.members ?? (() => 1);
     this.typingMs = options.typingMs ?? 5000;
     if (host.attachmentsRoot) this.uploads = new UploadStaging(join(dirname(filename), 'uploads'));
     this.state = existsSync(filename) ? JSON.parse(readFileSync(filename, 'utf8')) as State : { version: 1, threads: [], runs: [] };
@@ -313,8 +317,8 @@ export class ThreadRuntime {
     const { id, title, state, archived, createdAt, lastActivityAt, latex } = thread;
     const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride };
     if (!this.queueing) return base;
-    // Reply modes: the conversation's override, and the mode in effect now (with its participants).
-    const modes = this.replyMode !== undefined ? { replyMode: (thread.replyMode ?? 'inherit') as ReplyModeOverride, replyModeInEffect: this.modeOf(thread), participants: this.participants(thread.id) } : {};
+    // Reply modes: the conversation's override, the mode in effect now, and how many people share the agent.
+    const modes = this.replyMode !== undefined ? { replyMode: (thread.replyMode ?? 'inherit') as ReplyModeOverride, replyModeInEffect: this.modeOf(thread), members: this.memberCount() } : {};
     // Shared runtimes also show who started a conversation and whether a turn is running or waiting.
     const runs = this.state.runs.filter(r => r.threadId === id);
     const running = runs.find(r => r.status === 'running');
@@ -322,14 +326,16 @@ export class ThreadRuntime {
     const typing = this.typingIn(id);
     return { ...base, ...modes, ...(typing.length ? { typing: typing.map(({ id: userId, name }) => ({ id: userId, name })) } : {}), ...(thread.createdBy ? { createdBy: thread.createdBy } : {}), ...(running ? { running: running.id } : {}), ...(queued ? { queued } : {}) };
   }
-  /** People who wrote in a conversation (distinct authors of its messages, sent or waiting). */
-  private participants(threadId: string): number {
-    return new Set(this.state.runs.filter(r => r.threadId === threadId && r.author && !r.notSent).map(r => r.author!.id)).size;
+  /** People who share the agent now (at least one). */
+  private memberCount(): number {
+    try { const count = this.members(); return Number.isSafeInteger(count) && count > 0 ? count : 1; } catch { return 1; }
   }
   /** The reply mode in effect in a conversation now (see `resolveReplyMode`). */
   private modeOf(thread: Thread): ReplyMode {
-    return resolveReplyMode(this.replyMode, thread.replyMode, this.participants(thread.id));
+    return resolveReplyMode(this.replyMode, thread.replyMode, this.memberCount());
   }
+  /** The agent's members changed: listed reply modes may have changed too (wakes `waitForChange`). */
+  membersChanged() { this.changed(); }
   list(owner: string) {
     this.authorize(owner);
     return this.state.threads.filter(t => t.owner === owner).map(t => this.summary(t));
@@ -829,7 +835,7 @@ export class ThreadRuntime {
    */
   private batchOf(thread: Thread, run: Run): Run[] {
     const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length;
-    if (this.replyMode === undefined || this.participants(thread.id) < 2 || !textOnly(run)) return [run];
+    if (this.replyMode === undefined || this.memberCount() < 2 || !textOnly(run)) return [run];
     const batch = [run];
     for (const next of this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued' && r !== run)) {
       const candidate = [...batch, next];

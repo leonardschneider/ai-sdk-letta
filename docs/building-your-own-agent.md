@@ -249,8 +249,9 @@ share a conversation. The agent reads every message, but may only *listen*:
   or its name) or asked directly; otherwise it listens.
 - `'agent-decides'`: it replies when it can help, and listens while people
   talk among themselves.
-- `'auto'` (the default): `'always'` while one person writes in a
-  conversation, `'agent-decides'` once several do.
+- `'auto'` (the default): `'always'` when the agent has one member,
+  `'agent-decides'` when it has several (from the first message of every
+  conversation).
 
 A mention always gets a reply. Each conversation can override the mode from
 the ear button in its header. A listened turn still runs fully (the agent may

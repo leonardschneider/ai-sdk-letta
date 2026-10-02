@@ -670,12 +670,13 @@ first). Only the person who sent a message, or an admin, can answer its
 approvals and questions or stop its reply; everyone else sees who it is
 waiting for. The agent switcher lists only the agents you belong to.
 
-**Group conversations.** When several people talk in one conversation, the
-agent does not have to answer every message:
+**Group conversations.** When several people share an agent, it does not
+have to answer every message:
 
 - **Reply modes.** *Always*, *When mentioned or asked*, or *Agent decides*.
-  The agent's `replyMode` sets the default (`'auto'`: always while one person
-  writes, agent decides once several do); each conversation can override it
+  The agent's `replyMode` sets the default (`'auto'`: *always* when the agent
+  has one member, *agent decides* when it has several, from the first message
+  of every conversation); each conversation can override it
   from the ear button in its header. Typing `@` in the message box suggests
   the agent's name, and a mention always gets a reply.
 - **Listening.** The agent still reads every message (it may use tools and
@@ -688,9 +689,9 @@ agent does not have to answer every message:
 - **Messages that waited are sent together.** When several messages are
   queued behind a running reply, they reach the agent as one turn
   ("[Mia] … / [Otto] …"), so it answers them together. Each message keeps its
-  own bubble and author, and can be withdrawn until it is sent. In a
-  conversation with one person, and for messages with images or files, each
-  message is still its own turn.
+  own bubble and author, and can be withdrawn until it is sent. For an agent
+  with one member, and for messages with images or files, each message is
+  still its own turn.
 - **Typing.** "Mia is typing…" appears above the message box when someone
   else is typing in the same conversation. Only the fact that they are
   typing is shared, never the text, and it disappears about 5 seconds after
@@ -877,7 +878,10 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   after a browser refresh shows `[Image]` until it completes.
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
-  limit; the HTTP runtime closes prompts earlier (four minutes by default).
+  limit; the HTTP runtime closes prompts earlier (four minutes by default,
+  not counted against the three minutes of inference per turn). The Letta
+  SDK's own per-turn timeout is set to ten minutes (`TURN_TIMEOUT_MS`) so it
+  never ends a turn that is waiting for a person.
 - **The sandbox is experimental.** It relies on the AI SDK's
   `Experimental_SandboxSession` and on two young provider packages, all
   marked experimental and pinned exactly (`@lgrammel/apple-container-sandbox`

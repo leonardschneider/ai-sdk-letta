@@ -19,8 +19,8 @@
 export type ReplyMode = 'always' | 'when-addressed' | 'agent-decides';
 /**
  * An agent's reply mode setting: a fixed {@link ReplyMode}, or `'auto'`:
- * `'always'` while one person talks in the conversation, `'agent-decides'`
- * once several do.
+ * `'always'` for an agent one person uses, `'agent-decides'` for an agent
+ * shared by several (from the first message of every conversation).
  */
 export type ReplyModeSetting = ReplyMode | 'auto';
 /** A conversation's override: `'inherit'` follows the agent's setting. */
@@ -44,14 +44,15 @@ export const STAY_SILENT_SCHEMA = Object.freeze({
 
 /**
  * The reply mode that applies to a conversation: its override, otherwise the
- * agent's setting, where `'auto'` means `'always'` for one participant and
- * `'agent-decides'` for several. `participants` counts distinct human authors.
+ * agent's setting, where `'auto'` means `'always'` when one person can use
+ * the agent and `'agent-decides'` when several can. `members` counts the
+ * people who share the agent (its members on a team server).
  */
-export function resolveReplyMode(setting: ReplyModeSetting | undefined, override: ReplyModeOverride | undefined, participants: number): ReplyMode {
+export function resolveReplyMode(setting: ReplyModeSetting | undefined, override: ReplyModeOverride | undefined, members: number): ReplyMode {
   if (override && override !== 'inherit') return override;
   const value = setting ?? 'auto';
   if (value !== 'auto') return value;
-  return participants > 1 ? 'agent-decides' : 'always';
+  return members > 1 ? 'agent-decides' : 'always';
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

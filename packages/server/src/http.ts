@@ -353,9 +353,11 @@ export function teamApp(options: TeamAppOptions) {
   const isAdmin = (req: express.Request) => (req as unknown as { role?: string }).role === 'admin';
   const json = express.json({ limit: BODY_LIMIT_BYTES });
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
-  app.post('/api/agents/:agent/members', member, json, (req, res) => res.status(201).json(directory.addMember(String(req.params.agent), actor(req), req.body)));
+  // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
+  const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();
+  app.post('/api/agents/:agent/members', member, json, (req, res) => { const added = directory.addMember(String(req.params.agent), actor(req), req.body); membersChanged(String(req.params.agent)); res.status(201).json(added); });
   app.patch('/api/agents/:agent/members/:user', member, json, (req, res) => res.json(directory.setRole(String(req.params.agent), actor(req), String(req.params.user), req.body)));
-  app.delete('/api/agents/:agent/members/:user', member, (req, res) => { directory.removeMember(String(req.params.agent), actor(req), String(req.params.user)); res.json({ removed: true }); });
+  app.delete('/api/agents/:agent/members/:user', member, (req, res) => { directory.removeMember(String(req.params.agent), actor(req), String(req.params.user)); membersChanged(String(req.params.agent)); res.json({ removed: true }); });
   const routers = new Map([...agents].map(([id, agent]) => [id, runtimeRoutes(express(), agent.runtime, 'team', undefined, {
     author: req => authorOf(actor(req)),
     mayAct: (req, run) => isAdmin(req) || run.author?.id === actor(req).id,

@@ -55,8 +55,29 @@ test('typing line text and reply mode labels', () => {
   assert.equal(typingText(['Mia', 'Otto']), 'Mia and Otto are typing…');
   assert.equal(typingText(['Mia', 'Otto', 'Sam']), 'Mia, Otto and Sam are typing…');
   assert.equal(typingText(['Mia', 'Otto', 'Sam', 'Ann']), 'Mia, Otto and 2 others are typing…');
-  assert.equal(agentDefaultLabel('auto'), 'Always with one person, agent decides with several');
+  assert.equal(agentDefaultLabel('auto'), 'Always when only one person uses this agent, agent decides when it is shared');
+  assert.equal(agentDefaultLabel('auto', 1), 'Always reply: only you use this agent');
+  assert.equal(agentDefaultLabel('auto', 3), 'Agent decides: this agent is shared by 3 people');
+  assert.equal(agentDefaultLabel('always', 3), 'Always reply');
   assert.equal(agentDefaultLabel('when-addressed'), 'When mentioned or asked');
   assert.equal(replyModeSummary('inherit', 'agent-decides'), 'Replies: agent decides (agent default)');
   assert.equal(replyModeSummary('always', 'always'), 'Replies: always reply');
+});
+
+test('avatar initials use letters and digits only, with sensible fallbacks', async () => {
+  const { initials } = await import('../src/team.js');
+  assert.equal(initials('Mia (simulated)'), 'MS');
+  assert.equal(initials('Otto'), 'O');
+  assert.equal(initials('Leonard Schneider'), 'LS');
+  assert.equal(initials('🎉 Party Bot'), 'PB');
+  assert.equal(initials('[admin] zoë'), 'AZ');
+  assert.equal(initials('ångström'), 'Å');
+  assert.equal(initials('李 小龙'), '李小');
+  assert.equal(initials('R2-D2'), 'RD');
+  assert.equal(initials('mia.sim@example.com'), 'MS');
+  // Nothing usable in the name: the login's first letter, then "?".
+  assert.equal(initials('(…) 🎉', 'otto.sim@example.com'), 'O');
+  assert.equal(initials('', '_x@example.com'), 'X');
+  assert.equal(initials('!!!', '@@'), '?');
+  assert.equal(initials(''), '?');
 });

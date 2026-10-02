@@ -579,7 +579,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
               <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
             </>}
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
-            {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode}
+            {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
@@ -600,7 +600,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                 <div className="column footer-column">
                   <ThreadPrimitive.ScrollToBottom className="jump" aria-label="Jump to latest"><ArrowDown size={14} aria-hidden="true"/>Jump to latest</ThreadPrimitive.ScrollToBottom>
                   <InteractionDock onDismiss={() => { setInteraction(undefined); setInteractionOutcome(''); focusComposer(); }}/>
-                  {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.participants ?? 0) > 1}/>}
+                  {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.members ?? 0) > 1}/>}
                   {team && !current.draft && !readOnly && <TypingLine people={selected?.typing ?? []} me={team.user.id}/>}
                   {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}</span><button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
                   {readOnly

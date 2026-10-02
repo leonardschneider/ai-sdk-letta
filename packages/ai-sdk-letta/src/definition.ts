@@ -67,8 +67,8 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   /**
    * When the agent replies in conversations shared by several people (team
    * servers): `'always'`, `'when-addressed'` (only when mentioned or asked
-   * directly), `'agent-decides'`, or `'auto'`: always while one person talks
-   * in a conversation, agent decides once several do. In the other modes the
+   * directly), `'agent-decides'`, or `'auto'`: always when one person uses
+   * the agent, agent decides when it has several members. In the other modes the
    * agent still reads every message (and may use tools and update its memory)
    * but may only listen. Each conversation can override it. @default 'auto'
    */

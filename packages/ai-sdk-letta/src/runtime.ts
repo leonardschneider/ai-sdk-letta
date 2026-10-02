@@ -165,7 +165,20 @@ type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
   openConversation(target: ConversationTarget): Promise<OpenedConversation<TOOLS>>;
 };
 
-const lettaClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 180_000, startupTimeoutMs: 60_000 } });
+/**
+ * Longest a whole turn may take before the Letta SDK gives up on it. In the
+ * installed SDK (0.8.22), `appServer.requestTimeoutMs` is one wall-clock
+ * timer per turn, started when the turn begins and never extended (not even
+ * while a tool waits for a person). It must therefore cover inference plus
+ * the longest human wait: the harness keeps an external tool for at most five
+ * minutes (see {@link foregroundToolsCommand}), and the HTTP runtime's own
+ * deadlines (three minutes of inference plus four of human waiting) end a
+ * turn first. Requests other than turns get explicit, short timeouts.
+ */
+export const TURN_TIMEOUT_MS = 600_000;
+/** Timeout of the session's setup and status requests (not turns). */
+const REQUEST_TIMEOUT_MS = 60_000;
+const lettaClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: TURN_TIMEOUT_MS, startupTimeoutMs: 60_000 } });
 
 /**
  * Open (creating on first use) the persistent Letta agent of a definition on
@@ -300,22 +313,22 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         session = sessionClient.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
         const ready = await session.ready();
         if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
-        assertIdle(await session.getDeviceStatus());
+        assertIdle(await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         if (options.foregroundExternalTools !== false && bridge.tools.length) {
           // The SDK's tools serializer drops auto_background/timeout_ms. Use the
           // supported runtime-scoped protocol rather than global defaults.
-          const configured = await session.sendCommand(foregroundToolsCommand(bridge, ready.agentId, ready.conversationId), { responseType: 'runtime_external_tools_update_response' });
+          const configured = await session.sendCommand(foregroundToolsCommand(bridge, ready.agentId, ready.conversationId), { responseType: 'runtime_external_tools_update_response', timeoutMs: REQUEST_TIMEOUT_MS });
           if (configured.success !== true) throw new Error('Unable to configure foreground interaction tools');
         }
         const live = session;
-        const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query));
+        const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
         assertHistorySettled(history.messages);
         const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
-        const configured = await session.sendCommand(dreamingCommand(definition, ready.agentId, ready.conversationId), { responseType: 'set_reflection_settings_response' });
+        const configured = await session.sendCommand(dreamingCommand(definition, ready.agentId, ready.conversationId), { responseType: 'set_reflection_settings_response', timeoutMs: REQUEST_TIMEOUT_MS });
         if (configured.success !== true) throw new Error('Unable to configure project-scoped dreaming');
-        const status = await session.getDeviceStatus();
+        const status = await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS });
         if (!status.memoryDirectory) throw new Error('MemFS unavailable; refusing to run without memory');
         const reflection = status.raw.reflection_settings as { trigger?: string; step_count?: number } | undefined;
         if (reflection?.trigger !== definition.dreaming.trigger || reflection.step_count !== definition.dreaming.stepCount) throw new Error('Persistent dreaming configuration differs from the definition; inspect agent settings before continuing');
@@ -341,7 +354,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           // Folder renames of this conversation wait while a turn runs, then apply after that commit.
           ...(store ? { beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId) } : {}),
         });
-        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query))).messages, Object.keys(definition.tools), undefined, { listening });
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening });
         self = { agent, conversationId, title: conversationTitle, live, history: reload, truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
@@ -392,7 +405,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     const navigation: NavigationSource = {
       agentId: identity.agentId, currentId: conversationId,
       list: async signal => {
-        assertIdle(await live.getDeviceStatus());
+        assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         const reader = managementClient(15_000);
         try {
           const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal);
@@ -406,7 +419,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       },
       validate: async (id, signal) => {
         if (!listedIds.has(id) || !validConversationId(id)) throw new Error('Conversation outside current-agent listing');
-        assertIdle(await live.getDeviceStatus());
+        assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         lease.assertNoPendingTurn(id);
         const deadline = Date.now() + 30_000;
         const loaded = await loadHistory(pageOptions => {

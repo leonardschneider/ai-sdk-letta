@@ -9,10 +9,17 @@ import { useToast } from './toasts.js';
 /* People                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Initials of a name (first letters of the first two words), for avatars without a picture. */
-export function initials(name: string): string {
-  const words = name.trim().split(/[\s._@-]+/u).filter(Boolean);
-  return ((words[0]?.[0] ?? '?') + (words.length > 1 ? words[1]![0]! : '')).toUpperCase();
+/**
+ * Initials for an avatar without a picture: the first letter (or digit) of
+ * the first two words of the name, skipping punctuation, brackets, symbols and
+ * emoji ("Mia (simulated)" → "MS", "Ångström" → "Å"). Falls back to the
+ * login's first letter, then "?".
+ */
+export function initials(name: string, login = ''): string {
+  const firsts = (text: string) => text.split(/[\s._@-]+/u).map(word => word.match(/[\p{L}\p{N}]/u)?.[0]).filter((c): c is string => !!c);
+  const fromName = firsts(name.normalize('NFC'));
+  const letters = fromName.length ? fromName : firsts(login.split('@')[0] ?? '').slice(0, 1);
+  return letters.length ? letters.slice(0, 2).join('').toLocaleUpperCase() : '?';
 }
 /** A stable hue per person, so initials avatars are told apart. */
 export function hue(seed: string): number { let h = 0; for (const c of seed) h = (h * 31 + c.codePointAt(0)!) % 360; return h; }
@@ -22,7 +29,7 @@ export function Avatar({ person, size = 24 }: { person: Pick<Person, 'name' | 'l
   const [failed, setFailed] = useState(false);
   const style = { width: size, height: size, fontSize: Math.round(size * 0.42), '--avatar-hue': hue(person.login) } as React.CSSProperties;
   if (person.avatar && !failed) return <img className="avatar" style={style} src={person.avatar} alt="" referrerPolicy="no-referrer" loading="lazy" onError={() => setFailed(true)}/>;
-  return <span className="avatar initials" style={style} aria-hidden="true">{initials(person.name || person.login)}</span>;
+  return <span className="avatar initials" style={style} aria-hidden="true">{initials(person.name, person.login)}</span>;
 }
 
 /** The person signed in (via Tailscale), at the foot of the sidebar. */

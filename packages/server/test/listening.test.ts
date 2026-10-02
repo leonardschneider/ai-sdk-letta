@@ -17,7 +17,8 @@ import { tools } from './fixtures.js';
 /* ------------------------------------------------------------------ */
 
 type Sent = { conversationId: string; text: string; otid?: string; silence: boolean };
-function listeningFixture(options: RuntimeOptions = {}) {
+function listeningFixture(options: RuntimeOptions = {}, initialMembers = 2) {
+  let members = initialMembers;
   const directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-listen-'));
   const filename = join(directory, 'state.json');
   const conversations = new Map<string, UIMessage[]>();
@@ -65,8 +66,8 @@ function listeningFixture(options: RuntimeOptions = {}) {
       return { agent, agentId: 'agent-local-listen', conversationId, history: structuredClone(history), reload: async () => structuredClone(history), close: async () => { agent.close(); } };
     },
   };
-  const runtime = new ThreadRuntime(host, filename, 'team', { queue: true, parallel: true, replyMode: 'auto', agentName: 'Desk', ...options });
-  return { runtime, filename, sent, conversations, release: (id: string) => { gates.get(id)?.(); gates.delete(id); }, gates,
+  const runtime = new ThreadRuntime(host, filename, 'team', { queue: true, parallel: true, replyMode: 'auto', agentName: 'Desk', members: () => members, ...options });
+  return { runtime, filename, sent, conversations, setMembers: (n: number) => { members = n; runtime.membersChanged(); }, release: (id: string) => { gates.get(id)?.(); gates.delete(id); }, gates,
     cleanup: async () => { await runtime.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 async function until(fn: () => boolean, label = 'condition') {
@@ -79,36 +80,50 @@ const turn = (threadId: string, text: string) => ({ id: randomUUID(), threadId, 
 const status = (runtime: ThreadRuntime, id: string) => runtime.events('team', id, 0).status;
 const conversationOf = (f: ReturnType<typeof listeningFixture>, thread: string) => JSON.parse(readFileSync(f.filename, 'utf8')).threads.find((t: { id: string }) => t.id === thread).conversationId as string;
 
-test('reply mode in a shared runtime: always while one person writes, agent decides once two do; overrides stick; mentions always reply', async () => {
-  const f = listeningFixture();
+test('reply mode in a shared runtime: agent decides from the first message when the agent has several members, always with one; overrides stick; mentions always reply', async () => {
+  const f = listeningFixture({}, 1);
   try {
     const thread = randomUUID();
     await f.runtime.create('team', thread, 'Lunch', mia);
-    const summary = () => f.runtime.list('team').find(t => t.id === thread) as unknown as { replyMode: string; replyModeInEffect: string; participants: number };
-    assert.deepEqual([summary().replyMode, summary().replyModeInEffect, summary().participants], ['inherit', 'always', 0]);
+    const summary = () => f.runtime.list('team').find(t => t.id === thread) as unknown as { replyMode: string; replyModeInEffect: string; members: number };
+    assert.deepEqual([summary().replyMode, summary().replyModeInEffect, summary().members], ['inherit', 'always', 1]);
+    // One member: "always", the agent must reply, so silence is not allowed even for chat.
     const first = turn(thread, 'chat: hello');
     await f.runtime.start('team', first, mia);
     await until(() => status(f.runtime, first.id) === 'completed');
-    // Solo: "always", the agent must reply, so silence is not allowed even for chat.
     assert.equal(f.sent[0]!.silence, false);
     assert.match(f.sent[0]!.text, /Reply mode: always\./);
-    assert.equal(summary().participants, 1);
-    const second = turn(thread, 'chat: hi Mia');
-    await f.runtime.start('team', second, otto);
+    // A second member joins the agent: every conversation is a group now, even with one author so far (and a change is announced).
+    const version = f.runtime.version;
+    f.setMembers(2);
+    assert.ok(f.runtime.version > version);
+    assert.deepEqual([summary().replyModeInEffect, summary().members], ['agent-decides', 2]);
+    const second = turn(thread, 'chat: anyone around?');
+    await f.runtime.start('team', second, mia);
     await until(() => status(f.runtime, second.id) === 'completed');
-    assert.equal(summary().replyModeInEffect, 'agent-decides'); assert.equal(summary().participants, 2);
+    assert.equal(f.sent[1]!.silence, true);
     assert.match(f.sent[1]!.text, /Reply mode: agent decides\./);
+    // A brand-new conversation of a shared agent is a group from its very first message.
+    const fresh = randomUUID();
+    await f.runtime.create('team', fresh, 'Fresh', mia);
+    const opening = turn(fresh, 'chat: morning');
+    await f.runtime.start('team', opening, mia);
+    await until(() => status(f.runtime, opening.id) === 'completed');
+    assert.match(f.sent[2]!.text, /Reply mode: agent decides\./);
+    assert.ok(f.runtime.events('team', opening.id, 0).events.some(e => e.type === 'listened'));
     // A mention always gets a reply, in any mode.
     const mention = turn(thread, 'chat: @Desk what do you think?');
     await f.runtime.start('team', mention, mia);
     await until(() => status(f.runtime, mention.id) === 'completed');
-    assert.equal(f.sent[2]!.silence, false); assert.match(f.sent[2]!.text, /This turn mentions you \(Desk\): reply\./);
-    // Explicit overrides: validated, persisted, and back to inherit.
+    assert.equal(f.sent[3]!.silence, false); assert.match(f.sent[3]!.text, /This turn mentions you \(Desk\): reply\./);
+    // Explicit overrides: validated, persisted, win over the member rule, and back to inherit.
     assert.throws(() => f.runtime.updateMetadata('team', thread, { replyMode: 'sometimes' }), (e: unknown) => e instanceof RuntimeFault && e.code === 'invalid_input');
     assert.equal((f.runtime.updateMetadata('team', thread, { replyMode: 'always' }) as unknown as { replyModeInEffect: string }).replyModeInEffect, 'always');
     assert.equal(JSON.parse(readFileSync(f.filename, 'utf8')).threads[0].replyMode, 'always');
     assert.equal((f.runtime.updateMetadata('team', thread, { replyMode: 'when-addressed' }) as unknown as { replyModeInEffect: string }).replyModeInEffect, 'when-addressed');
-    assert.equal((f.runtime.updateMetadata('team', thread, { replyMode: 'inherit' }) as unknown as { replyModeInEffect: string }).replyModeInEffect, 'agent-decides');
+    f.setMembers(1);
+    assert.equal(summary().replyModeInEffect, 'when-addressed', 'an explicit choice stays when members change');
+    assert.equal((f.runtime.updateMetadata('team', thread, { replyMode: 'inherit' }) as unknown as { replyModeInEffect: string }).replyModeInEffect, 'always');
     assert.equal(JSON.parse(readFileSync(f.filename, 'utf8')).threads[0].replyMode, undefined);
   } finally { await f.cleanup(); }
 });
@@ -175,8 +190,8 @@ test('batching: queued messages of a group conversation are sent once, together,
   } finally { try { await f.cleanup(); } catch { /* already closed */ } }
 });
 
-test('batching: solo conversations, and messages with images, are sent one per turn; withdrawing a message being sent is refused', async () => {
-  const f = listeningFixture();
+test('batching: an agent with one member, and messages with images, are sent one per turn; withdrawing a message being sent is refused', async () => {
+  const f = listeningFixture({}, 1);
   try {
     const thread = randomUUID();
     await f.runtime.create('team', thread, 'Solo', mia);
@@ -186,7 +201,8 @@ test('batching: solo conversations, and messages with images, are sent one per t
     await f.runtime.start('team', a, mia); await f.runtime.start('team', b, mia);
     f.release(conversationOf(f, thread));
     await until(() => status(f.runtime, b.id) === 'completed');
-    assert.deepEqual(f.sent.map(s => s.text.replace(/^<system-reminder>[\s\S]*?<\/system-reminder>\n/, '')), ['hold', 'one', 'two'], 'one turn per message when one person writes');
+    assert.deepEqual(f.sent.map(s => s.text.replace(/^<system-reminder>[\s\S]*?<\/system-reminder>\n/, '')), ['hold', 'one', 'two'], 'one turn per message when one person uses the agent');
+    f.setMembers(2);
     // A group conversation where the next message has an image: it is sent on its own.
     const group = randomUUID();
     await f.runtime.create('team', group, 'Group', mia);
@@ -316,7 +332,7 @@ test('team HTTP: typing route (members only, presence only), reply mode PATCH, c
   const assets = join(dir, 'assets'); mkdirSync(assets); writeFileSync(join(assets, 'index.html'), '<!doctype html>');
   const directory = new TeamDirectory(join(dir, 'team', 'team.json'), ['owner@example.com']);
   directory.bootstrap(['desk']);
-  const f = listeningFixture();
+  const f = listeningFixture({ members: () => directory.members('desk').length });
   const agents = new Map<string, TeamAgent>([['desk', { info: { id: 'desk', name: 'Desk', replyMode: 'auto' }, runtime: f.runtime }]]);
   const server = teamApp({ port: 0, assets, agents, directory, origins: ['https://m.example.ts.net'] }).listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
@@ -342,6 +358,11 @@ test('team HTTP: typing route (members only, presence only), reply mode PATCH, c
     const listed = (await call('GET', '/api/agents/desk/v1/threads')).json() as { typing?: { name: string }[]; replyModeInEffect: string }[];
     assert.deepEqual(listed[0]!.typing?.map(p => p.name), ['Olivia']); assert.equal(listed[0]!.replyModeInEffect, 'always');
     assert.equal((await call('POST', `/api/agents/desk/v1/threads/${thread}/typing`, { typing: true, text: 'secret draft' })).status, 400);
+    // Adding a second member makes the agent a group: "auto" now means agent decides, from the next listing on.
+    const version = f.runtime.version;
+    assert.equal((await call('POST', '/api/agents/desk/members', { login: 'mia@example.com' })).status, 201);
+    assert.ok(f.runtime.version > version, 'membership changes wake /v1/changes');
+    assert.equal(((await call('GET', '/api/agents/desk/v1/threads')).json() as { replyModeInEffect: string; members: number }[])[0]!.replyModeInEffect, 'agent-decides');
     assert.equal((await call('PATCH', `/api/agents/desk/v1/threads/${thread}`, { replyMode: 'when-addressed' })).status, 200);
     assert.equal((await call('PATCH', `/api/agents/desk/v1/threads/${thread}`, { replyMode: 'never' })).status, 400);
     // Typing needs the CSRF token like any mutation.

@@ -192,7 +192,9 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     for (const definition of definitions) {
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name });
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+        // An agent with several members is a group from the first message: "auto" means agent decides.
+        members: () => directory.members(definition.id).length });
       runtimes.push(runtime);
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto' }, runtime });
     }

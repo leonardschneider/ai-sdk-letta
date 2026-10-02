@@ -12,9 +12,15 @@ export const REPLY_MODE_HINTS: Record<ReplyMode, string> = {
   'agent-decides': 'Replies when it can help. Listens when people talk among themselves.',
 };
 
-/** What "Agent default" means for this agent: its fixed mode, or the automatic rule. */
-export function agentDefaultLabel(setting: ReplyModeSetting | undefined): string {
-  return !setting || setting === 'auto' ? 'Always with one person, agent decides with several' : REPLY_MODE_LABELS[setting];
+/**
+ * What "Agent default" means for this agent: its fixed mode, or the automatic
+ * rule ("auto": always when only you use the agent, agent decides when it is
+ * shared), said for the agent as it is now when the member count is known.
+ */
+export function agentDefaultLabel(setting: ReplyModeSetting | undefined, members?: number): string {
+  if (setting && setting !== 'auto') return REPLY_MODE_LABELS[setting];
+  if (members === undefined) return 'Always when only one person uses this agent, agent decides when it is shared';
+  return members > 1 ? `Agent decides: this agent is shared by ${members} people` : 'Always reply: only you use this agent';
 }
 
 /** Tooltip and accessible name of the header button: the mode in effect, and whether it is the agent's default. */
@@ -27,7 +33,7 @@ export function replyModeSummary(value: ReplyModeOverride, inEffect: ReplyMode):
  * default, always, when mentioned or asked, agent decides), and whether the
  * quiet "Listened" lines are shown.
  */
-export function ReplyModeMenu({ value, inEffect, agentDefault, showListened, onChange, onShowListened }: { value: ReplyModeOverride; inEffect: ReplyMode; agentDefault?: ReplyModeSetting; showListened: boolean; onChange(value: ReplyModeOverride): void; onShowListened(show: boolean): void }) {
+export function ReplyModeMenu({ value, inEffect, agentDefault, members, showListened, onChange, onShowListened }: { value: ReplyModeOverride; inEffect: ReplyMode; agentDefault?: ReplyModeSetting; members?: number; showListened: boolean; onChange(value: ReplyModeOverride): void; onShowListened(show: boolean): void }) {
   const summary = replyModeSummary(value, inEffect);
   const Icon = inEffect === 'always' ? MessageSquareReply : Ear;
   return <DropdownMenu.Root>
@@ -42,7 +48,7 @@ export function ReplyModeMenu({ value, inEffect, agentDefault, showListened, onC
         <DropdownMenu.RadioGroup value={value} onValueChange={next => onChange(next as ReplyModeOverride)}>
           <DropdownMenu.RadioItem value="inherit" className="menu-item menu-item-two-line">
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
-            <span className="menu-text"><span>Agent default</span><span className="menu-hint">{agentDefaultLabel(agentDefault)}{value === 'inherit' ? ` · now: ${REPLY_MODE_LABELS[inEffect].toLowerCase()}` : ''}</span></span>
+            <span className="menu-text"><span>Agent default</span><span className="menu-hint">{agentDefaultLabel(agentDefault, members)}</span></span>
           </DropdownMenu.RadioItem>
           {(['always', 'when-addressed', 'agent-decides'] as const).map(mode => <DropdownMenu.RadioItem key={mode} value={mode} className="menu-item menu-item-two-line">
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>

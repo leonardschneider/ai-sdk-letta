@@ -11,12 +11,12 @@ import { registry } from './fixtures.js';
 /* Reply modes                                                         */
 /* ------------------------------------------------------------------ */
 
-test('reply mode: "auto" is always for one participant and agent decides for several; an explicit override wins', () => {
+test('reply mode: "auto" is always for an agent one person uses and agent decides for one several share; an explicit override wins', () => {
   assert.equal(resolveReplyMode('auto', 'inherit', 0), 'always');
   assert.equal(resolveReplyMode('auto', 'inherit', 1), 'always');
   assert.equal(resolveReplyMode('auto', 'inherit', 2), 'agent-decides');
   assert.equal(resolveReplyMode(undefined, undefined, 3), 'agent-decides');
-  // An agent with a fixed mode keeps it whatever the participants.
+  // An agent with a fixed mode keeps it whatever its members.
   assert.equal(resolveReplyMode('when-addressed', 'inherit', 1), 'when-addressed');
   assert.equal(resolveReplyMode('always', undefined, 5), 'always');
   // A conversation's explicit choice beats both.
@@ -211,4 +211,11 @@ test('history: a listened turn is a data-listened marker with its reasoning (lis
   // A conversation whose last turn was listened to is settled (no pending user turn).
   assert.doesNotThrow(() => assertHistorySettled(listenedHistory.slice(0, 5)));
   assert.throws(() => assertHistorySettled(listenedHistory.slice(0, 1)), /unfinished/);
+});
+
+test('the SDK turn timeout outlasts a full turn with the longest human wait (it is one wall-clock timer per turn in SDK 0.8.22)', async () => {
+  const { TURN_TIMEOUT_MS } = await import('../src/index.js');
+  // The HTTP runtime's defaults: 3 minutes of inference and 4 of human waiting per turn; the harness keeps an external tool at most 5 minutes.
+  assert.ok(TURN_TIMEOUT_MS >= 180_000 + 240_000, 'covers inference plus the human-wait budget');
+  assert.ok(TURN_TIMEOUT_MS >= 300_000 + 60_000, 'covers the harness external-tool limit with room for inference');
 });
