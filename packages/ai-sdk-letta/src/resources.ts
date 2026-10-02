@@ -175,6 +175,19 @@ export function folderNameFromTitle(title: string | undefined, fallback: string)
   const short = [...name].length > 60 ? `${[...name].slice(0, 59).join('').trim()}…` : name;
   return short || fallback;
 }
+/**
+ * The title a conversation takes when the user renames its folder to `name`.
+ * Folder names are plain text: a title whose visible text ({@link titleText})
+ * already is `name` is kept as written, so its Markdown is not lost
+ * (`[Spec](https://x) **v2**` stays for "Spec v2"). Otherwise the title is
+ * `name` as written (at most `max` characters, as titles are).
+ */
+export function titleFromFolderName(title: string, name: string, max = 120): string {
+  if (titleText(title) === name) return title;
+  let next = name.trim();
+  while (next.length > max) next = [...next].slice(0, -1).join('').trim();
+  return next || title;
+}
 /** Names the resources UI and listings leave out: hidden (dot) entries, caches, odd names. */
 const hiddenName = (name: string) => name.startsWith('.') || name === '__pycache__' || name === 'node_modules' || /[\0-\x1f\x7f\\]/.test(name);
 
@@ -730,6 +743,8 @@ export class ResourceStore {
         const state = this.state();
         for (const entry of Object.values(state.folders)) if (within(entry.path, source)) entry.path = target + entry.path.slice(source.length);
         for (const entry of state.attachments) if (within(entry.path, source)) entry.path = target + entry.path.slice(source.length);
+        // A conversation folder renamed: the newest name wins over a title rename still waiting for the turn to end.
+        if (baseName(source) !== baseName(target)) for (const [id, entry] of Object.entries(state.folders)) if (entry.path === target) this.pendingTitles.delete(id);
         this.save(state);
         this.described.clear();
         return { path: target, from: source };

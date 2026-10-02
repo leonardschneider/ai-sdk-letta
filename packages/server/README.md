@@ -28,6 +28,14 @@ default, also for threads saved by earlier versions), `'on'` or `'off'`.
 Threads are listed with `latex`; `GET /api/session` (GUI) returns the
 agent's `ui: { latex }`. It returns the thread as listed.
 
+`POST /v1/resources/move` takes `{ from, to }` (paths from the root) and
+returns `{ path, from, commit? }`. Renaming a conversation's own folder
+renames the conversation too (`titleFromFolderName`: the name as typed,
+also when the folder got a file-system-safe spelling of it, or the title
+unchanged when it already shows that text), and the
+answer then also has `thread`, as listed. A move that keeps the name does
+not; neither does a folder renamed by the agent in the sandbox.
+
 `GET /api/session` also returns `versions: { aiSdkLetta, server, lettaSdk }`,
 read once at startup from the `package.json` of the packages this server
 actually resolves (an npm install or a source checkout alike; `null` when one

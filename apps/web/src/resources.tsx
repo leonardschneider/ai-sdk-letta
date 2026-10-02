@@ -39,7 +39,12 @@ type Props = {
   visible: boolean;
   onClose(): void;
   onOpenThread?(id: string): void;
+  /** A conversation was renamed with its folder (the thread as listed). */
+  onThreadChanged?(thread: MovedThread): void;
 };
+/** The conversation a folder rename also renamed, as the server lists it. */
+type MovedThread = { id: string; title: string };
+type MoveResult = { path: string; thread?: MovedThread };
 
 type Pending = { kind: 'rename'; path: string } | { kind: 'new-folder'; parent: string } | undefined;
 
@@ -140,9 +145,10 @@ export function ResourcesPanel(props: Props) {
   async function move(from: string, folder: string) {
     if (!canDrop(from, folder)) return;
     const to = joinPath(folder, baseName(from));
-    await run(() => api<{ path: string }>('/v1/resources/move', { from, to }), result => {
+    await run(() => api<MoveResult>('/v1/resources/move', { from, to }), result => {
+      if (result.thread) props.onThreadChanged?.(result.thread);
       open(folder); setSelected(result.path);
-      toast(`Moved “${baseName(from)}” to ${folder ? `“${baseName(folder)}”` : 'the top level'}`, { action: { label: 'Undo', run: () => void run(() => api('/v1/resources/move', { from: result.path, to: from })) } });
+      toast(`Moved “${baseName(from)}” to ${folder ? `“${baseName(folder)}”` : 'the top level'}`, { action: { label: 'Undo', run: () => void run(() => api<MoveResult>('/v1/resources/move', { from: result.path, to: from }), undone => { if (undone.thread) props.onThreadChanged?.(undone.thread); }) } });
       if (preview === from) setPreview(result.path);
     });
   }
@@ -150,7 +156,8 @@ export function ResourcesPanel(props: Props) {
     setPending(undefined);
     if (!name.trim() || name.trim() === baseName(path)) return;
     const to = joinPath(parentPath(path), name.trim());
-    await run(() => api<{ path: string }>('/v1/resources/move', { from: path, to }), result => {
+    await run(() => api<MoveResult>('/v1/resources/move', { from: path, to }), result => {
+      if (result.thread) props.onThreadChanged?.(result.thread);
       setSelected(result.path);
       if (preview === path) setPreview(result.path);
       if (expanded.has(path)) setExpanded(set => new Set([...set].map(p => p === path || p.startsWith(`${path}/`) ? result.path + p.slice(path.length) : p)));

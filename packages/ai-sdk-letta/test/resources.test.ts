@@ -5,7 +5,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ATTACHMENTS_CONTEXT, AttachmentStore, FILE_TOOL_PERMISSIONS, FileInputError, LettaAgent, RESOURCES_GITIGNORE, ResourceStore, createToolBridge, fileTools, folderNameFromTitle, listFiles, openResources, readFile, searchFiles, splitResourcePath, statePaths,
+  ATTACHMENTS_CONTEXT, AttachmentStore, FILE_TOOL_PERMISSIONS, FileInputError, LettaAgent, RESOURCES_GITIGNORE, ResourceStore, createToolBridge, fileTools, folderNameFromTitle, titleFromFolderName, listFiles, openResources, readFile, searchFiles, splitResourcePath, statePaths,
 } from '../src/index.js';
 import { quarterlyReport } from './pdf-fixture.js';
 
@@ -122,6 +122,39 @@ test('renaming a conversation renames its folder: unique name, one commit, after
     assert.equal(subjects(store).length, before);
     assert.ok(!existsSync(join(store.files, 'Gone')));
     assert.equal(await store.retitle('conv-unknown', 'X'), undefined, 'a conversation without a folder');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('renaming a folder gives the conversation title: Markdown kept when it shows the same text, otherwise the name as written', () => {
+  assert.equal(titleFromFolderName('Trip', 'Lisbon'), 'Lisbon');
+  assert.equal(titleFromFolderName('[Spec](https://x) **v2**', 'Spec v2'), '[Spec](https://x) **v2**', 'the visible text is the name: Markdown kept');
+  assert.equal(titleFromFolderName('**Trip**', 'trip'), 'trip', 'a different text (even only by case) is the new title');
+  assert.equal(titleFromFolderName('**Trip**', 'Trip (2)'), 'Trip (2)', 'a name typed by the user is taken as written');
+  assert.equal(titleFromFolderName('Notes', 'my_notes_v2'), 'my_notes_v2', 'as written, no escaping');
+  assert.equal(titleFromFolderName('x', 'y'.repeat(200)).length, 120, 'at most the title limit');
+  assert.equal(titleFromFolderName('Keep', '   '), 'Keep');
+});
+
+test('a conversation folder renamed by the user wins over a title rename waiting for the turn; a move without rename does not', async () => {
+  const root = tmp();
+  try {
+    const store = ResourceStore.open(root, AGENT);
+    await store.init();
+    await new AttachmentStore(store, 'conv-a', { title: 'Trip' }).save([{ name: 'plan.md', bytes: enc('# Plan\n') }]);
+    await store.createFolder('', 'Archive');
+    store.beginTurn('conv-a');
+    assert.equal(await store.retitle('conv-a', 'Faro'), 'deferred');
+    await store.move('Trip', 'Archive/Trip');
+    await store.move('Archive/Trip', 'Archive/Lisbon');
+    await store.endTurn('conv-a');
+    assert.equal(store.folderOf('conv-a'), 'Archive/Lisbon', 'the folder keeps the name the user gave it');
+    assert.equal(subjects(store)[0], 'Rename Archive/Trip to Lisbon');
+    // A plain move keeps a waiting title rename.
+    store.beginTurn('conv-a');
+    assert.equal(await store.retitle('conv-a', 'Sagres'), 'deferred');
+    await store.move('Archive/Lisbon', 'Lisbon');
+    await store.endTurn('conv-a');
+    assert.equal(store.folderOf('conv-a'), 'Sagres');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

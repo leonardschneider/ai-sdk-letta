@@ -324,6 +324,16 @@ They are enabled by the file tools or the sandbox.
   deleted is not recreated by a rename. The mapping from conversation to
   folder is stored by ID, so it survives renames and moves of the folder
   (also `mv` in the sandbox, followed by inode).
+- **The other way round, too:** renaming a conversation's own folder in the
+  panel renames the conversation to the name as you typed it (folder names
+  are plain text; "Porto: day trips" stays so in the title even though the
+  folder is "Porto_ day trips"). A title that already shows that text keeps its
+  Markdown (`[Spec](https://…) **v2**` stays for "Spec v2"). Moving the
+  folder elsewhere under the same name, renaming a folder around it, or the
+  agent renaming it in the sandbox leaves the title as it is. The title
+  change is metadata, not a commit, and never renames the folder again; a
+  suffix added to keep a folder name unique ("Trip (2)") stays out of the
+  title.
 - **One commit per change.** Every user operation (upload, new folder, move,
   rename, delete, restore) is one commit with a clear message, such as
   `Rename Trip planning/notes.txt to itinerary.md`. Attachments are committed

@@ -436,7 +436,8 @@ function App() {
         {filesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
           {!narrow && <Resizer width={layout.resourcesWidth} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
           <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
-            onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}/>
+            onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
+            onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
       </div>
     </AssistantRuntimeProvider>
