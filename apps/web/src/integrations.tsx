@@ -3,6 +3,7 @@ import { CircleAlert, CircleCheck, ExternalLink, LoaderCircle, Plug, Unplug } fr
 import { integrationApi, type AtlassianStatus } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
+import { afterEdit, validateConnectForm, type ConnectField, type FormProblem } from './integrations-model.js';
 
 /** Where people create an Atlassian API token. */
 export const TOKEN_HELP_URL = 'https://id.atlassian.com/manage-profile/security/api-tokens';
@@ -48,7 +49,11 @@ export function AtlassianDialog({ status, onStatus, onClose, team }: { status?: 
   const [email, setEmail] = useState(connected?.email ?? '');
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState<Busy>();
-  const [problem, setProblem] = useState('');
+  const [problem, setProblemState] = useState<FormProblem>();
+  const setProblem = (text: string) => setProblemState(text ? { kind: 'server', text } : undefined);
+  // A user edit: the field check goes away at once (it runs again on submit), and so does a server error about the old input.
+  const edit = (set: (value: string) => void) => (event: React.ChangeEvent<HTMLInputElement>) => { set(event.target.value); setProblemState(afterEdit); };
+  const invalid = (field: ConnectField) => problem?.missing?.includes(field) || undefined;
   const [result, setResult] = useState<{ tone: 'ok' | 'error'; text: string }>();
   const first = useRef<HTMLInputElement>(null);
   const replacing = !connected || connected.status === 'rejected';
@@ -66,7 +71,8 @@ export function AtlassianDialog({ status, onStatus, onClose, team }: { status?: 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (busy) return;
-    if (!site.trim() || !email.trim() || !token.trim()) { setProblem('Enter your site, email and API token.'); return; }
+    const missing = validateConnectForm({ site, email, token });
+    if (missing) { setProblemState(missing); return; }
     const next = await run('save', () => integrationApi<AtlassianStatus>('/atlassian', { site, email, token }, 'PUT'));
     // The token never stays in the page once saved.
     setToken('');
@@ -94,23 +100,23 @@ export function AtlassianDialog({ status, onStatus, onClose, team }: { status?: 
     </div>}
     {editing ? <form className="integration-form" onSubmit={event => void save(event)} noValidate>
       <label className="integration-field"><span>Site</span>
-        <input ref={first} className="member-input" name="site" type="url" inputMode="url" autoComplete="url" placeholder="https://your-team.atlassian.net" value={site} onChange={event => setSite(event.target.value)} disabled={!!busy} spellCheck={false}/>
+        <input ref={first} className="member-input" name="site" type="url" inputMode="url" autoComplete="url" placeholder="https://your-team.atlassian.net" value={site} onChange={edit(setSite)} aria-invalid={invalid('site')} disabled={!!busy} spellCheck={false}/>
       </label>
       <label className="integration-field"><span>Email</span>
-        <input className="member-input" name="email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={event => setEmail(event.target.value)} disabled={!!busy} spellCheck={false}/>
+        <input className="member-input" name="email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={edit(setEmail)} aria-invalid={invalid('email')} disabled={!!busy} spellCheck={false}/>
       </label>
       <label className="integration-field"><span>API token</span>
-        <input id="atl-token" className="member-input" name="token" type="password" autoComplete="off" placeholder={connected ? 'Paste a new token' : 'Paste your API token'} value={token} onChange={event => setToken(event.target.value)} disabled={!!busy} spellCheck={false} data-1p-ignore data-lpignore="true"/>
+        <input id="atl-token" className="member-input" name="token" type="password" autoComplete="off" placeholder={connected ? 'Paste a new token' : 'Paste your API token'} value={token} onChange={edit(setToken)} aria-invalid={invalid('token')} disabled={!!busy} spellCheck={false} data-1p-ignore data-lpignore="true"/>
       </label>
       <p className="integration-help">Create one at <a href={TOKEN_HELP_URL} target="_blank" rel="noopener noreferrer">id.atlassian.com → Security → API tokens<ExternalLink size={12} aria-hidden="true"/></a>. It is stored on this server only (readable by its owner account), never shown again, and never given to the agent.</p>
-      {problem && <p className="integration-problem" role="alert">{problem}</p>}
+      {problem && <p className="integration-problem" role="alert">{problem.text}</p>}
       <div className="modal-actions">
-        {connected && connected.status === 'ok' && <button type="button" className="btn ghost" onClick={() => { setEditing(false); setProblem(''); setToken(''); }} disabled={!!busy}>Cancel</button>}
+        {connected && connected.status === 'ok' && <button type="button" className="btn ghost" onClick={() => { setEditing(false); setProblemState(undefined); setToken(''); }} disabled={!!busy}>Cancel</button>}
         {!connected && <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>}
         <button type="submit" className="btn primary" disabled={!!busy}>{busy === 'save' ? <><LoaderCircle size={15} className="spin" aria-hidden="true"/>Checking…</> : connected ? 'Save new token' : 'Connect'}</button>
       </div>
     </form> : <>
-      {problem && <p className="integration-problem" role="alert">{problem}</p>}
+      {problem && <p className="integration-problem" role="alert">{problem.text}</p>}
       {result && <p className={`integration-result ${result.tone}`} role="status">{result.text}</p>}
       <div className="modal-actions integration-actions">
         <button type="button" className="btn ghost danger-text" onClick={() => void disconnect()} disabled={!!busy}>{busy === 'disconnect' ? <LoaderCircle size={15} className="spin" aria-hidden="true"/> : <Unplug size={15} aria-hidden="true"/>}Disconnect</button>
