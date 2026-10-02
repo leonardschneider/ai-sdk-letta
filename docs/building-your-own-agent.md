@@ -14,6 +14,7 @@ rename the ID, edit the tools.
 - [4. Write tools](#4-write-tools)
 - [5. Define the agent](#5-define-the-agent)
 - [6. Human in the loop](#6-human-in-the-loop)
+- [6a. Decisions that can wait](#6a-decisions-that-can-wait)
 - [7. Optional built-ins: files, shell, images, Atlassian](#7-optional-built-ins-files-shell-images-atlassian)
 - [8. Memory and dreaming](#8-memory-and-dreaming)
 - [9. Run it](#9-run-it)
@@ -261,8 +262,8 @@ instead of a reply.
 
 `defineAgent` throws immediately if a tool has no entry
 (`Missing permission for tool(s): ...`), if an entry names an unknown tool,
-if `ask_user` is set to `'ask'` (it is already interactive; it defaults to
-`'allow'`), if a tool is named `stay_silent` (reserved, see below), if
+if `ask_user` or `request_decision` is set to `'ask'` (both already ask
+people; `ask_user` defaults to `'allow'`), if a tool is named `stay_silent` (reserved, see below), if
 `replyMode` is not one of the values above, or if `ui` has an unknown key or a
 non-boolean `latex`. Put the definition in its own module and import it from each
 entry point, so a mistake fails at startup, before any Letta call.
@@ -321,6 +322,84 @@ the conversation blocked as an uncertain delivery (see
 [Troubleshooting](#12-troubleshooting)); continue in a new conversation. The
 handler receives an `AbortSignal` as second argument that fires when a prompt
 is withdrawn; stop showing the prompt then.
+
+## 6a. Decisions that can wait
+
+`ask_user` holds the turn open for at most a few minutes. When the agent
+needs people to **decide** something before it goes on (pick a report
+format, choose between two plans, approve a direction; not permission for a
+tool), give it the decision tools instead:
+
+```ts
+// src/decisions.ts
+import { decisionTools, DECISION_TOOL_PERMISSIONS, defineAgent } from 'ai-sdk-letta';
+
+export const writer = defineAgent({
+  id: 'report-writer', name: 'Report Writer', model: 'openai-codex/gpt-5.5',
+  instructions: 'You write reports. When the format or scope is the team\'s choice, call request_decision with clear options, then stop and wait for the outcome.',
+  tools: { ...decisionTools },                     // request_decision, cancel_decision
+  permissions: { ...DECISION_TOOL_PERMISSIONS },   // both 'allow': asking people is itself the human gate
+});
+```
+
+How it works with the Letta loop:
+
+1. The agent calls `request_decision({ question, options: [{ id, label,
+   description? }], context?, allowComment? })` (1 to 8 options). The server
+   records the decision (`<state>/server/<id>/gui|team/decisions.json`, 0600,
+   written atomically, kept across restarts) and the tool answers at once:
+   "Decision requested (id …). End your turn now …". Any further tool call in
+   that turn is refused (`decision_pending`) and never runs, so the agent ends
+   its turn with one sentence. Nothing waits, so no timeout applies: a
+   decision can stay open for days.
+2. People see it in the app: a bell with the count of open decisions (in
+   every agent they belong to), and a card in the conversation where the
+   agent asked. **Any member of the agent can decide** (the single-user app:
+   you), once: the first decider wins, and a late one is told who decided
+   what. The decision records who decided, when, the option and a comment.
+   **Stop this work** is always offered.
+3. The outcome reaches the agent as a new message of the same conversation,
+   through its normal queue: `[Decision] Mia chose “CSV table” (option csv)
+   for “Which format?” … Comment: …` (or "decided to stop this work"), with a
+   note telling it to resume the work, or to stop it. In a group
+   conversation the agent always replies to it. The app shows it as a
+   compact line: "Decided by Mia: CSV table · 2 min ago".
+4. Meanwhile people can keep talking to the agent; each turn reminds it that
+   the decision is pending (so a chat message is not mistaken for the
+   decision). A new `request_decision` in the same conversation **replaces**
+   the pending one (one open decision per conversation), and
+   `cancel_decision` withdraws it. Archiving the conversation closes it.
+
+Without the server (a plain `createLettaAgent` script), nothing records
+decisions: the tool answers `decisions_unavailable` and the agent asks in its
+reply instead. You can bind your own `DecisionDesk` with the
+`decisions` option of `openLettaAgent`/`openAgentHost`. The pause is
+enforced by the tool bridge:
+
+```ts
+// src/decisions.test.ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createToolBridge, decisionTools, DECISION_TOOL_PERMISSIONS, DECISIONS_CONTEXT, type DecisionDesk } from 'ai-sdk-letta';
+import { tool, jsonSchema } from 'ai';
+
+test('after request_decision, the rest of the turn is paused', async () => {
+  let paused = false;
+  let written = 0;
+  const write_report = tool({ inputSchema: jsonSchema<{ format: string }>({ type: 'object', properties: { format: { type: 'string' } }, required: ['format'] }), execute: async () => { written++; return { ok: true }; } });
+  const desk: DecisionDesk = { request: async () => ({ id: 'd-1' }), cancel: async () => undefined };
+  const bridge = createToolBridge({
+    tools: { ...decisionTools, write_report }, permissions: { ...DECISION_TOOL_PERMISSIONS, write_report: 'allow' },
+    paused: () => paused,
+    context: () => ({ [DECISIONS_CONTEXT]: { desk, conversationId: 'c-1', requested: () => { paused = true; } } }),
+  });
+  const asked = await bridge.execute('request_decision', 'call-1', { question: 'Which format?', options: [{ id: 'md', label: 'Markdown' }, { id: 'csv', label: 'CSV' }] });
+  assert.equal(JSON.parse(asked.content[0]!.text!).id, 'd-1');
+  const refused = await bridge.execute('write_report', 'call-2', { format: 'md' });
+  assert.equal(JSON.parse(refused.content[0]!.text!).error, 'decision_pending');
+  assert.equal(written, 0);
+});
+```
 
 ## 7. Optional built-ins: files, shell, images, Atlassian
 
@@ -642,6 +721,17 @@ closeOnSignals(server);
    runs, the agent ends its turn with a short sentence, and the conversation
    stays usable. To let a workflow use an `'ask'` tool, pre-approve it on its
    token; `'deny'` stays denied, and questions are never pre-approved.
+4. **Decisions are the exception: workflows can wait for them.** An agent
+   with the [decision tools](#6a-decisions-that-can-wait) may call
+   `request_decision` in an unattended run. The run then ends with
+   `status: "decision_pending"` (not a failure) and `decision` (`id`,
+   `question`, `options`, `status`). People decide in the app; the work
+   resumes in a new run of the same conversation, started for the same
+   token. `GET /v1/automation/decisions/<id>?wait=110` long-polls until
+   someone decided and answers with `decidedBy`, `choice` (or
+   `status: "stopped"`), `comment` and `resume.runId`; get that run with
+   `GET /v1/automation/runs/<runId>?wait=` (it has `resumes: { decisionId,
+   outcome, choice }`). A resumed run may ask another decision.
 
 ```ts
 // src/automation.test.ts
@@ -665,7 +755,8 @@ test('an unattended turn refuses a call that needs approval, without running it'
 
 **n8n.** The community node in
 [`packages/n8n-nodes-ai-sdk-letta`](../packages/n8n-nodes-ai-sdk-letta) adds
-an *ai-sdk-letta* node (Run Turn and Wait, Start Turn, Get Run, Cancel Run)
+an *ai-sdk-letta* node (Run Turn and Wait, Start Turn, Get Run, Cancel Run,
+Wait for Decision; Run Turn and Wait has a **Wait Through Decisions** option)
 and an *ai-sdk-letta API* credential (server URL and token). With **On Error →
 Continue (using error output)**, a run that needed approval goes to the error
 output with `error.code`, so the workflow can branch on it; see its example
@@ -679,7 +770,9 @@ two workflow definitions: `ai_sdk_letta_run_turn` uses only Conductor's own
 `${workflow.secrets.AI_SDK_LETTA_TOKEN}`), and `ai_sdk_letta_run_turn_worker`
 runs the `ai_sdk_letta_turn` worker (Conductor's JavaScript SDK) for long
 turns. Both fail the workflow with `approval_required: …` when the turn needed
-a person. Schedule them with Conductor's scheduler
+a person. The worker also waits through decisions (it checks every minute,
+up to three days), and `ai_sdk_letta_run_turn_decisions` does the same with
+`HTTP` and `DO_WHILE` tasks only (one decision per workflow). Schedule them with Conductor's scheduler
 (`conductor/weekday-report.schedule.json`).
 
 **The agent can schedule tasks too.** Add `schedulingTools` with

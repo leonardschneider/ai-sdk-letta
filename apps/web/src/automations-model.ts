@@ -41,6 +41,7 @@ export function scheduleState(task: Pick<ScheduleView, 'state' | 'at' | 'run' | 
   if (task.run.error === 'approval_required') return 'Ran, but needed approval';
   if (task.run.error === 'question_required') return 'Ran, but needed an answer';
   if (task.run.status === 'running' || task.run.status === 'queued') return 'Running now';
+  if (task.run.status === 'decision_pending') return 'Ran; waiting for a decision';
   return task.run.status === 'completed' ? `Ran ${relativeTime(task.firedAt ?? task.at, now)}` : `Ran, ${task.run.status}`;
 }
 

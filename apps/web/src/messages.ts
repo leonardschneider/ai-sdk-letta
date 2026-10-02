@@ -2,6 +2,7 @@ import type { ThreadMessageLike } from '@assistant-ui/react';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import { IMAGE_PLACEHOLDER, type FileInfo } from './attachments.js';
+import { knownOutcome, type DecisionOutcome } from './decisions-model.js';
 export type Part = Exclude<ThreadMessageLike['content'], string>[number];
 /** A file chip in a user bubble: name and description; `available` once stored in the conversation. */
 export type FileChip = { name: string; detail: string; kind?: FileInfo['kind'] };
@@ -54,6 +55,11 @@ export function knownSource(message: Pick<UIMessage, 'metadata'>): MessageSource
 }
 export function withSource(message: ThreadMessageLike, source: MessageSource | undefined): ThreadMessageLike {
   return source ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, source } } } : message;
+}
+
+/** A decision's outcome turn: shown as a compact "Decided by …" line instead of a bubble. */
+export function withDecision(message: ThreadMessageLike, decision: DecisionOutcome | undefined): ThreadMessageLike {
+  return decision ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, decision } } } : message;
 }
 
 /** A turn the agent listened to without replying: its private note (the agent's own words), if any. */
@@ -115,7 +121,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined));
   return mergeAssistantRuns(converted).map(markListened);
 }
 

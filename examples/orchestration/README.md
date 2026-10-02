@@ -35,12 +35,24 @@ Background and the API: README, "Automations (n8n, Conductor)".
   SDK). The worker waits in steps of 25 s and hands the task back
   `IN_PROGRESS` in between, so long turns hold no thread and the worker can
   restart. A turn that needed a person fails the task for good
-  (`FAILED_WITH_TERMINAL_ERROR`); rate limits fail it for a retry.
+  (`FAILED_WITH_TERMINAL_ERROR`); rate limits fail it for a retry. A turn
+  that asks people to decide keeps the task `IN_PROGRESS` (checked every
+  minute) until someone decided in the app, then the worker follows the run
+  that resumed the work.
 
   ```sh
   CONDUCTOR_SERVER_URL=http://127.0.0.1:8080/api AI_SDK_LETTA_URL=http://127.0.0.1:4402 AI_SDK_LETTA_TOKEN='lta_…' \
     npm run worker --workspace @ai-sdk-letta/example-orchestration
   ```
+
+- **`ai_sdk_letta_run_turn_decisions`** ([JSON](conductor/ai_sdk_letta_run_turn_decisions.json)):
+  like `ai_sdk_letta_run_turn`, but when the agent asks people to decide
+  (status `decision_pending`), a `DO_WHILE` polls
+  `GET /v1/automation/decisions/<id>?wait=110` until someone decided in the
+  app (up to about three days), then another follows the run that resumed
+  the work. Output: `reply` of that run, and `decision` (who chose what).
+  One decision per workflow; the worker (above) also waits through
+  decisions, any number of them, checking every minute.
 
 ## Schedules
 

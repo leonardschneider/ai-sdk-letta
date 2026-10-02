@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-export { LettaAgent, speakerNote, unattendedNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
+export { LettaAgent, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
 export {
   resolveReplyMode, mentionsAgent, mentionNames, turnNote, combinedText, speakerLabel, REPLY_MODES, REPLY_MODE_SETTINGS, REPLY_MODE_OVERRIDES, STAY_SILENT_TOOL, STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA,
   type ReplyMode, type ReplyModeSetting, type ReplyModeOverride, type TurnSpeaker, type TurnNoteOptions,
@@ -41,6 +41,12 @@ export {
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
 export { createToolBridge, askUserTool, fileTraceWriter, withPreparation, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, PREPARE_CALL, PREPARED_CONTEXT, UNATTENDED_CODES, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions, type PrepareCall, type PreparedCall, type UnattendedPolicy, type UnattendedCode } from './tools.js';
 export { scheduleTaskTool, schedulingTools, schedulingEnabled, resolveWhen, SCHEDULE_TASK_TOOL, SCHEDULING_TOOL_PERMISSIONS, SCHEDULER_CONTEXT, SCHEDULE_LIMITS, type TaskScheduler, type ScheduleTaskInput, type ScheduleTaskOutput, type ScheduleRequest, type ScheduledTask, type SchedulerContext } from './scheduling.js';
+export {
+  requestDecisionTool, cancelDecisionTool, decisionTools, decisionsEnabled, parseDecision, decisionMessage, decisionOutcomeNote, pendingDecisionNote,
+  REQUEST_DECISION_TOOL, CANCEL_DECISION_TOOL, DECISION_TOOL_NAMES, DECISION_TOOL_PERMISSIONS, DECISIONS_CONTEXT, DECISION_LIMITS, REQUEST_DECISION_DESCRIPTION,
+  type DecisionDesk, type DecisionContext, type DecisionRequest, type DecisionOption, type DecisionOutcome, type RequestedDecision, type DecisionToolName,
+  type RequestDecisionInput, type RequestDecisionOutput, type CancelDecisionInput, type CancelDecisionOutput,
+} from './decisions.js';
 export { adfToMarkdown, markdownToAdf, spliceMarkdown, splitBlocks, blockMarkdown, protectedElements, lostElements, validateAdf, isAdfDocument, adfHash, type AdfDocument, type AdfNode, type AdfMark, type MarkdownOptions, type ProtectedElement, type SpliceChange, type SpliceResult } from './adf.js';
 export { ADF_SCHEMA, ADF_SCHEMA_VERSION } from './adf-schema.js';
 export { CredentialStore, publicStatus, LOCAL_USER_ID, LOCAL_ACTOR, ACTOR_CONTEXT, type AtlassianCredentials, type AtlassianStatus, type TurnActor } from './credentials.js';

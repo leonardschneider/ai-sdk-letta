@@ -3,7 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime, type TaskScheduler } from 'ai-sdk-letta';
+import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type TaskScheduler } from 'ai-sdk-letta';
+import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory, authorOf } from './team.js';
@@ -54,13 +55,30 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler): RuntimeHost {
+/**
+ * The decisions of an agent that has `request_decision`: a desk for its
+ * sessions now, bound to the board once the runtime exists.
+ */
+function decisionDesk(definition: AgentDefinition) {
+  let board: DecisionBoard | undefined;
+  const desk: DecisionDesk | undefined = decisionsEnabled(definition) ? {
+    request: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.request(request, turn); },
+    cancel: (turn, id) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.cancel(turn, id); },
+  } : undefined;
+  return { desk, bind: (runtime: ThreadRuntime, directory: string, owner: string) => {
+    if (!desk) return undefined;
+    board = new DecisionBoard(join(directory, 'decisions.json'), runtime, owner, { id: definition.id, name: definition.name });
+    return board;
+  } };
+}
+
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages };
@@ -73,11 +91,11 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  * A host that keeps several conversations of one agent open at once (each its
  * own Letta session), for a shared runtime. The agent itself is opened on first use.
  */
-function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler): RuntimeHost {
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}) }).catch(error => { agent = undefined; throw error; });
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
@@ -137,7 +155,9 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
     const scheduling = automationScheduling(options.automation, [definition]);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id)), join(directory, 'state.json'), owner);
+    const decisions = decisionDesk(definition);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk), join(directory, 'state.json'), owner);
+    const board = decisions.bind(runtime, directory, owner);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
     if (options.automation) {
@@ -150,6 +170,8 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       const url = `http://127.0.0.1:${bound}`;
+      // Outcomes decided before a restart and not sent yet are sent now (once).
+      board?.resumeAll();
       log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
       return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', automation) };
     } catch (error) { automation?.service.close(); automation?.server.close(); throw error; }
@@ -223,6 +245,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
   const unlocks: (() => void)[] = [];
   const unlockAll = () => { for (const unlock of unlocks.splice(0).reverse()) { try { unlock(); } catch { /* already gone */ } } };
   const runtimes: ThreadRuntime[] = [];
+  const boards: (DecisionBoard | undefined)[] = [];
   let automationServer: Server | undefined;
   let automationService: AutomationService | undefined;
   try {
@@ -235,10 +258,12 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     for (const definition of definitions) {
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id)), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+      const decisions = decisionDesk(definition);
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length });
       runtimes.push(runtime);
+      boards.push(decisions.bind(runtime, folder, 'team'));
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });
       automationAgents.push(automationAgent(definition, runtime, 'team', stateDirectory, true));
     }
@@ -256,6 +281,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     const server = teamApp({ port, assets, agents, directory, origins: options.origins, ...(credentials ? { credentials } : {}), ...(options.integrations ? { integrationOptions: options.integrations } : {}), ...(automation ? { automation: { service: automation.service, endpoint: automation.endpoint } } : {}) }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
+    for (const board of boards) board?.resumeAll();
     let closing: Promise<void> | undefined;
     const close = () => closing ??= (async () => {
       const keepAlive = setInterval(() => {}, 1000);

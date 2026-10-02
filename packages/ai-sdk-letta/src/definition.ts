@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
+import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 
@@ -122,6 +123,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
     if (!permissionValues.includes(mode as ToolPermission)) throw new Error(`Invalid permission for "${name}"`);
     permissions[name] = mode as ToolPermission;
   }
+  if (names.includes(REQUEST_DECISION_TOOL) && permissions[REQUEST_DECISION_TOOL] === 'ask') throw new Error('request_decision already asks people (it is the human gate); use "allow" or "deny"');
   if (names.includes(ASK_USER_TOOL)) {
     permissions[ASK_USER_TOOL] ??= 'allow';
     if (permissions[ASK_USER_TOOL] === 'ask') throw new Error('ask_user is already interactive; use "allow" or "deny"');

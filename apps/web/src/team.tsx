@@ -3,6 +3,7 @@ import { DropdownMenu } from 'radix-ui';
 import { Check, ChevronDown, Clock, Ellipsis, LoaderCircle, ShieldCheck, UserMinus, UserPlus, Users, X } from 'lucide-react';
 import { errorCode, serverApi, type AgentInfo, type Member, type Person } from './api.js';
 import { Modal } from './modal.js';
+import { outcomeSummary, type DecisionOutcome } from './decisions-model.js';
 import { useToast } from './toasts.js';
 
 /* ------------------------------------------------------------------ */
@@ -166,7 +167,9 @@ export function MembersDialog({ agent, onClose }: { agent: AgentInfo; onClose():
 /* Queue                                                               */
 /* ------------------------------------------------------------------ */
 
-export type QueuedTurn = { id: string; input: string; author?: Person & { id: string }; images?: number; files?: number; queuedAt?: string; sending?: boolean };
+export type QueuedTurn = { id: string; input: string; author?: Person & { id: string }; images?: number; files?: number; queuedAt?: string; sending?: boolean;
+  /** A decision's outcome waiting to reach the agent. */
+  decision?: DecisionOutcome };
 
 /** Turns waiting behind the running one, oldest first. Their authors (and admins) can withdraw them before they are sent. */
 export function QueueList({ queue, me, canWithdraw, onWithdraw, together = false }: { queue: readonly QueuedTurn[]; me?: string; canWithdraw(turn: QueuedTurn): boolean; onWithdraw(turn: QueuedTurn): void; together?: boolean }) {
@@ -177,7 +180,7 @@ export function QueueList({ queue, me, canWithdraw, onWithdraw, together = false
       {queue.map(turn => <li key={turn.id} className="queue-item" data-sending={turn.sending || undefined}>
         {turn.author ? <Avatar person={turn.author} size={20}/> : <span className="avatar initials" aria-hidden="true">?</span>}
         <span className="queue-author">{turn.author && turn.author.id === me ? 'You' : turn.author?.name ?? 'Someone'}</span>
-        <span className="queue-text">{turn.input.trim() || (turn.images ? 'Image' : turn.files ? 'File' : '')}{(turn.images || turn.files) && turn.input.trim() ? ` · ${[turn.images && `${turn.images} image${turn.images === 1 ? '' : 's'}`, turn.files && `${turn.files} file${turn.files === 1 ? '' : 's'}`].filter(Boolean).join(', ')}` : ''}</span>
+        <span className="queue-text">{turn.decision ? outcomeSummary(turn.decision, me) : turn.input.trim() || (turn.images ? 'Image' : turn.files ? 'File' : '')}{(turn.images || turn.files) && turn.input.trim() ? ` · ${[turn.images && `${turn.images} image${turn.images === 1 ? '' : 's'}`, turn.files && `${turn.files} file${turn.files === 1 ? '' : 's'}`].filter(Boolean).join(', ')}` : ''}</span>
         {turn.sending ? <span className="queue-sending">Sending…</span> : canWithdraw(turn) && <button type="button" className="icon-btn small" aria-label={`Withdraw: ${turn.input.slice(0, 60)}`} title="Withdraw (not sent yet)" onClick={() => onWithdraw(turn)}><X size={14}/></button>}
       </li>)}
     </ol>

@@ -1,6 +1,6 @@
 /** Human label for a tool or field name, e.g. `fetchWeather_now` → "Fetch Weather now". */
 export function friendlyName(value: string): string {
-  return ({ ask_user: 'Question', run_command: 'Command', run_command_online: 'Command with internet access', atlassian_request: 'Atlassian', atlassian_fetch: 'Atlassian fetch', atlassian_update: 'Atlassian update' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
+  return ({ ask_user: 'Question', request_decision: 'Decision request', cancel_decision: 'Withdraw decision', run_command: 'Command', run_command_online: 'Command with internet access', atlassian_request: 'Atlassian', atlassian_fetch: 'Atlassian fetch', atlassian_update: 'Atlassian update' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
 }
 export function parseArgs(value?: string): Record<string, unknown> {
   try { const parsed: unknown = JSON.parse(value ?? '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
@@ -143,6 +143,8 @@ export function toolLabel(name: string, phase: ToolPhase, result?: unknown, args
   if (reason === 'approval_required') return `Needed approval: ${friendlyName(name)}`;
   if (reason === 'question_required') return 'Needed an answer (unattended)';
   if (reason === 'unattended_stopped') return `Skipped: ${friendlyName(name)}`;
+  if (reason === 'decision_pending') return `Paused for the decision: ${friendlyName(name)}`;
+  if (name === 'cancel_decision' && phase !== 'running') return phase === 'done' ? 'Withdrew the pending decision' : 'Couldn’t withdraw the decision';
   const shell = commandLabel(name, phase, args, result);
   if (shell) return shell;
   const file = fileToolLabel(name, phase, args);
@@ -185,6 +187,7 @@ const reasonText: Record<string, string> = {
   approval_required: 'Not run: this turn was started by an automation and nobody could approve it. Pre-approve the tool for that automation, or do it here.',
   question_required: 'Not asked: this turn was started by an automation and nobody could answer.',
   unattended_stopped: 'Not run: the automation’s turn had already stopped for approval.',
+  decision_pending: 'Not run: the agent had asked for a decision, so the work paused until someone decides.',
 };
 export function failureText(result: unknown): string {
   const reason = failureReason(result);

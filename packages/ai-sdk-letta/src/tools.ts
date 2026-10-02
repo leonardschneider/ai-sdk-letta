@@ -113,6 +113,13 @@ export interface ToolBridgeOptions {
    * refused with `unattended_stopped`, so the agent ends the turn.
    */
   unattended?: () => UnattendedPolicy | undefined;
+  /**
+   * The running turn requested a decision (`request_decision`), read at call
+   * time: the work is paused until people decide, so every later call of the
+   * turn is refused with `decision_pending` (the tool never runs) and the
+   * agent ends the turn. The decision tools themselves stay callable.
+   */
+  paused?: () => boolean;
 }
 
 /**
@@ -135,6 +142,10 @@ const UNATTENDED_TEXT: Record<UnattendedCode, string> = {
   question_required: 'Not asked: this turn is unattended (started by an automation) and nobody can answer questions. Do not call other tools. End the turn now with one short sentence saying what you would need to know.',
   unattended_stopped: 'Not run: an earlier call of this unattended turn needed a person. End the turn now.',
 };
+
+/** Tools a turn may still call after it requested a decision (see {@link ToolBridgeOptions.paused}). */
+const PAUSE_EXEMPT = new Set(['request_decision', 'cancel_decision', 'stay_silent']);
+const DECISION_PENDING_TEXT = 'Not run: you requested a decision in this turn, so the work is paused until people decide. Do not call other tools. End the turn now with one short sentence saying what you need decided.';
 
 /** One item of a tool result as sent to Letta (the Agent SDK's `AgentToolResultContent`): text, or a base64 image. */
 type ToolOutput = { content: AgentToolResultContent[]; isError: boolean };
@@ -214,6 +225,10 @@ export function createToolBridge(options: ToolBridgeOptions) {
   };
   const execute = async (name: string, id: string, args: unknown, sdkSignal?: AbortSignal): Promise<ToolOutput> => {
     if (!allowed.has(name)) return denied(name, id, 'tool_denied');
+    if (options.paused?.() && !PAUSE_EXEMPT.has(name)) {
+      emit(name, id, 'denied', Date.now(), 'decision_pending');
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'decision_pending', message: DECISION_PENDING_TEXT }) }], isError: true };
+    }
     const unattended = options.unattended?.();
     if (unattended && stopped.has(unattended)) return refuse(unattended, name, id, 'unattended_stopped');
     const counted = !options.uncounted?.includes(name);

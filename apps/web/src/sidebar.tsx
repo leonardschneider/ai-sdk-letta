@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ThreadListPrimitive, ThreadListItemPrimitive, ThreadListItemMorePrimitive, useAui, useAuiState } from '@assistant-ui/react';
-import { Archive, ArchiveRestore, Check, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Check, ChevronRight, Ellipsis, PanelLeftClose, Pencil, Search, Signpost, SquarePen, X } from 'lucide-react';
 import { titleText } from 'ai-sdk-letta/title';
 import { latexChoices } from './latex-menu.js';
 import type { LatexOverride } from './latex.js';
@@ -24,6 +24,8 @@ export type SidebarProps = {
   agentLatex: boolean; onLatex(id: string, value: LatexOverride): void;
   /** Team servers: the agent switcher in place of the name, and the signed-in person at the foot. */
   brand?: React.ReactNode; footer?: React.ReactNode;
+  /** Next to the agent's name: the notification bell. */
+  actions?: React.ReactNode;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -50,6 +52,7 @@ export function Sidebar(props: SidebarProps) {
   return <Rows.Provider value={rows}>
     <div className="sidebar-head">
       {props.brand ?? <div className="brand"><span className="brand-mark" aria-hidden="true">✳︎</span><span>{props.agent.name}</span></div>}
+      {props.actions && <div className="sidebar-actions">{props.actions}</div>}
       {props.onCollapse && <button type="button" className="icon-btn small collapse-btn" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true" title="Hide sidebar (⌘B)" onClick={props.onCollapse}><PanelLeftClose size={17}/></button>}
       {props.onClose && <button type="button" className="icon-btn drawer-close" aria-label="Close sidebar" onClick={props.onClose}><X size={18}/></button>}
     </div>
@@ -89,7 +92,7 @@ function ThreadListItem() {
   const id = useAuiState(s => s.threadListItem.id);
   const title = useAuiState(s => s.threadListItem.title) ?? 'Untitled';
   const status = useAuiState(s => s.threadListItem.status);
-  const custom = useAuiState(s => s.threadListItem.custom) as { state?: string; running?: boolean; queued?: number } | undefined;
+  const custom = useAuiState(s => s.threadListItem.custom) as { state?: string; running?: boolean; queued?: number; decision?: boolean } | undefined;
   const { editingId, setEditingId, busy, runningId, archivingIds, latex, agentLatex, onLatex } = useContext(Rows);
   const latexValue = latex.get(id) ?? 'inherit';
   const [menuOpen, setMenuOpen] = useState(false);
@@ -112,6 +115,7 @@ function ThreadListItem() {
           <span className="thread-label">
             <span className="thread-title"><TitleView title={title} shortUrls linkTabIndex={-1}/></span>
             {!ready && <span className="thread-note">unavailable</span>}
+            {ready && custom?.decision && !custom.running && <span className="thread-decision" title="A decision is waiting here"><Signpost size={13} aria-hidden="true"/><span className="sr-only">decision waiting</span></span>}
             {ready && custom?.running && <span className="thread-activity" title={custom.queued ? `Replying · ${custom.queued} waiting` : 'Replying'}><span className="sr-only">{custom.queued ? `replying, ${custom.queued} waiting` : 'replying'}</span>{!!custom.queued && <span aria-hidden="true">{custom.queued}</span>}</span>}
           </span>
         </>}

@@ -7,6 +7,7 @@ import { LOCAL_USER_ID, MAX_INPUT_CHARACTERS, REPLY_MODES, type ReplyMode, type 
 import { RuntimeFault, type Run, type RunAuthor, type RunAutomation, type RunSource, type ThreadRuntime } from './runtime.js';
 import { contentDisposition } from './http.js';
 import type { Orchestrator, OrchestratorHandle } from './scheduler.js';
+import type { PublicDecision } from './decisions.js';
 
 /* ------------------------------------------------------------------ */
 /* Records                                                             */
@@ -174,9 +175,29 @@ export type AutomationServiceOptions = {
   log?: (line: string) => void;
 };
 
+/**
+ * A decision as the automation API shows it: what was asked, and once
+ * decided, who chose what, and the run that resumed (or stopped) the work.
+ */
+export type AutomationDecision = {
+  id: string; status: 'pending' | 'decided' | 'stopped' | 'cancelled'; question: string; options: { id: string; label: string; description?: string }[];
+  conversation: { id: string };
+  createdAt: string; decidedAt?: string; decidedBy?: { name: string }; choice?: { id: string; label: string }; comment?: string; cancelReason?: string;
+  /** The turn that brought the outcome to the agent: get it with `GET /v1/automation/runs/<runId>`. */
+  resume?: { runId: string; state: string; error?: string };
+};
 /** A run as the automation API shows it. */
 export type AutomationRun = {
-  id: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  /**
+   * `decision_pending`: the turn ended by asking people to decide
+   * (`request_decision`); `decision` says what, and the work resumes in a new
+   * run once someone decides (`decision.resume.runId`). Not a failure.
+   */
+  id: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'decision_pending';
+  /** The decision this run asked for (`request_decision`), as it stands now. */
+  decision?: AutomationDecision;
+  /** This run brings a decision's outcome to the agent (it resumed, or stopped, the work). */
+  resumes?: { decisionId: string; outcome: 'decided' | 'stopped'; choice?: { id: string; label: string } };
   conversation?: { id: string; title?: string };
   createdAt: string; startedAt?: string; endedAt?: string;
   /** The agent's reply (all text of the turn). Empty when it listened without replying. */
@@ -198,6 +219,13 @@ const errorText: Record<string, string> = {
   delivery_uncertain: 'The server restarted while the turn ran; nothing was replayed.', runtime_failed: 'The turn failed.',
   actor_not_member: 'The token\'s user is no longer a member of this agent.',
 };
+/** A decision for the automation API (no user IDs). */
+export const automationDecision = (decision: PublicDecision): AutomationDecision => ({
+  id: decision.id, status: decision.status, question: decision.question, options: decision.options.map(o => ({ ...o })), conversation: { id: decision.threadId }, createdAt: decision.createdAt,
+  ...(decision.decidedAt ? { decidedAt: decision.decidedAt } : {}), ...(decision.decidedBy ? { decidedBy: { name: decision.decidedBy.name } } : {}),
+  ...(decision.choice ? { choice: { id: decision.choice.id, label: decision.choice.label } } : {}), ...(decision.comment ? { comment: decision.comment } : {}),
+  ...(decision.cancelReason ? { cancelReason: decision.cancelReason } : {}), ...(decision.resume ? { resume: { ...decision.resume } } : {}),
+});
 const message = (code: string, tool?: string) => code === 'approval_required' ? `${tool ?? 'A tool'} ${errorText[code]}` : errorText[code] ?? 'The turn did not complete.';
 
 /**
@@ -379,9 +407,14 @@ export class AutomationService {
     const ended = !['queued', 'running'].includes(run.status);
     const times = { ...(run.startedAt ? { startedAt: run.startedAt } : {}), ...(run.endedAt ? { endedAt: run.endedAt } : {}) };
     if (!ended) return { ...base, ...times, status: run.status === 'queued' ? 'queued' : 'running', ...(tools.length ? { tools } : {}) };
-    const result = { ...base, ...times, text, ...(run.listened ? { listened: true } : {}), tools };
+    const asked = agent.runtime.decisions?.requestedBy(run.id);
+    const decision = asked ? automationDecision(agent.runtime.decisions!.view(asked)) : undefined;
+    const resumes = run.decision ? { resumes: { decisionId: run.decision.id, outcome: run.decision.outcome, ...(run.decision.choice ? { choice: { ...run.decision.choice } } : {}) } } : {};
+    const result = { ...base, ...times, text, ...(run.listened ? { listened: true } : {}), tools, ...(decision ? { decision } : {}), ...resumes };
     // The turn ended cleanly, but it needed a person: for the automation, that is a failure.
     if (run.refused) return { ...result, status: 'failed', error: { code: run.refused.code, tool: run.refused.tool, message: message(run.refused.code, run.refused.tool) } };
+    // It asked people to decide: the work waits for them (not a failure).
+    if (run.status === 'completed' && decision?.status === 'pending') return { ...result, status: 'decision_pending' };
     if (run.status === 'completed') return { ...result, status: 'completed' };
     const code = String([...run.events].reverse().find(event => event.type === 'failed')?.data.code ?? (run.status === 'interrupted' ? 'delivery_uncertain' : 'runtime_failed'));
     return { ...result, status: run.status === 'cancelled' && code === 'cancelled' ? 'cancelled' : 'failed', error: { code, message: message(code) } };
@@ -391,11 +424,31 @@ export class AutomationService {
     if (!view.startedAt || !view.endedAt) return view;
     try { const files = await agent.runtime.changedFiles(agent.owner, view.startedAt, view.endedAt); return { ...view, files }; } catch { return { ...view, files: [] }; }
   }
-  /** A token's run by ID (another token's runs are not found). */
+  /**
+   * A token's run by ID (another token's runs are not found). Runs that
+   * resumed a decision one of its runs asked for are the token's too.
+   */
   record(agent: AutomationAgent, tokenId: string, id: string): ServiceRun {
     const record = agent.store.read().runs.find(run => run.id === id && run.tokenId === tokenId);
-    if (!record) throw new RuntimeFault('not_found', 404);
-    return record;
+    if (record) return record;
+    const run = agent.runtime.runRecord(agent.owner, id);
+    if (run?.decision && run.source?.tokenId === tokenId) return { id: run.id, tokenId, threadId: run.threadId, createdAt: run.queuedAt ?? run.startedAt ?? new Date().toISOString() };
+    throw new RuntimeFault('not_found', 404);
+  }
+  /** A decision one of the token's runs asked for (others are not found). */
+  decision(agent: AutomationAgent, tokenId: string, id: string): AutomationDecision {
+    const record = agent.runtime.decisions?.find(id);
+    if (!record || record.requestedBy.source?.tokenId !== tokenId) throw new RuntimeFault('not_found', 404);
+    return automationDecision(agent.runtime.decisions!.view(record));
+  }
+  /** Resolves when the decision is no longer pending, or after `timeoutMs`. */
+  async waitForDecision(agent: AutomationAgent, tokenId: string, id: string, timeoutMs: number, signal?: AbortSignal): Promise<AutomationDecision> {
+    const until = Date.now() + timeoutMs;
+    while (true) {
+      const decision = this.decision(agent, tokenId, id);
+      if (decision.status !== 'pending' || Date.now() >= until || signal?.aborted) return decision;
+      await agent.runtime.decisions!.waitForChange(agent.runtime.decisions!.version, Math.min(5000, Math.max(10, until - Date.now())), signal);
+    }
   }
   /** Resolves when the run ended, or after `timeoutMs`. */
   async waitFor(agent: AutomationAgent, record: ServiceRun, timeoutMs: number, signal?: AbortSignal): Promise<AutomationRun> {
@@ -548,7 +601,7 @@ export class AutomationService {
     return [...pending, ...recent].map(s => {
       const run = s.runId ? agent.runtime.runRecord(agent.owner, s.runId) : undefined;
       return { id: s.id, at: s.at, prompt: s.prompt, conversation: s.conversation, ...(s.threadId ? { threadId: s.threadId } : {}), ...(s.title ? { title: s.title } : {}), actor: { name: s.actor.name }, orchestrator: s.orchestrator, state: s.state, createdAt: s.createdAt,
-        ...(s.firedAt ? { firedAt: s.firedAt } : {}), ...(run ? { run: { id: run.id, threadId: run.threadId, status: run.refused ? 'failed' : run.status, ...(run.refused ? { error: run.refused.code } : {}) } } : {}) };
+        ...(s.firedAt ? { firedAt: s.firedAt } : {}), ...(run ? { run: { id: run.id, threadId: run.threadId, status: this.statusOf(agent, run), ...(run.refused ? { error: run.refused.code } : {}) } } : {}) };
     });
   }
   /** Tokens of an agent for the app, with the status of each one's last run. */
@@ -557,8 +610,14 @@ export class AutomationService {
       const run = token.lastRunId ? agent.runtime.runRecord(agent.owner, token.lastRunId) : undefined;
       let active = true;
       try { this.authorOf(agent, token.actor); } catch { active = false; }
-      return { ...tokenSummary(token), active, ...(run ? { lastRun: { id: run.id, threadId: run.threadId, status: run.refused ? 'failed' : run.status, ...(run.refused ? { error: run.refused.code } : {}) } } : {}) };
+      return { ...tokenSummary(token), active, ...(run ? { lastRun: { id: run.id, threadId: run.threadId, status: this.statusOf(agent, run), ...(run.refused ? { error: run.refused.code } : {}) } } : {}) };
     });
+  }
+  /** A run's status for the Automations dialog. */
+  private statusOf(agent: AutomationAgent, run: Run): string {
+    if (run.refused) return 'failed';
+    if (run.status === 'completed' && agent.runtime.decisions?.requestedBy(run.id)?.status === 'pending') return 'decision_pending';
+    return run.status;
   }
   close() { this.closed = true; for (const control of this.starting.values()) control.abort(); }
 }
@@ -591,6 +650,7 @@ const waitSeconds = (value: unknown) => { const n = Number(value ?? 0); return N
  * - `POST /v1/automation/runs`: `{ text, idempotencyKey, threadId? | title?, newConversation?, replyMode? }`
  *   (`?wait=<seconds>` waits up to 120 s for it to end). 202 with the run (200 if it ended).
  * - `GET  /v1/automation/runs/<id>?wait=<seconds>`: the run; waits for it to end.
+ * - `GET  /v1/automation/decisions/<id>?wait=<seconds>`: a decision a run asked for; waits until someone decided.
  * - `POST /v1/automation/runs/<id>/cancel`
  * - `GET  /v1/automation/files?path=<path>`: download a file of the agent's resources.
  * - `POST /v1/automation/schedules/<id>/fire`: the orchestrator runs a task the agent scheduled (its single-use token).
@@ -639,6 +699,12 @@ export function automationApp(service: AutomationService): express.Express {
     const record = service.record(agent, token.id, String(req.params.id));
     const run = await service.withFiles(agent, await service.waitFor(agent, record, waitSeconds(req.query.wait) * 1000, until(req, res)));
     if (!res.writableEnded && !res.destroyed) res.json(run);
+  });
+  /** A decision one of this token's runs asked for; `?wait=<s>` waits (up to 120 s) until someone decided. */
+  app.get('/v1/automation/decisions/:id', auth, async (req, res) => {
+    const { agent, token } = authed(req);
+    const decision = await service.waitForDecision(agent, token.id, String(req.params.id), waitSeconds(req.query.wait) * 1000, until(req, res));
+    if (!res.writableEnded && !res.destroyed) res.json(decision);
   });
   app.post('/v1/automation/runs/:id/cancel', auth, (req, res) => {
     const { agent, token } = authed(req);
