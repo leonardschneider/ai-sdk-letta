@@ -164,7 +164,12 @@ export async function connectAtlassian(store: CredentialStore, userId: string, i
   if (!/^[^\s@]{1,128}@[^\s@]{1,128}$/.test(email)) throw new AtlassianError('invalid_input', 'Enter the email address of your Atlassian account.');
   if (!token || token.length > 1000 || /\s/.test(token)) throw new AtlassianError('invalid_input', 'Paste the API token you created at id.atlassian.com (Security → API tokens).');
   const credentials: AtlassianCredentials = { site, email, token, savedAt: new Date().toISOString(), status: 'ok' };
-  const account = await whoAmI(credentials, options.fetch);
+  let account: Awaited<ReturnType<typeof whoAmI>>;
+  try { account = await whoAmI(credentials, options.fetch); }
+  catch (error) {
+    if (error instanceof AtlassianError && error.code === 'token_rejected') throw new AtlassianError('token_rejected', `Atlassian did not accept this email and API token for ${new URL(site).hostname}. Check both (the token is the one from id.atlassian.com, not your password). Nothing was saved.`, 401);
+    throw error;
+  }
   const saved: AtlassianCredentials = { ...credentials, checkedAt: new Date().toISOString(), ...account };
   store.saveAtlassian(userId, saved);
   return publicStatus(saved);

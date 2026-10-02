@@ -87,7 +87,6 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   // The Resources panel: files, or documents saved by integrations (Atlassian) without attachments.
   const resourcesEnabled = filesEnabled || !!agent.resources;
   const atlassianEnabled = !!agent.integrations?.includes('atlassian');
-  const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled);
   const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
   const SAVED_THREAD = team ? `${SAVED}:${agent.id}` : SAVED;
@@ -118,6 +117,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
   const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
   const [turns, setTurns] = useState(0);
+  const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);

@@ -157,4 +157,7 @@ test('Atlassian tools read as one line each; approval diffs mark removed and add
   assert.deepEqual(toolSummary('atlassian_fetch', 'Jira issue KAN-1: Title\nmore').fields, [{ label: 'Result', value: 'Jira issue KAN-1: Title' }]);
   assert.deepEqual(lineDiff('a\nb\nc', 'a\nB\nc'), [{ kind: 'same', text: 'a' }, { kind: 'removed', text: 'b' }, { kind: 'added', text: 'B' }, { kind: 'same', text: 'c' }]);
   assert.deepEqual(lineDiff('', 'new'), [{ kind: 'added', text: 'new' }]);
+  const { toolErrorText } = await import('../src/presentation.js');
+  assert.equal(toolErrorText('atlassian_update', 'Error (refused): This edit would remove or change mention @Jane. Nothing was written.'), 'This edit would remove or change mention @Jane. Nothing was written.');
+  assert.equal(toolErrorText('run_command', 'Error (x): y'), undefined, 'other tools keep fixed codes');
 });

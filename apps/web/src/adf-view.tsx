@@ -13,6 +13,10 @@ import { IntlProvider } from 'react-intl';
 import { ReactRenderer } from '@atlaskit/renderer';
 import { SmartCardProvider } from '@atlaskit/link-provider';
 import { setGlobalTheme } from '@atlaskit/tokens/set-global-theme';
+import { setBooleanFeatureFlagResolver } from '@atlaskit/platform-feature-flags';
+
+// Atlaskit's feature flags: none (the defaults), answered locally rather than by its feature-gate client.
+setBooleanFeatureFlagResolver(() => false);
 import type { DocNode } from '@atlaskit/adf-schema';
 
 type Media = Record<string, { name: string; mediaType?: string; download?: string }>;

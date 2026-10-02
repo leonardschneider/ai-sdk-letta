@@ -265,3 +265,14 @@ export function lineDiff(before: string, after: string): { kind: 'same' | 'remov
   }
   return out;
 }
+
+/**
+ * The readable reason a tool reported (Atlassian tools answer "Error (code):
+ * message" with text written for the user, never secrets), or undefined for
+ * other tools, whose errors stay fixed codes.
+ */
+export function toolErrorText(name: string, result: unknown): string | undefined {
+  if (!name.startsWith('atlassian_') || typeof result !== 'string') return undefined;
+  const match = /^Error \(([a-z_]+)\): ([\s\S]+)$/.exec(result.trim());
+  return match ? match[2]!.slice(0, 1200) : undefined;
+}

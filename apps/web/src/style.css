@@ -654,7 +654,7 @@ body[data-resizing] iframe { pointer-events: none; }
 .adf-source-title { font-weight: 600; flex: 1; min-width: 160px; overflow-wrap: anywhere; }
 .adf-source-meta { color: var(--text-3); font-size: 12px; }
 .adf-source .btn { text-decoration: none; color: var(--text); }
-.adf-view { padding: 8px 24px 32px; max-width: 900px; margin: 0 auto; background: var(--ds-surface, transparent); color: var(--ds-text, var(--text)); }
+.adf-view { padding: 8px 24px 32px; max-width: 900px; margin: 0 auto; color: var(--ds-text, var(--text)); }
 .adf-media { max-width: 100%; height: auto; border-radius: 4px; }
 .adf-media-placeholder { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-2); font-size: 13px; background: var(--bg); }
 

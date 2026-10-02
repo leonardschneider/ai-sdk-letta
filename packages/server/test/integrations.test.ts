@@ -56,7 +56,7 @@ test('single-user GUI: connect, status, test, disconnect; the token is stored 06
     // A wrong token is refused with a readable message and nothing is stored.
     const wrong = await fetch(`${base}/api/integrations/atlassian`, { method: 'PUT', headers, body: JSON.stringify({ site: 'acme.atlassian.net', email: 'me@example.com', token: 'nope' }) });
     assert.equal(wrong.status, 400);
-    assert.deepEqual(await wrong.json(), { error: 'token_rejected', message: 'Atlassian rejected the saved API token (it expired or was revoked).' });
+    assert.deepEqual(await wrong.json(), { error: 'token_rejected', message: 'Atlassian did not accept this email and API token for acme.atlassian.net. Check both (the token is the one from id.atlassian.com, not your password). Nothing was saved.' });
     assert.equal(store.atlassian(LOCAL_USER_ID), undefined);
     const badSite = await fetch(`${base}/api/integrations/atlassian`, { method: 'PUT', headers, body: JSON.stringify({ site: 'https://evil.example.com', email: 'me@example.com', token: TOKEN }) });
     assert.equal(badSite.status, 400);

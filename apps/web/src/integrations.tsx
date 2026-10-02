@@ -8,14 +8,15 @@ import { useToast } from './toasts.js';
 export const TOKEN_HELP_URL = 'https://id.atlassian.com/manage-profile/security/api-tokens';
 
 /** The status of your own Atlassian connection; refreshed when the dialog changes it. */
-export function useAtlassianStatus(enabled: boolean) {
+export function useAtlassianStatus(enabled: boolean, refreshKey?: unknown) {
   const [status, setStatus] = useState<AtlassianStatus>();
+  // Again after every turn: a tool call may have found the token rejected.
   useEffect(() => {
     if (!enabled) return;
     let live = true;
     integrationApi<AtlassianStatus>('/atlassian').then(value => { if (live) setStatus(value); }, () => {});
     return () => { live = false; };
-  }, [enabled]);
+  }, [enabled, refreshKey]);
   return [status, setStatus] as const;
 }
 

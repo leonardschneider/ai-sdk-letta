@@ -100,7 +100,7 @@ test('credentials: stored 0600 in a 0700 directory, atomically, per user; the pu
     writeFileSync(join(folder, b!), readFileSync(join(folder, a!)));
     assert.equal(s.store.atlassian('user-b'), undefined, 'a record names its owner');
     // A wrong token is never stored.
-    await assert.rejects(connectAtlassian(s.store, 'user-c', { site: SITE, email: 'me@example.com', token: 'wrong' }, { fetch: s.site.fetch }), /rejected/);
+    await assert.rejects(connectAtlassian(s.store, 'user-c', { site: SITE, email: 'me@example.com', token: 'wrong' }, { fetch: s.site.fetch }), /did not accept this email and API token.*Nothing was saved/);
     assert.equal(s.store.atlassian('user-c'), undefined);
     // Only Atlassian Cloud sites.
     for (const site of ['http://acme.atlassian.net', 'https://evil.com', 'https://acme.atlassian.net.evil.com', 'https://user@acme.atlassian.net', 'https://acme.atlassian.net:8443']) assert.throws(() => normalizeSite(site), /Atlassian Cloud|Enter your site/);

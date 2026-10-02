@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
 import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { COMMAND_TOOLS, lineDiff, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
+import { COMMAND_TOOLS, lineDiff, toolErrorText, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
@@ -213,7 +213,8 @@ function CommandDetail({ toolName, args, result, phase }: { toolName: string; ar
 function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartProps) {
   const active = useContext(InteractionContext);
   const pendingApproval = active.request?.kind === 'approval' && active.request.toolCallId === toolCallId && result === undefined;
-  const phase = phaseOf(result, isError);
+  // Atlassian tools report refusals as text ("Error (code): …"); restored history may not flag them as errors.
+  const phase = toolName.startsWith('atlassian_') && toolErrorText(toolName, result) ? 'error' : phaseOf(result, isError);
   const args = parseArgs(argsText);
   const denied = phase === 'error' && ['user_denied', 'approval_cancelled'].includes(failureReason(result) ?? '');
   const decided = pendingApproval && active.sent?.id === active.request?.id ? active.sent : undefined;
@@ -232,7 +233,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
       {status && <span className="line-meta">{status}</span>}</>}>
     <div data-tool-call-id={toolCallId} className="tool-detail">
       {phase === 'running' && <p className="muted">{decided ? 'Your decision was sent. Waiting for the agent…' : pendingApproval ? active.waitingFor ? `Only ${active.waitingFor} or an admin can allow or deny this.` : 'Waiting for you to allow or deny this below.' : shell ? 'Running in the sandbox…' : 'Working on it…'}</p>}
-      {phase === 'error' && <p className="muted">{failureText(result)}</p>}
+      {phase === 'error' && <p className="muted">{toolErrorText(toolName, result) ?? failureText(result)}</p>}
       {shell && <CommandDetail toolName={toolName} args={args} result={result} phase={phase}/>}
       {summary.metrics && <dl className="metrics">{summary.metrics.map(m => <div key={m.label}><dt>{m.label}</dt><dd>{m.value}</dd></div>)}</dl>}
       {!!summary.fields.length && <dl className="fields">{summary.fields.map((f, i) => <div key={i}><dt>{f.label}</dt><dd><Value value={f.value}/></dd></div>)}</dl>}
@@ -464,8 +465,9 @@ function AtlassianApproval({ preview }: { preview: NonNullable<InteractionReques
   const host = data.site ? new URL(data.site).hostname : undefined;
   return <div className="atl-approval">
     <p className="card-details atl-target">
-      {data.url ? <a href={data.url} target="_blank" rel="noopener noreferrer">{data.target ?? preview.title}</a> : <span>{data.target ?? preview.title}</span>}
-      {(host || data.account) && <span className="atl-account"> · {[host, data.account && `as ${data.account}`].filter(Boolean).join(' ')}</span>}
+      {/* Edits link to the issue or page; a request's URL is an API endpoint, so it is shown below instead. */}
+      {preview.kind === 'atlassian-edit' && (data.url ? <><a href={data.url} target="_blank" rel="noopener noreferrer">{data.target ?? preview.title}</a> · </> : <span>{data.target ?? preview.title} · </span>)}
+      {(host || data.account) && <span className="atl-account">{[host, data.account && `as ${data.account}`].filter(Boolean).join(' ')}</span>}
     </p>
     {preview.kind === 'atlassian-edit' && data.changes && <>
       <p className="atl-summary">{data.changes.length === 1 ? 'One block changes' : `${data.changes.length} blocks change`}; everything else{data.blocks ? ` (${data.blocks - data.changes.reduce((n, c) => n + c.removed, 0)} of ${data.blocks} blocks)` : ''} stays exactly as it is.</p>
