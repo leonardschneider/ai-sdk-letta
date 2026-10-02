@@ -128,6 +128,8 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
     permissions[ASK_USER_TOOL] ??= 'allow';
     if (permissions[ASK_USER_TOOL] === 'ask') throw new Error('ask_user is already interactive; use "allow" or "deny"');
   }
+  // Every web search result is reviewed by a person (or pre-approved by an automation): never 'allow'.
+  if (permissions.web_search === 'allow') throw new Error('web_search results are reviewed by a person before the agent sees them; its permission must be "ask" or "deny"');
   // Network commands always need a human: approval is the only network switch.
   if (permissions.run_command_online === 'allow') throw new Error('run_command_online uses the network; its permission must be "ask" or "deny"');
   const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(input.sandbox);

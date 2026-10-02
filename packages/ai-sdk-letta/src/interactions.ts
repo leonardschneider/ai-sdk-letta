@@ -24,6 +24,8 @@ export type InteractionRequest = {
    * their Atlassian token). Shared servers let only that person answer.
    */
   onBehalfOf?: string;
+  /** For approvals: whoever denies may add a note for the agent (`InteractionResponse.text`, up to 1000 characters). */
+  allowNote?: boolean;
   options?: Question['options'];
   allowFreeText?: boolean;
   multiSelect?: boolean;
@@ -36,7 +38,7 @@ export type InteractionRequest = {
  */
 export type ApprovalPreview = { kind: string; title?: string; text: string; data?: Record<string, unknown> };
 
-/** A human's answer. Approvals use `approved`; questions use `selected` and/or `text`. */
+/** A human's answer. Approvals use `approved` (and `text`: a note with a denial, when the request allows one); questions use `selected` and/or `text`. */
 export type InteractionResponse = { id: string; approved?: boolean; cancelled?: boolean; selected?: string[]; text?: string };
 
 /** Renders one request and resolves with the human's response. `signal` aborts when the prompt is withdrawn. */
@@ -128,7 +130,9 @@ export function validateResponse(request: InteractionRequest, value: unknown): I
   if (response.cancelled === true) return { id: request.id, cancelled: true };
   if (request.kind === 'approval') {
     if (typeof response.approved !== 'boolean') throw new Error('invalid_response');
-    return { id: request.id, approved: response.approved };
+    if (response.text !== undefined && (typeof response.text !== 'string' || !request.allowNote || response.approved || response.text.length > 1000)) throw new Error('invalid_response');
+    const note = response.text?.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim();
+    return { id: request.id, approved: response.approved, ...(note ? { text: note } : {}) };
   }
   const selected = response.selected ?? [];
   if (!Array.isArray(selected) || new Set(selected).size !== selected.length || selected.some(id => typeof id !== 'string' || !request.options?.some(o => o.id === id)) || (!request.multiSelect && selected.length > 1)) throw new Error('invalid_response');

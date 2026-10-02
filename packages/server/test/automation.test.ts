@@ -516,3 +516,12 @@ test('single-user runtimes forget their oldest finished runs instead of refusing
     assert.equal(f.runtime.latestRun('owner', thread)?.id, parent, 'the latest turn is always kept');
   } finally { await f.cleanup(); }
 });
+
+test('web_search can be pre-approved by an automation token (its results are then delivered unreviewed); it is listed only when the agent has it', async () => {
+  const { preApprovableTools } = await import('../src/index.js');
+  const { defineAgent, webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } = await import('ai-sdk-letta');
+  const withSearch = defineAgent({ id: 'w', name: 'W', model: 'a/b', instructions: 'x', tools: { ...webSearchTools }, permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS } });
+  assert.deepEqual(preApprovableTools(withSearch), ['web_search']);
+  const denied = defineAgent({ id: 'w', name: 'W', model: 'a/b', instructions: 'x', tools: { ...webSearchTools }, permissions: { web_search: 'deny' } });
+  assert.deepEqual(preApprovableTools(denied), []);
+});

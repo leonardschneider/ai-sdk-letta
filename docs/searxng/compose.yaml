@@ -1,0 +1,35 @@
+# SearXNG for the web_search tool of ai-sdk-letta (see README, "Web search").
+#
+#   docker compose -f docs/searxng/compose.yaml up -d
+#   SEARXNG_URL=http://127.0.0.1:8888 npm run gui
+#
+# SearXNG is AGPL-3.0. ai-sdk-letta never bundles it: it runs as its own
+# service, and the server only talks to it over HTTP.
+name: ai-sdk-letta-searxng
+services:
+  searxng:
+    # Pinned: the official image, by tag and digest. Update both together.
+    image: docker.io/searxng/searxng:2026.10.2-19ffbcd30@sha256:c642712fcedcdaa78fac44f71eada86aff510745826ba1bd1a368211fea2ce7f
+    restart: unless-stopped
+    # Loopback only: nothing outside this machine can reach it.
+    ports:
+      - "127.0.0.1:8888:8080"
+    environment:
+      # Set your own long random string (for example: openssl rand -hex 32).
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-to-a-long-random-string}
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    # Read-only root filesystem. The entrypoint's "can't create
+    # /etc/ssl/certs/ca-certificates.crt.new" warning is harmless: the image's
+    # own certificates are used.
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options: { max-size: 1m, max-file: "1" }
+volumes:
+  searxng-cache:

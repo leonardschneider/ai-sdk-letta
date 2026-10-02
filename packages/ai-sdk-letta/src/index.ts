@@ -39,7 +39,7 @@ export {
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
-export { createToolBridge, askUserTool, fileTraceWriter, withPreparation, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, PREPARE_CALL, PREPARED_CONTEXT, UNATTENDED_CODES, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions, type PrepareCall, type PreparedCall, type UnattendedPolicy, type UnattendedCode } from './tools.js';
+export { createToolBridge, askUserTool, fileTraceWriter, withPreparation, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, PREPARE_CALL, PREPARED_CONTEXT, REVIEWED_CONTEXT, UNATTENDED_CODES, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions, type PrepareCall, type PreparedCall, type UnattendedPolicy, type UnattendedCode } from './tools.js';
 export { scheduleTaskTool, schedulingTools, schedulingEnabled, resolveWhen, SCHEDULE_TASK_TOOL, SCHEDULING_TOOL_PERMISSIONS, SCHEDULER_CONTEXT, SCHEDULE_LIMITS, type TaskScheduler, type ScheduleTaskInput, type ScheduleTaskOutput, type ScheduleRequest, type ScheduledTask, type SchedulerContext } from './scheduling.js';
 export {
   requestDecisionTool, cancelDecisionTool, decisionTools, decisionsEnabled, parseDecision, decisionMessage, decisionOutcomeNote, pendingDecisionNote,
@@ -56,5 +56,13 @@ export {
   type AtlassianToolName, type AtlassianContext, type AtlassianConnectInput, type AtlassianSource, type AtlassianMedia, type SavedDocument,
 } from './atlassian.js';
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
+export {
+  webSearchTool, webSearchTools, webSearchEnabled, createWebResearcher, searxngSearch, validateResearch, deliverResearch, researchPreview, summaryPrompt, parseSummaryText,
+  WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_PERMISSIONS, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_RESEARCH_PREVIEW, WEB_SUMMARY_SCHEMA, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_DISMISSED,
+  type WebSearchInput, type WebSearchOutput, type WebResearch, type WebClaim, type WebSource, type WebSearchResult, type WebSourceInput, type WebSummaryRequest, type WebSummarizer,
+  type WebSearchEngine, type WebResearcher, type WebResearcherOptions, type WebSearchContext,
+} from './web-search.js';
+export { readPage, readableText, isBlockedAddress, checkPageUrl, PageError, PAGE_LIMITS, WEB_USER_AGENT, type ReadablePage, type ReadPageOptions, type PageErrorCode } from './web-fetch.js';
+export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUMMARIZER_NAME, type LettaSummarizerOptions } from './web-summarizer.js';
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';

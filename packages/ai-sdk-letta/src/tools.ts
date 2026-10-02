@@ -23,11 +23,25 @@ import type { ToolPermission } from './definition.js';
  * With permission `'ask'`, every call asks, with the preview when there is one.
  */
 export type PrepareCall = (input: unknown, options: { toolCallId: string; abortSignal: AbortSignal; context: Readonly<Record<string, unknown>> }) => Promise<PreparedCall> | PreparedCall;
-export type PreparedCall = { output?: unknown; approval?: 'required' | 'default'; preview?: ApprovalPreview; onBehalfOf?: string; state?: unknown };
+export type PreparedCall = {
+  output?: unknown; approval?: 'required' | 'default'; preview?: ApprovalPreview; onBehalfOf?: string; state?: unknown;
+  /**
+   * What the agent is told when the person denies the call (instead of the
+   * bare `user_denied`), and whether they may add a note for the agent
+   * (`allowNote`, up to 1000 characters; passed on as `note`).
+   */
+  denied?: { message: string; allowNote?: boolean };
+};
 /** Key of a tool's {@link PrepareCall}. */
 export const PREPARE_CALL: unique symbol = Symbol.for('ai-sdk-letta.prepareCall');
 /** Key under which `execute` receives the prepared state (`options.context[PREPARED_CONTEXT]`). */
 export const PREPARED_CONTEXT = 'ai-sdk-letta.prepared';
+/**
+ * Key of `execute`'s context saying whether a person approved this very call
+ * (`true`), or it ran without anyone asked (`false`: an `'allow'` call, or a
+ * call an unattended run pre-approved).
+ */
+export const REVIEWED_CONTEXT = 'ai-sdk-letta.reviewed';
 /** Attach a {@link PrepareCall} to an AI SDK tool. */
 export function withPreparation<T extends object>(definition: T, prepare: PrepareCall): T & { [PREPARE_CALL]: PrepareCall } {
   return Object.assign(definition, { [PREPARE_CALL]: prepare });
@@ -242,6 +256,8 @@ export function createToolBridge(options: ToolBridgeOptions) {
     if (!await validateArguments(name, args)) return denied(name, id, 'invalid_arguments');
     const started = Date.now();
     const deadline = (Object.hasOwn(options.toolTimeouts ?? {}, name) ? options.toolTimeouts![name] : undefined) ?? options.timeoutMs ?? 5000;
+    // An unattended turn never prepares an 'ask' call nobody pre-approved: it is refused before anything runs.
+    if (unattended && permissions[name] === 'ask' && !unattended.preApproved.includes(name)) return refuse(unattended, name, id, 'approval_required');
     // Optional preparation (see PrepareCall): may answer now, or require approval with a preview.
     const prepare = (definition as { [PREPARE_CALL]?: PrepareCall })[PREPARE_CALL];
     let prepared: PreparedCall = {};
@@ -267,6 +283,7 @@ export function createToolBridge(options: ToolBridgeOptions) {
     }
     const asks = permissions[name] === 'ask' || prepared.approval === 'required';
     let preApproved = false;
+    let approvedByPerson = false;
     if (unattended && (asks || name === ASK_USER_TOOL)) {
       // Nobody can answer: never prompt. A pre-approved tool runs, unless the call uses someone else's account.
       if (name === ASK_USER_TOOL) return refuse(unattended, name, id, 'question_required');
@@ -279,9 +296,16 @@ export function createToolBridge(options: ToolBridgeOptions) {
         signal.throwIfAborted();
         if (!options.interactions) return denied(name, id, 'interaction_unavailable');
         if (asks) {
-          const answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}) }, signal);
+          const answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}), ...(prepared.denied?.allowNote ? { allowNote: true } : {}) }, signal);
           signal.throwIfAborted();
-          if (answer.approved !== true) return denied(name, id, answer.cancelled ? 'approval_cancelled' : 'user_denied');
+          if (answer.approved !== true) {
+            if (answer.cancelled || !prepared.denied) return denied(name, id, answer.cancelled ? 'approval_cancelled' : 'user_denied');
+            // The tool says what a denial means to the agent, with the person's note if they wrote one.
+            emit(name, id, 'denied', Date.now(), 'user_denied');
+            const note = prepared.denied.allowNote && answer.text ? answer.text : undefined;
+            return { content: [{ type: 'text', text: JSON.stringify({ error: 'user_denied', message: prepared.denied.message, ...(note ? { note } : {}) }) }], isError: true };
+          }
+          approvedByPerson = true;
           emit(name, id, 'approved', started, 'approved_once');
         }
         if (name === ASK_USER_TOOL) {
@@ -305,7 +329,7 @@ export function createToolBridge(options: ToolBridgeOptions) {
         timer = setTimeout(() => control.abort(), deadline);
       });
       const base = options.context?.() ?? {};
-      const context = prepared.state !== undefined ? Object.freeze({ ...base, [PREPARED_CONTEXT]: prepared.state }) : base;
+      const context = Object.freeze({ ...base, ...(prepared.state !== undefined ? { [PREPARED_CONTEXT]: prepared.state } : {}), [REVIEWED_CONTEXT]: approvedByPerson });
       const sandbox = options.sandbox?.();
       const output = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return definition.execute!(args, { toolCallId: id, messages: [], abortSignal: signal, context, ...(sandbox ? { experimental_sandbox: sandbox } : {}) }); }), interrupted]);
       const result = await modelContent(definition, id, args, output);

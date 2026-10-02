@@ -18,6 +18,7 @@ From the repository root, after `npm ci` and `npm run build`:
 npm run tui                               # terminal
 npm run gui                               # browser, http://127.0.0.1:4400
 TEXT_STATS_PERMISSION=ask npm run tui     # require approval for every text_stats call
+WEB_SEARCH=1 SEARXNG_URL=http://127.0.0.1:8888 npm run gui   # web search (see "Web search" in the main README)
 AGENT_ID=my-sandbox LETTA_MODEL=anthropic/claude-sonnet-4-5 npm run tui
 ```
 

@@ -798,3 +798,42 @@ body[data-resizing] iframe { pointer-events: none; }
 .decision-line .line-meta { flex-shrink: 0; }
 .decision-line .line-label { min-width: 0; }
 .token-note { color: var(--accent); }
+
+/* ---------- Web research: review card, outcome line, sources ---------- */
+.web-research-card .card-head { color: var(--accent) !important; }
+/* The whole card fits in the dock: only the research scrolls, so Approve and Reject stay visible. */
+.dock:has(> .web-research-card) { overflow: hidden; }
+.web-research-card { display: flex; flex-direction: column; max-height: 55dvh; box-sizing: border-box; }
+.web-research-card > * { flex-shrink: 0; }
+.web-research-card .card-title { margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.web-research-card .card-details { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.web-review-scroll { flex: 0 1 auto; min-height: 72px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); padding: 10px 12px; }
+.web-research-body { display: grid; gap: 8px; }
+.web-summary { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.web-claims { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13.5px; color: var(--text); }
+.web-claims li { overflow-wrap: anywhere; }
+.web-cite { font-size: 10.5px; color: var(--accent); margin-left: 2px; font-weight: 600; }
+.web-sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.web-sources li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.web-source-n { flex-shrink: 0; min-width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700; }
+.web-source-text { display: flex; flex-direction: column; min-width: 0; font-size: 13.5px; line-height: 1.35; }
+.web-source-text a { color: var(--accent); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.web-source-text a:hover { text-decoration: underline; }
+.web-source-ext { margin-left: 4px; vertical-align: -1px; opacity: .7; }
+.web-source-host { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+.web-sources.compact .web-source-text { flex-direction: row; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
+.web-meta { margin: 8px 0 0; font-size: 12.5px; color: var(--text-3); }
+.web-research-card .other-field { margin-top: 10px; }
+.web-research-card .card-actions { flex-wrap: wrap; }
+.line.web-line[data-tone="answered"] .line-icon { color: var(--accent); }
+.line.web-line[data-tone="denied"] .line-icon { color: var(--text-3); }
+.reply-sources { margin: 10px 0 2px; padding-top: 8px; border-top: 1px dashed var(--border); display: grid; gap: 6px; }
+.reply-sources-label { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
+@media (max-width: 480px) {
+  .web-research-card .card-actions .hint { display: none; }
+  .web-research-card .card-actions .btn { flex: 1 1 auto; justify-content: center; }
+  .web-research-card { max-height: 60dvh; padding-bottom: 14px; }
+  .web-research-card .card-details { -webkit-line-clamp: 2; }
+  .web-research-card .card-actions { margin-top: 10px; gap: 6px; }
+  .web-research-card .card-actions .btn { padding: 7px 10px; }
+}

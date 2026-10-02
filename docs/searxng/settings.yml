@@ -1,0 +1,32 @@
+# SearXNG settings for ai-sdk-letta's web_search (loopback, one client).
+# Everything not listed here keeps SearXNG's defaults:
+# https://docs.searxng.org/admin/settings/
+use_default_settings: true
+
+general:
+  instance_name: ai-sdk-letta search
+
+search:
+  # web_search reads JSON. HTML stays on for a quick look in a browser.
+  formats: [html, json]
+  safe_search: 1
+  autocomplete: ""
+
+server:
+  # The secret comes from SEARXNG_SECRET (see compose.yaml).
+  secret_key: "overridden-by-SEARXNG_SECRET"
+  # The limiter protects public instances from bots and needs a Valkey
+  # server. This instance only listens on 127.0.0.1 and has one client (the
+  # ai-sdk-letta server, which already bounds its own searches), so it is off.
+  # Turn it on (with Valkey) only if you ever expose the instance.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: GET
+
+outgoing:
+  request_timeout: 4.0
+  max_request_timeout: 8.0
+
+ui:
+  query_in_title: false

@@ -142,3 +142,13 @@ test('ask_user supports choices, multiselect, free text and cancellation; valida
   const request: InteractionRequest = { ...approval('check'), id: 'id', kind: 'question', options: question.options };
   for (const answer of [{ selected: ['a', 'b'] }, { selected: ['a', 'a'] }, { selected: ['unknown'] }, { text: 'not allowed' }, {}, { selected: 3 }]) assert.throws(() => validateResponse(request, { id: 'id', ...answer }));
 });
+
+test('an approval answer may carry a note only when denying a request that allows one; the note is single-line', async () => {
+  const { validateResponse } = await import('../src/index.js');
+  const request = { id: 'r1', toolCallId: 't', tool: 'web_search', kind: 'approval' as const, title: 'Review', allowNote: true };
+  assert.deepEqual(validateResponse(request, { id: 'r1', approved: false, text: '  Too old\n\u202esources ' }), { id: 'r1', approved: false, text: 'Too old sources' });
+  assert.deepEqual(validateResponse(request, { id: 'r1', approved: false, text: '   ' }), { id: 'r1', approved: false });
+  assert.throws(() => validateResponse(request, { id: 'r1', approved: true, text: 'note' }), /invalid_response/, 'no note with an approval');
+  assert.throws(() => validateResponse(request, { id: 'r1', approved: false, text: 'x'.repeat(1001) }), /invalid_response/);
+  assert.throws(() => validateResponse({ ...request, allowNote: undefined }, { id: 'r1', approved: false, text: 'note' }), /invalid_response/, 'only when the request allows one');
+});
