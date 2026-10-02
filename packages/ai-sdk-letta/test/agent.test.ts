@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { convertToModelMessages, readUIMessageStream, type UIMessage, type ModelMessage } from 'ai';
 import type { SDKMessage } from '@letta-ai/letta-agent-sdk';
-import { LettaAgent, foregroundToolsCommand } from '../src/index.js';
+import { LettaAgent, foregroundToolsCommand, speakerNote } from '../src/index.js';
 import { bridge as createBridge, registry } from './fixtures.js';
 
 test('GUI foreground tool policy is runtime scoped and covers SDK human-wait timeout', () => {
@@ -143,4 +143,27 @@ test('cancellation closes active resources and disables continuation', async () 
   for await (const part of result.fullStream) { if (part.type === 'text-delta') control.abort(); }
   await assert.rejects(f.agent.generate({ prompt: 'again' }), /uncertain/);
   assert.ok(f.counts().closed >= 1);
+});
+
+test('otid and speaker: the turn is tagged and prefaced; transcript and validation unaffected', async () => {
+  const sent: { message: unknown; otid?: string }[] = [];
+  const agent = new LettaAgent({ id: 'test', tools: registry, open: () => ({
+    send: async (message: unknown, options?: { otid?: string }) => { sent.push({ message, otid: options?.otid }); },
+    abort: async () => {}, close: () => {},
+    async *stream() {
+      yield { type: 'assistant', content: 'Hi', uuid: '1' } as SDKMessage;
+      yield { type: 'result', success: true, uuid: '2', durationMs: 1, conversationId: 'c' } as SDKMessage;
+    },
+  }) });
+  await agent.generate({ prompt: 'plain' });
+  await agent.generate({ prompt: 'hello', otid: 'run-1', speaker: { name: 'Alice <b>Example</b>\u202e', login: 'alice@example.com' } });
+  assert.deepEqual(sent[0], { message: 'plain', otid: undefined });
+  assert.equal(sent[1]!.otid, 'run-1');
+  assert.equal(sent[1]!.message, `${speakerNote({ name: 'Alice <b>Example</b>\u202e', login: 'alice@example.com' })}hello`);
+  assert.match(String(sent[1]!.message), /^<system-reminder>\nThis message is from Alice bExample\/b \(alice@example\.com\)\./);
+  // The retained transcript holds the user's text only, so the next turn extends it unchanged.
+  assert.deepEqual(agent.transcript.filter(m => m.role === 'user').map(m => m.content), ['plain', 'hello']);
+  await assert.rejects(agent.generate({ prompt: 'x', otid: 'bad otid!' }), /Invalid otid/);
+  await assert.rejects(agent.generate({ prompt: 'x', speaker: {} as never }), /Invalid speaker/);
+  assert.equal(speakerNote({ name: '   ' }).includes('A team member'), true);
 });

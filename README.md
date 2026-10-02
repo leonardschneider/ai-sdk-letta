@@ -618,6 +618,79 @@ agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
 
+## Sharing with your team (Tailscale)
+
+One server can host several agents for a small team. People reach it over
+[Tailscale](https://tailscale.com), which also tells the app who each of
+them is: there are no passwords. Each agent has its own **members**;
+everything inside an agent (conversations, files, memory) is shared by its
+members. For something private, give it an agent with one member.
+
+1. **Install Tailscale** on the machine that runs the agents and sign in
+   ([download](https://tailscale.com/download)). In the admin console, enable
+   [HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) (the
+   first `tailscale serve` run links to the page).
+2. **Invite people** to your tailnet (admin console → Users → Invite), or
+   [share the machine](https://tailscale.com/kb/1084/sharing) with them. Only
+   devices in your tailnet can reach the app.
+3. **Start the server in team mode**, bound to 127.0.0.1 as always:
+
+   ```sh
+   npm run gui -- --tailscale --port 4400 \
+     --owner you@example.com \
+     --origin https://your-machine.your-tailnet.ts.net
+   ```
+
+   `--owner` is your Tailscale login (as `tailscale status` shows it; repeat
+   it, or separate with commas, for several). Owners are admins of every
+   agent. `--origin` is the address people will open (step 4). From code:
+   `startTeamServer([agentA, agentB], assets, { owners, origins, port })`
+   from `@ai-sdk-letta/server`.
+4. **Publish it to your tailnet** with Tailscale Serve:
+
+   ```sh
+   tailscale serve --bg 4400        # https://your-machine.your-tailnet.ts.net
+   tailscale serve status           # check
+   tailscale serve --https=443 off  # stop publishing
+   ```
+
+   Never use `tailscale funnel` for this: Funnel publishes to the internet,
+   and its requests carry no identity (the app refuses them).
+5. **Add members.** Open the app, click the agent's name at the top left, then
+   **Manage members…**, and add people by their Tailscale login (for example
+   `alex@example.com` or `alex@github`). They see the agent the next time they
+   open the app; anyone else in the tailnet sees "You don't have access yet".
+   Admins can also make someone admin, or remove them.
+
+In the app, each of your messages shows its author, and the agent is told
+who is speaking. Conversations run at the same time; in one conversation, a
+message sent while a reply is running **waits in a visible queue** and is
+sent when the reply finishes (its author, or an admin, can withdraw it
+first). Only the person who sent a message, or an admin, can answer its
+approvals and questions or stop its reply; everyone else sees who it is
+waiting for. The agent switcher lists only the agents you belong to.
+
+**How identity works.** `tailscale serve` proxies each request to the app on
+127.0.0.1 and adds `Tailscale-User-Login`, `Tailscale-User-Name` and
+`Tailscale-User-Profile-Pic`, after removing any such headers the browser
+sent ([Tailscale docs](https://tailscale.com/kb/1312/serve#identity-headers)).
+The app believes them only on loopback connections, which is why it never
+listens on the network. Anyone who can run programs on the server machine
+could therefore claim to be anyone: run team mode only on a machine whose
+local users you trust. Requests from Funnel and from tagged devices carry no
+user identity and get no access.
+
+**Where things are kept.** People and memberships: `<state>/team/team.json`
+(a stable ID per person, their login and name; other features attach to the
+ID). Each agent's conversations and runs: `<state>/server/<id>/team/`.
+Single-user mode (`npm run gui` without `--tailscale`) is unchanged and does
+not read either.
+
+**Limits for now.** Tailscale is the only way to sign in. Agents are the
+definitions you start the server with (creating agents from the app may come
+later). At most 4 replies run at once per agent (more wait in their
+conversation's queue), and a conversation queues up to 10 messages.
+
 ## Security model
 
 - **Tools fail closed.** A tool without a permission entry, or with `deny`, is
@@ -666,6 +739,14 @@ token-authenticated server-to-server API with the same routes.
 - **Shell commands run in a sandbox** without network, credentials or host
   environment; network commands always ask (see
   [Shell commands](#shell-commands-sandbox)).
+- **Team mode trusts Tailscale, on loopback only.** Identity comes from the
+  headers `tailscale serve` sets, believed only on connections from
+  127.0.0.1; requests for other hosts than the configured origins, cross-site
+  requests and Funnel requests are refused. Every mutation needs the exact
+  origin and a per-person CSRF token. Each agent's routes answer 404 to
+  non-members (the same as an unknown agent); answering approvals and
+  questions, and stopping a reply, need the person who sent the message or an
+  admin of that agent (403 otherwise); only admins change members.
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
 - **Audit.** Tool activity is logged as metadata only (tool, status, duration,
@@ -733,8 +814,16 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 - **Local backend only.** `openLettaAgent` uses the Agent SDK `local` backend.
   Letta Cloud and remote App Servers are not supported by `LettaAgent` yet
   (the provider package does support them).
-- **One process per agent.** The identity lock allows one open runtime per
-  logical ID. The HTTP runtime runs one turn at a time.
+- **One process per agent.** The identity lock allows one process per
+  logical ID. The single-user HTTP runtime runs one turn at a time; team mode
+  (`startTeamServer`, `openAgentHost`) runs turns of different conversations
+  at the same time, each in its own Letta session (up to 4 per agent), and
+  queues turns within a conversation.
+- **Team mode.** Tailscale is the only sign-in; agents come from the
+  definitions the server starts with; an admin's access changes take effect on
+  the next request (open pages learn of it then). Queued messages live in
+  memory until sent: a restart withdraws them (marked "not sent"), never
+  replays them.
 - **Text, images and files.** Up to 8,000 characters, 4 images (PNG, JPEG,
   GIF, WebP; 5 MB each, 10 MB total) and, with the file tools, 8 files
   (PDF or text, 25 MB each) per turn. No Office documents, no OCR (scanned

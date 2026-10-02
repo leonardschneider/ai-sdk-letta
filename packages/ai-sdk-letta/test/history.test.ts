@@ -168,3 +168,11 @@ test('projection carries valid backend message dates as display metadata only', 
   assert.deepEqual(display[0].metadata, { createdAt: '2026-09-28T10:00:00.000Z' });
   assert.equal(display[1].metadata, undefined);
 });
+test('user turns keep their OTID (when well formed) so applications can match them; assistant turns never carry one', () => {
+  const display = projectHistory(rows(
+    { ...text('u1', 'user', 'tagged'), otid: 'run-123', date: '2026-10-01T10:00:00Z' },
+    { ...text('u2', 'user', 'weird'), otid: 'has spaces <x>' },
+    { ...text('a1', 'assistant', 'reply'), otid: 'assistant-otid' },
+  ), []);
+  assert.deepEqual(display.map(m => m.metadata), [{ createdAt: '2026-10-01T10:00:00.000Z', otid: 'run-123' }, undefined, undefined]);
+});

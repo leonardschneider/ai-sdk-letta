@@ -22,6 +22,8 @@ export type SidebarProps = {
   versions?: Versions;
   /** The agent's LaTeX setting, and changing a conversation's override (⋯ menu). */
   agentLatex: boolean; onLatex(id: string, value: LatexOverride): void;
+  /** Team servers: the agent switcher in place of the name, and the signed-in person at the foot. */
+  brand?: React.ReactNode; footer?: React.ReactNode;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -47,7 +49,7 @@ export function Sidebar(props: SidebarProps) {
   const rows = useMemo(() => ({ editingId, setEditingId, busy, runningId: props.runningId, archivingIds: props.archivingIds, latex, agentLatex: props.agentLatex, onLatex: props.onLatex }), [editingId, busy, props.runningId, props.archivingIds, latex, props.agentLatex, props.onLatex]);
   return <Rows.Provider value={rows}>
     <div className="sidebar-head">
-      <div className="brand"><span className="brand-mark" aria-hidden="true">✳︎</span><span>{props.agent.name}</span></div>
+      {props.brand ?? <div className="brand"><span className="brand-mark" aria-hidden="true">✳︎</span><span>{props.agent.name}</span></div>}
       {props.onCollapse && <button type="button" className="icon-btn small collapse-btn" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true" title="Hide sidebar (⌘B)" onClick={props.onCollapse}><PanelLeftClose size={17}/></button>}
       {props.onClose && <button type="button" className="icon-btn drawer-close" aria-label="Close sidebar" onClick={props.onClose}><X size={18}/></button>}
     </div>
@@ -77,6 +79,7 @@ export function Sidebar(props: SidebarProps) {
         </section>}
       </nav>
     </ThreadListPrimitive.Root>
+    {props.footer}
     <details className="about"><summary>About this space</summary><p>Built with assistant-ui and ai-sdk-letta. Letta runs the agent; its tools run in the local server process.</p><p className="mono">{props.agent.id}</p><VersionInfo versions={props.versions}/></details>
   </Rows.Provider>;
 }
@@ -86,7 +89,7 @@ function ThreadListItem() {
   const id = useAuiState(s => s.threadListItem.id);
   const title = useAuiState(s => s.threadListItem.title) ?? 'Untitled';
   const status = useAuiState(s => s.threadListItem.status);
-  const custom = useAuiState(s => s.threadListItem.custom) as { state?: string } | undefined;
+  const custom = useAuiState(s => s.threadListItem.custom) as { state?: string; running?: boolean; queued?: number } | undefined;
   const { editingId, setEditingId, busy, runningId, archivingIds, latex, agentLatex, onLatex } = useContext(Rows);
   const latexValue = latex.get(id) ?? 'inherit';
   const [menuOpen, setMenuOpen] = useState(false);
@@ -109,6 +112,7 @@ function ThreadListItem() {
           <span className="thread-label">
             <span className="thread-title"><TitleView title={title} shortUrls linkTabIndex={-1}/></span>
             {!ready && <span className="thread-note">unavailable</span>}
+            {ready && custom?.running && <span className="thread-activity" title={custom.queued ? `Replying · ${custom.queued} waiting` : 'Replying'}><span className="sr-only">{custom.queued ? `replying, ${custom.queued} waiting` : 'replying'}</span>{!!custom.queued && <span aria-hidden="true">{custom.queued}</span>}</span>}
           </span>
         </>}
     {!editing && <ThreadListItemMorePrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>

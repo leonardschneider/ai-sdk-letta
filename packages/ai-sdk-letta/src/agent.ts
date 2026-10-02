@@ -60,7 +60,26 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   beforeTurn?: () => void;
 }
 
-type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS>;
+/**
+ * Per-call options of {@link LettaAgent} beyond the AI SDK's.
+ *
+ * - `otid` sets the Letta message ID (OTID) of the user turn, so an
+ *   application can find that turn in history later (for example, to show who
+ *   wrote it). 1–100 characters of letters, digits, `-`, `_`, `.` and `:`.
+ * - `speaker` tells the agent who wrote this turn when several people share
+ *   it: a short `<system-reminder>` line before the message ("This message is
+ *   from Alice Example (alice@example.com)."). Display history never shows it.
+ */
+export type LettaCallOptions = { otid?: string; speaker?: { name: string; login?: string } };
+/** The line that tells the agent who is speaking (see {@link LettaCallOptions}). Names are cleaned of markup and controls. */
+export function speakerNote(speaker: { name: string; login?: string }): string {
+  const clean = (value: string) => value.replace(/[\p{Cc}\p{Cf}<>]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const name = clean(speaker.name) || 'A team member';
+  const login = speaker.login ? clean(speaker.login) : '';
+  return `<system-reminder>\nThis message is from ${name}${login && login !== name ? ` (${login})` : ''}. Several people share this conversation; address them by name when it helps.\n</system-reminder>\n`;
+}
+type Call<TOOLS extends ToolSet> = AgentCallParameters<never, TOOLS> & LettaCallOptions;
+const OTID = /^[A-Za-z0-9._:-]{1,100}$/;
 const usage = (): LanguageModelV4Usage => ({ inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined }, outputTokens: { total: undefined, text: undefined, reasoning: undefined } });
 
 /**
@@ -304,8 +323,9 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
+    if (options.otid !== undefined && (typeof options.otid !== 'string' || !OTID.test(options.otid))) throw new Error('Invalid otid');
     if (options.prompt !== undefined && options.messages !== undefined) throw new Error('Use prompt or messages, not both');
     const messages = typeof options.prompt === 'string' ? [...this.history, { role: 'user' as const, content: options.prompt }] : options.messages ?? options.prompt;
     if (!Array.isArray(messages) || !messages.length) throw new Error('Expected a new user turn');
@@ -326,10 +346,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;
     // The retained transcript keeps images as hashes only; Letta already holds the bytes.
     // (Compact before cloning: URL objects in image parts are not cloneable.)
-    return { messages: structuredClone(compactTranscript(messages)), message: turn.message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files };
+    if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) throw new Error('Invalid speaker');
+    const preface = options.speaker ? speakerNote(options.speaker) : '';
+    const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
+    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files };
   }
 
-  private model(message: SendMessage, signal: AbortSignal): LanguageModelV4 {
+  private model(message: SendMessage, signal: AbortSignal, otid?: string): LanguageModelV4 {
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
       let session: TurnSession | undefined;
       let completed = false;
@@ -345,7 +368,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         session = this.open(signal);
         signal.addEventListener('abort', abort, { once: true });
         this.delivery?.begin();
-        await session.send(message);
+        await (otid ? session.send(message, { otid }) : session.send(message));
         signal.throwIfAborted();
         for await (const event of session.stream()) {
           signal.throwIfAborted();
@@ -422,7 +445,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
       this.history = [...turn.messages, ...result.response.messages];
       return result;
@@ -431,9 +454,9 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   }
 
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
-  async stream(options: AgentStreamParameters<never, TOOLS>) {
+  async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
-    return streamText({ model: this.model(turn.message, turn.signal), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+    return streamText({ model: this.model(turn.message, turn.signal, turn.otid), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
       onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
       onFinish: result => {

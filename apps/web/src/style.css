@@ -490,6 +490,74 @@ body[data-resizing] iframe { pointer-events: none; }
 .preview-table .row-num { color: var(--text-3); text-align: right; font-weight: 500; position: sticky; left: 0; background: var(--bg-elev); width: 1%; }
 .preview-table thead .row-num { z-index: 2; }
 
+/* ---------- Team (multi-user) ---------- */
+.avatar { display: inline-block; flex-shrink: 0; border-radius: 50%; object-fit: cover; background: var(--hover); }
+.avatar.initials { display: inline-grid; place-items: center; font-weight: 650; letter-spacing: .02em; line-height: 1; color: hsl(var(--avatar-hue, 150) 45% 28%); background: hsl(var(--avatar-hue, 150) 45% 88%); }
+@media (prefers-color-scheme: dark) { .avatar.initials { color: hsl(var(--avatar-hue, 150) 50% 86%); background: hsl(var(--avatar-hue, 150) 30% 28%); } }
+/* Agent switcher: the agent's name, as a button. */
+.agent-switch { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; border: 0; background: transparent; padding: 5px 8px; margin: -5px -8px; border-radius: 9px; font-weight: 650; font-size: 15px; letter-spacing: -.01em; color: var(--text); }
+.agent-switch:hover, .agent-switch[data-state="open"] { background: var(--hover); }
+.agent-switch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-switch-chev { flex-shrink: 0; color: var(--text-3); transition: transform .15s; }
+.agent-switch[data-state="open"] .agent-switch-chev { transform: rotate(180deg); }
+.agent-menu { min-width: 230px; }
+.agent-menu-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.role-badge { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 8px; line-height: 18px; }
+.role-badge.small { font-size: 10.5px; padding: 0 6px; line-height: 16px; }
+/* Signed-in person, at the foot of the sidebar. */
+.current-user { display: flex; align-items: center; gap: 10px; padding: 10px 8px 8px; margin-top: 6px; border-top: 1px solid var(--border); min-width: 0; }
+.current-user-text { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.current-user-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.current-user-login { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.current-user + .about { border-top: 0; padding-top: 2px; }
+/* A conversation with a reply running (and messages waiting) somewhere on the server. */
+.thread-activity { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent); }
+.thread-activity::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+/* Author above a user bubble. */
+.msg-author { display: flex; align-items: center; gap: 6px; margin: 0 2px 4px; font-size: 12.5px; color: var(--text-2); }
+.msg-author-name { font-weight: 600; }
+.msg-author[data-mine] .msg-author-name { color: var(--text-3); font-weight: 550; }
+/* Messages waiting behind the running reply. */
+.queue { border: 1px dashed var(--border-strong); border-radius: 12px; padding: 8px 10px 6px; margin-bottom: 8px; background: color-mix(in srgb, var(--bg-elev) 70%, transparent); }
+.queue-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); font-weight: 550; margin-bottom: 4px; }
+.queue-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 140px; overflow-y: auto; }
+.queue-item { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13.5px; }
+.queue-author { font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.queue-item .icon-btn { color: var(--text-3); }
+/* Someone else's approval or question: shown, not answerable. */
+.waiting-card .card-head { color: var(--text-2) !important; }
+.waiting-card .card-details { margin-bottom: 0; }
+/* Members dialog. */
+.modal.members { width: 520px; padding: 18px 20px 14px; max-height: min(720px, 100%); }
+.members-head { display: flex; align-items: flex-start; gap: 12px; }
+.members-head > div { flex: 1; min-width: 0; }
+.members-head .modal-text { margin-bottom: 12px; }
+.member-add { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.member-input { flex: 1; min-width: 180px; height: 38px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); font-size: 14px; outline: none; }
+.member-input:focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent); }
+.member-input[aria-invalid] { border-color: var(--danger); }
+.member-role { height: 38px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-elev); color: var(--text); font: inherit; font-size: 14px; }
+.member-problem { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--danger); }
+.member-list { list-style: none; margin: 0 -6px; padding: 0; overflow-y: auto; min-height: 60px; }
+.member-row { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 10px; }
+.member-row:hover { background: var(--hover); }
+.member-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.member-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-you { font-weight: 500; color: var(--text-3); }
+.member-login { font-size: 12.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-pending { color: var(--text-2); font-style: italic; }
+.member-empty { padding: 12px 6px; font-size: 13.5px; }
+/* Signed in, but a member of no agent. */
+.no-access { height: 100dvh; display: grid; place-items: center; padding: 24px; }
+.no-access-card { max-width: 440px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.no-access-card h1 { font-size: 22px; letter-spacing: -.01em; margin: 12px 0 6px; }
+.no-access-card p { margin: 0 0 8px; color: var(--text-2); }
+.no-access-card .btn { margin-top: 10px; }
+.mono-inline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; background: var(--code-bg); border-radius: 5px; padding: 0 .35em; }
+.spin { animation: spin 1s linear infinite; }
+
 /* ---------- Mobile: drawer ---------- */
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 320px); z-index: 50; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-pop); visibility: hidden; }
@@ -505,7 +573,10 @@ body[data-resizing] iframe { pointer-events: none; }
   .topbar .resources-btn, .topbar .latex-btn { margin-left: 0; }
   .modal-scrim { padding: 0; place-items: stretch; }
   .modal.preview { width: 100%; height: 100%; border-radius: 0; border: 0; }
-  .modal.confirm, .modal.move { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .modal.confirm, .modal.move, .modal.members { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .modal.members { max-height: 92dvh; }
+  .member-add .btn { flex: 1; justify-content: center; }
+  .queue-list { max-height: 96px; }
   .preview-markdown { padding: 14px 16px 20px; }
   .res-row { min-height: 36px; }
   .drawer-close { display: inline-grid; }

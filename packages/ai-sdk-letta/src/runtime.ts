@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
-import type { ToolSet } from 'ai';
+import type { ToolSet, UIMessage } from 'ai';
 import { LettaAgent } from './agent.js';
 import { creationOptions, dreamingCommand, INTERNAL_MEMORY_TOOLS, type AgentDefinition } from './definition.js';
 import { acquireIdentity, validConversationId, type Identity } from './identity.js';
@@ -104,33 +104,67 @@ export async function openResources(paths: ReturnType<typeof statePaths>, agentI
   return resources;
 }
 
-/** Open an agent, or throw if no conversation was selected. */
-export async function createLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: Omit<OpenAgentOptions, 'choose'> = {}): Promise<LettaRuntime<TOOLS>> {
-  const runtime = await openLettaAgent(definition, options);
-  if (!runtime) throw new Error('No conversation selected');
-  return runtime;
+/** A conversation to open on an {@link AgentHost}: an existing one, or a new one with this title. */
+export type ConversationTarget = { conversationId: string } | { newTitle: string };
+
+/** One open conversation of an {@link AgentHost}: its own Letta session, tools, interactions and sandbox. */
+export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
+  agent: LettaAgent<TOOLS>;
+  conversationId: string;
+  title: string;
+  /** Reload the display history from the backend (nothing is sent; projected like `presentation.initialMessages`). */
+  history(): Promise<UIMessage[]>;
+  /** Close this conversation's session (the host and other conversations stay open). Idempotent. */
+  close(): Promise<void>;
 }
 
 /**
- * Open (creating on first use) the persistent Letta agent for a definition on
- * the local Letta backend, and return a ready {@link LettaAgent}.
- *
- * Steps, each failing closed: acquire the identity lock and mapping; select or
- * create a conversation; resume the session; verify it is idle and its history
- * settled; restore display history; apply project-scoped dreaming and verify
- * it; confirm MemFS. Returns `undefined` if `choose` returned `null`.
+ * The persistent Letta agent of a definition, held open by one process (the
+ * identity lock), with any number of conversations open at once. Each
+ * conversation has its own Letta session, so turns in different conversations
+ * run concurrently; turns within one conversation are one at a time.
  */
-export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: OpenAgentOptions = {}): Promise<LettaRuntime<TOOLS> | undefined> {
+export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
+  readonly definition: AgentDefinition<TOOLS>;
+  readonly identity: Identity;
+  /** The agent's resources, when it has file tools or a sandbox. */
+  readonly resources?: ResourceStore;
+  /** Open a conversation. Opening one that is already open is refused; close it first. */
+  open(target: ConversationTarget): Promise<ConversationSession<TOOLS>>;
+  /** Close every open conversation and the SDK client, then release the identity lock. Idempotent. */
+  close(): Promise<void>;
+}
+
+/** Options for {@link openAgentHost}. */
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces'>;
+
+type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
+type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
+  lease: Awaited<ReturnType<typeof acquireIdentity>>;
+  openConversation(target: ConversationTarget): Promise<OpenedConversation<TOOLS>>;
+};
+
+const lettaClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 180_000, startupTimeoutMs: 60_000 } });
+
+/**
+ * Open (creating on first use) the persistent Letta agent of a definition on
+ * the local Letta backend, without opening a conversation yet. Holds the
+ * identity lock until `close()`. Use {@link AgentHost.open} to open
+ * conversations; several may be open (and run turns) at the same time.
+ */
+export async function openAgentHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: AgentHostOptions = {}): Promise<AgentHost<TOOLS>> {
+  return hostInternals(definition, options);
+}
+
+async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: AgentHostOptions): Promise<Internals<TOOLS>> {
   const paths = statePaths(resolveStateDirectory(options.stateDirectory));
   const cwd = paths.agents;
-  const client = new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 180_000, startupTimeoutMs: 60_000 } });
-  let session: LettaCodeSession | undefined;
+  const client = lettaClient();
   let release: (() => void) | undefined;
-  let interactions: ToolInteractions | undefined;
-  let sandbox: SandboxManager | undefined;
+  const open = new Set<OpenedConversation<TOOLS>>();
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
-    try { interactions?.close(); await sandbox?.close(); session?.close(); await client.close(); }
+    try { await Promise.allSettled([...open].map(conversation => conversation.close())); await client.close(); }
     finally { release?.(); }
   })();
   try {
@@ -153,95 +187,179 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     });
     const { identity, selectConversation, createConversation, assertNoPendingTurn, beginTurn, completeTurn } = lease;
     release = lease.release;
-    // A fresh management client sees agents created by the SDK's separate process.
-    const manager = managementClient();
-    let conversationId = identity.conversationId;
-    let conversationTitle = 'Default conversation';
     // Files of earlier versions are moved into the resources once; their folders are named after the conversations' titles.
-    let titles: Record<string, string> = {};
-    try {
-      if ((filesEnabled(definition) || sandboxEnabled(definition)) && ResourceStore.open(paths.resources, identity.agentId).pendingMigration(paths.attachments).length) {
-        titles = Object.fromEntries((await listConversations(query => manager.conversations.list(query), identity.agentId)).map(c => [c.id, sanitizeText(c.summary ?? '')]));
-      }
-      const choice: ConversationChoice = options.choose
-        ? await options.choose(identity, await listConversations(query => manager.conversations.list(query), identity.agentId))
-        : options.newTitle !== undefined ? { newTitle: options.newTitle } : { conversationId: options.conversationId ?? identity.conversationId };
-      if (choice === null) { await close(); return undefined; }
-      if ('newTitle' in choice) {
-        if (!choice.newTitle.trim() || choice.newTitle.length > 120) throw new Error('Conversation title must contain 1–120 characters');
-        conversationId = await createConversation(async agentId => {
-          const created = await manager.conversations.create({ agentId, summary: sanitizeText(choice.newTitle.trim()) });
-          if (created.agent_id !== agentId) throw new Error('Created conversation belongs to a different agent');
-          return created.id;
-        });
-      } else conversationId = choice.conversationId;
-      if (!validConversationId(conversationId)) throw new Error('Invalid conversation ID');
-      if (conversationId !== 'default') {
-        const conversation = await manager.conversations.retrieve(conversationId);
-        if (conversation.agent_id !== identity.agentId || conversation.archived) throw new Error('Conversation is archived or belongs to another agent');
-        conversationTitle = sanitizeText(conversation.summary ?? 'Untitled conversation');
-      }
-    } finally { await manager.close(); }
-    assertNoPendingTurn(conversationId);
-    let turnSignal: AbortSignal | undefined;
-    const broker = interactions = new ToolInteractions();
-    // Resources: every file of the agent in one git-backed folder, one folder
-    // per conversation. The current conversation is bound here (never from
-    // tool arguments); tools may read other conversations' folders too.
     let resources: ResourceStore | undefined;
-    let attachments: AttachmentStore | undefined;
     if (filesEnabled(definition) || sandboxEnabled(definition)) {
-      resources = await openResources(paths, identity.agentId, { ...titles, [conversationId]: conversationTitle });
-      const workspace = new AttachmentStore(resources, conversationId, { title: conversationTitle });
-      workspace.path; // create the conversation's folder now, named after its title
-      if (filesEnabled(definition)) attachments = workspace;
-      // Shell commands: one sandbox per conversation, created on the first
-      // command, with all resources at /workspace and the conversation's folder as the working directory.
-      if (sandboxEnabled(definition)) {
-        const store = resources;
-        sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}` });
+      let titles: Record<string, string> = {};
+      if (ResourceStore.open(paths.resources, identity.agentId).pendingMigration(paths.attachments).length) {
+        const manager = managementClient();
+        try { titles = Object.fromEntries((await listConversations(query => manager.conversations.list(query), identity.agentId)).map(c => [c.id, sanitizeText(c.summary ?? '')])); }
+        finally { await manager.close(); }
       }
+      resources = await openResources(paths, identity.agentId, titles);
     }
-    const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
-    // Without a sandbox, the shell tools are never exposed.
-    const allowedTools = sandbox ? undefined : Object.keys(definition.tools).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name));
-    const sandboxTimeout = definition.sandbox ? sandboxToolTimeout(definition.sandbox) : undefined;
-    const shell = sandbox;
     const persist = options.traces === false ? undefined : typeof options.traces === 'function' ? options.traces : fileTraceWriter(paths.traces);
-    // Background harness work must never open a prompt over an idle chat input.
-    const bridge = createToolBridge({
-      tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
-      ...(sandboxTimeout ? { toolTimeouts: Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) } : {}),
-      get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
-      context: () => toolContext,
-      sandbox: () => shell?.session,
-    });
-    let memoryRoot: string | undefined;
-    session = client.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
-    const ready = await session.ready();
-    if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
-    assertIdle(await session.getDeviceStatus());
-    if (options.foregroundExternalTools !== false && bridge.tools.length) {
-      // The SDK's tools serializer drops auto_background/timeout_ms. Use the
-      // supported runtime-scoped protocol rather than global defaults.
-      const configured = await session.sendCommand(foregroundToolsCommand(bridge, ready.agentId, ready.conversationId), { responseType: 'runtime_external_tools_update_response' });
-      if (configured.success !== true) throw new Error('Unable to configure foreground interaction tools');
-    }
-    const live = session;
-    const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query));
-    assertHistorySettled(history.messages);
-    const initialMessages = projectHistory(history.messages, Object.keys(definition.tools));
-    // The SDK's dreaming option writes global defaults. Use the protocol
-    // command with project scope (the private state cwd) instead.
-    const configured = await session.sendCommand(dreamingCommand(definition, ready.agentId, ready.conversationId), { responseType: 'set_reflection_settings_response' });
-    if (configured.success !== true) throw new Error('Unable to configure project-scoped dreaming');
-    const status = await session.getDeviceStatus();
-    if (!status.memoryDirectory) throw new Error('MemFS unavailable; refusing to run without memory');
-    const reflection = status.raw.reflection_settings as { trigger?: string; step_count?: number } | undefined;
-    if (reflection?.trigger !== definition.dreaming.trigger || reflection.step_count !== definition.dreaming.stepCount) throw new Error('Persistent dreaming configuration differs from the definition; inspect agent settings before continuing');
-    assertIdle(status);
-    memoryRoot = status.memoryDirectory;
-    selectConversation(conversationId);
+    // Conversation creation writes one pending-intent file per agent: create one at a time.
+    let creating: Promise<unknown> = Promise.resolve();
+    const opened = new Set<string>();
+
+    const openConversation = async (target: ConversationTarget): Promise<OpenedConversation<TOOLS>> => {
+      if (closing) throw new Error('Agent host closed');
+      const manager = managementClient();
+      let conversationId: string;
+      let conversationTitle = 'Default conversation';
+      try {
+        if ('newTitle' in target) {
+          if (!target.newTitle.trim() || target.newTitle.length > 120) throw new Error('Conversation title must contain 1–120 characters');
+          const created = creating.then(() => createConversation(async agentId => {
+            const conversation = await manager.conversations.create({ agentId, summary: sanitizeText(target.newTitle.trim()) });
+            if (conversation.agent_id !== agentId) throw new Error('Created conversation belongs to a different agent');
+            return conversation.id;
+          }));
+          creating = created.catch(() => {});
+          conversationId = await created;
+        } else conversationId = target.conversationId;
+        if (!validConversationId(conversationId)) throw new Error('Invalid conversation ID');
+        if (conversationId !== 'default') {
+          const conversation = await manager.conversations.retrieve(conversationId);
+          if (conversation.agent_id !== identity.agentId || conversation.archived) throw new Error('Conversation is archived or belongs to another agent');
+          conversationTitle = sanitizeText(conversation.summary ?? 'Untitled conversation');
+        }
+      } finally { await manager.close(); }
+      if (opened.has(conversationId)) throw new Error('Conversation is already open in this process');
+      assertNoPendingTurn(conversationId);
+      opened.add(conversationId);
+      const sessionClient = lettaClient();
+      let session: LettaCodeSession | undefined;
+      let sandbox: SandboxManager | undefined;
+      const broker = new ToolInteractions();
+      let closed: Promise<void> | undefined;
+      let agent: LettaAgent<TOOLS> | undefined;
+      let self: OpenedConversation<TOOLS> | undefined;
+      const shutdown = () => closed ??= (async () => {
+        try { agent?.close(); await agent?.idle(); broker.close(); await sandbox?.close(); session?.close(); await sessionClient.close(); }
+        finally { opened.delete(conversationId); if (self) open.delete(self); }
+      })();
+      try {
+        let turnSignal: AbortSignal | undefined;
+        // Resources: every file of the agent in one git-backed folder, one folder
+        // per conversation. The current conversation is bound here (never from
+        // tool arguments); tools may read other conversations' folders too.
+        let attachments: AttachmentStore | undefined;
+        if (resources) {
+          const workspace = new AttachmentStore(resources, conversationId, { title: conversationTitle });
+          workspace.path; // create the conversation's folder now, named after its title
+          if (filesEnabled(definition)) attachments = workspace;
+          // Shell commands: one sandbox per conversation, created on the first
+          // command, with all resources at /workspace and the conversation's folder as the working directory.
+          if (sandboxEnabled(definition)) {
+            const store = resources;
+            sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}` });
+          }
+        }
+        const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
+        // Without a sandbox, the shell tools are never exposed.
+        const allowedTools = sandbox ? undefined : Object.keys(definition.tools).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name));
+        const sandboxTimeout = definition.sandbox ? sandboxToolTimeout(definition.sandbox) : undefined;
+        const shell = sandbox;
+        // Background harness work must never open a prompt over an idle chat input.
+        const bridge = createToolBridge({
+          tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+          ...(sandboxTimeout ? { toolTimeouts: Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) } : {}),
+          get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
+          context: () => toolContext,
+          sandbox: () => shell?.session,
+        });
+        let memoryRoot: string | undefined;
+        session = sessionClient.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
+        const ready = await session.ready();
+        if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
+        assertIdle(await session.getDeviceStatus());
+        if (options.foregroundExternalTools !== false && bridge.tools.length) {
+          // The SDK's tools serializer drops auto_background/timeout_ms. Use the
+          // supported runtime-scoped protocol rather than global defaults.
+          const configured = await session.sendCommand(foregroundToolsCommand(bridge, ready.agentId, ready.conversationId), { responseType: 'runtime_external_tools_update_response' });
+          if (configured.success !== true) throw new Error('Unable to configure foreground interaction tools');
+        }
+        const live = session;
+        const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query));
+        assertHistorySettled(history.messages);
+        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools));
+        // The SDK's dreaming option writes global defaults. Use the protocol
+        // command with project scope (the private state cwd) instead.
+        const configured = await session.sendCommand(dreamingCommand(definition, ready.agentId, ready.conversationId), { responseType: 'set_reflection_settings_response' });
+        if (configured.success !== true) throw new Error('Unable to configure project-scoped dreaming');
+        const status = await session.getDeviceStatus();
+        if (!status.memoryDirectory) throw new Error('MemFS unavailable; refusing to run without memory');
+        const reflection = status.raw.reflection_settings as { trigger?: string; step_count?: number } | undefined;
+        if (reflection?.trigger !== definition.dreaming.trigger || reflection.step_count !== definition.dreaming.stepCount) throw new Error('Persistent dreaming configuration differs from the definition; inspect agent settings before continuing');
+        assertIdle(status);
+        memoryRoot = status.memoryDirectory;
+        selectConversation(conversationId);
+        const sandboxLine = shell ? `\nSandbox: ${typeof shell.config.provider === 'string' ? shell.config.provider : 'custom'} · no network${definition.permissions.run_command_online === 'ask' ? ' (network commands ask first)' : ''}${shell.hasProject ? ` · project ${shell.config.project!.path}` : ''}` : '';
+        const dreamingLine = definition.dreaming.trigger === 'off' ? 'Dreaming: off' : `Dreaming: ${reflection.trigger}${reflection.trigger === 'step-count' ? ` ${reflection.step_count}` : ''} configured (not evidence a dream ran)`;
+        const startupStatus = `${definition.name}\nLogical ID: ${definition.id}\nLetta ID: ${identity.agentId}\nConversation: ${conversationTitle} (${conversationId})\nStartup status: idle / ready · MemFS confirmed enabled\n${dreamingLine}\nHistory: ${initialMessages.length} visible records restored${history.truncated ? ' · LIMITED to newest 10,000 backend records; older history omitted' : ' · complete backend pagination'}${sandboxLine}`;
+        // Keep one session alive between turns so background dreaming can progress.
+        // LettaAgent closes only its per-turn wrapper, not this shared session.
+        const store = resources;
+        agent = new LettaAgent<TOOLS>({
+          id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
+          open: signal => {
+            turnSignal = signal;
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) turnSignal = undefined; } };
+          },
+          presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
+          delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
+          // Whatever the agent changed in the resources during the turn becomes one commit.
+          // Folder renames of this conversation wait while a turn runs, then apply after that commit.
+          ...(store ? { beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId) } : {}),
+        });
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query))).messages, Object.keys(definition.tools));
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, truncated: history.truncated, startupStatus, close: shutdown };
+        open.add(self);
+        return self;
+      } catch (error) { await shutdown(); throw error; }
+    };
+
+    return {
+      definition, identity, lease, ...(resources ? { resources } : {}),
+      openConversation,
+      open: async target => { const { agent, conversationId, title, history, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, close: closeConversation }; },
+      close,
+    };
+  } catch (error) { await close(); throw error; }
+}
+
+/** Open an agent, or throw if no conversation was selected. */
+export async function createLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: Omit<OpenAgentOptions, 'choose'> = {}): Promise<LettaRuntime<TOOLS>> {
+  const runtime = await openLettaAgent(definition, options);
+  if (!runtime) throw new Error('No conversation selected');
+  return runtime;
+}
+
+/**
+ * Open (creating on first use) the persistent Letta agent for a definition on
+ * the local Letta backend, and return a ready {@link LettaAgent} for one
+ * conversation (see {@link openAgentHost} for several at once).
+ *
+ * Steps, each failing closed: acquire the identity lock and mapping; select or
+ * create a conversation; resume the session; verify it is idle and its history
+ * settled; restore display history; apply project-scoped dreaming and verify
+ * it; confirm MemFS. Returns `undefined` if `choose` returned `null`.
+ */
+export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: OpenAgentOptions = {}): Promise<LettaRuntime<TOOLS> | undefined> {
+  const host = await hostInternals(definition, options);
+  try {
+    const { identity, lease } = host;
+    let choice: ConversationChoice;
+    if (options.choose) {
+      const manager = managementClient();
+      try { choice = await options.choose(identity, await listConversations(query => manager.conversations.list(query), identity.agentId)); }
+      finally { await manager.close(); }
+    } else choice = options.newTitle !== undefined ? { newTitle: options.newTitle } : { conversationId: options.conversationId ?? identity.conversationId };
+    if (choice === null) { await host.close(); return undefined; }
+    const conversation = await host.openConversation(choice);
+    const { live, conversationId } = conversation;
     // Navigation reads through this same mapped runtime; it never enumerates other agents.
     let listedIds = new Set<string>(['default']);
     const navigation: NavigationSource = {
@@ -262,7 +380,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       validate: async (id, signal) => {
         if (!listedIds.has(id) || !validConversationId(id)) throw new Error('Conversation outside current-agent listing');
         assertIdle(await live.getDeviceStatus());
-        assertNoPendingTurn(id);
+        lease.assertNoPendingTurn(id);
         const deadline = Date.now() + 30_000;
         const loaded = await loadHistory(pageOptions => {
           signal?.throwIfAborted();
@@ -273,23 +391,6 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
-    const sandboxLine = shell ? `\nSandbox: ${typeof shell.config.provider === 'string' ? shell.config.provider : 'custom'} · no network${definition.permissions.run_command_online === 'ask' ? ' (network commands ask first)' : ''}${shell.hasProject ? ` · project ${shell.config.project!.path}` : ''}` : '';
-    const dreamingLine = definition.dreaming.trigger === 'off' ? 'Dreaming: off' : `Dreaming: ${reflection.trigger}${reflection.trigger === 'step-count' ? ` ${reflection.step_count}` : ''} configured (not evidence a dream ran)`;
-    const startupStatus = `${definition.name}\nLogical ID: ${definition.id}\nLetta ID: ${identity.agentId}\nConversation: ${conversationTitle} (${conversationId})\nStartup status: idle / ready · MemFS confirmed enabled\n${dreamingLine}\nHistory: ${initialMessages.length} visible records restored${history.truncated ? ' · LIMITED to newest 10,000 backend records; older history omitted' : ' · complete backend pagination'}${sandboxLine}`;
-    // Keep one session alive between turns so background dreaming can progress.
-    // LettaAgent closes only its per-turn wrapper, not this shared session.
-    const agent = new LettaAgent<TOOLS>({
-      id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
-      open: signal => {
-        turnSignal = signal;
-        return { send: message => live.send(message), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) turnSignal = undefined; } };
-      },
-      presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
-      delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
-      // Whatever the agent changed in the resources during the turn becomes one commit.
-      // Folder renames of this conversation wait while a turn runs, then apply after that commit.
-      ...(resources ? { beforeTurn: () => resources!.beginTurn(conversationId), afterTurn: () => resources!.endTurn(conversationId) } : {}),
-    });
-    return { agent, identity, navigation, ...(resources ? { resources } : {}), close: async () => { agent.close(); await agent.idle(); await close(); } };
-  } catch (error) { await close(); throw error; }
+    return { agent: conversation.agent, identity, navigation, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
+  } catch (error) { await host.close(); throw error; }
 }
