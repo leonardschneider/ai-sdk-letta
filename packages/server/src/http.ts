@@ -5,6 +5,8 @@ import type { RunAuthor, RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault, ThreadRuntime as Runtime } from './runtime.js';
 import { runtimeVersions } from './versions.js';
 import { authorOf, servedOrigin, tailscaleIdentity, type TailscaleIdentity, type TeamDirectory, type TeamUser } from './team.js';
+import { atlassianMediaRoute, integrationError, integrationRoutes } from './integrations.js';
+import { LOCAL_USER_ID, type CredentialStore } from 'ai-sdk-letta';
 
 /**
  * Server-to-server API: bearer token (256-bit hex) plus an owner header, on
@@ -82,11 +84,26 @@ export interface RouteAccess {
   mayAct(req: express.Request, run: { author?: RunAuthor }): boolean;
 }
 
+/**
+ * Per-person integration accounts (Atlassian): where they are stored and who
+ * the caller is. See {@link integrationRoutes}.
+ */
+export interface RouteIntegrations { store: CredentialStore; userOf(req: express.Request): string; options?: { fetch?: typeof fetch } }
+
 /** Shared routes; the caller must install its transport-specific authentication first. */
-export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owner: string, shutdown?: () => Promise<void>, access?: RouteAccess) {
+export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owner: string, shutdown?: () => Promise<void>, access?: RouteAccess, integrations?: RouteIntegrations) {
   const author = (req: express.Request) => access?.author(req);
-  /** Only the person who started a run, or an admin, may answer or stop it. */
-  const mayAct = (req: express.Request, runId: string) => { if (access && !access.mayAct(req, runtime.runInfo(owner, runId))) throw new RuntimeFault('not_your_turn', 403); };
+  /**
+   * Only the person who started a run, or an admin, may answer or stop it. An
+   * approval that uses someone's own account (their Atlassian token) can only
+   * be answered by that person, admin or not.
+   */
+  const mayAct = (req: express.Request, runId: string, answering = false) => {
+    if (!access) return;
+    if (!access.mayAct(req, runtime.runInfo(owner, runId))) throw new RuntimeFault('not_your_turn', 403);
+    const onBehalfOf = answering ? runtime.pendingInteraction(owner, runId)?.onBehalfOf : undefined;
+    if (onBehalfOf && access.author(req).id !== onBehalfOf) throw new RuntimeFault('not_your_account', 403);
+  };
   const small = express.json({ limit: BODY_LIMIT_BYTES });
   const runs = express.json({ limit: RUN_BODY_LIMIT_BYTES });
   // Raw bytes, only on the upload route, only as application/octet-stream, bounded by the per-file limit.
@@ -133,6 +150,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/resources/move', async (req, res) => res.json(await runtime.resourceMove(owner, req.body)));
   app.post('/v1/resources/delete', async (req, res) => res.json(await runtime.resourceDelete(owner, req.body)));
   app.post('/v1/resources/restore', async (req, res) => res.json(await runtime.resourceRestore(owner, req.body)));
+  /** Images of a saved Jira issue or Confluence page (`.adf.json`), fetched with the viewer's own Atlassian account. */
+  if (integrations) app.get('/v1/resources/atlassian-media', atlassianMediaRoute(runtime, owner, integrations.store, integrations.userOf, integrations.options));
   /** Download one file (`?path=`), always as an attachment. */
   app.get('/v1/resources/file', async (req, res) => {
     const file = await runtime.resourceFile(owner, req.query.path, FILE_LIMITS.maxFileBytes);
@@ -164,7 +183,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
-  app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
+  app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id, true); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
   app.post('/v1/runs/:id/cancel', (req, res) => { mayAct(req, req.params.id); runtime.cancel(owner, req.params.id); res.json({ accepted: true }); });
   /**
    * Long poll: answers `{ version }` as soon as threads or runs change after
@@ -193,6 +212,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (res.headersSent) return res.end();
+    if (integrationError(error, res)) return;
     // Body parser rejections: fixed codes, never parser messages.
     if ((error as { type?: unknown } | undefined)?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
     if ((error as { type?: unknown } | undefined)?.type === 'request.aborted') return res.end();
@@ -209,10 +229,14 @@ export interface GuiAgentInfo {
   approvalTools?: readonly string[];
   /** Whether the agent accepts file attachments (it has the file tools). */
   files?: boolean;
+  /** The agent has resources (a Resources panel) without accepting attachments (for example, only the Atlassian tools). */
+  resources?: boolean;
   /** The definition's `ui` settings: whether replies render LaTeX unless a conversation overrides it. @default { latex: true } */
   ui?: { latex: boolean };
   /** Team servers: the agent's reply mode setting (see `AgentDefinition.replyMode`). */
   replyMode?: string;
+  /** Integrations the agent uses, whose accounts each person connects (`['atlassian']`). */
+  integrations?: readonly string[];
 }
 
 /**
@@ -226,7 +250,7 @@ export interface GuiAgentInfo {
  * `@ai-sdk-letta/server` and Letta SDK versions, read once here from their
  * `package.json` ({@link runtimeVersions}).
  */
-export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo) {
+export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
@@ -243,14 +267,17 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ui: { latex: agent.ui?.latex ?? true } }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}) }, versions });
   });
+  // The single-user app has one person: the local user.
+  const local = () => LOCAL_USER_ID;
+  const integrations = credentials ? { store: credentials, userOf: local, ...(integrationOptions ? { options: integrationOptions } : {}) } : undefined;
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
     if (!cookie || !/^[a-f0-9]{64}$/.test(cookie) || !timingSafeEqual(Buffer.from(cookie), Buffer.from(session))) return res.status(401).json({ error: 'session_required' });
     if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== `http://127.0.0.1:${port || req.socket.localPort}` || req.headers['x-csrf-token'] !== csrf)) return res.status(403).json({ error: 'csrf_required' });
     next();
-  }, runtimeRoutes(express(), runtime, owner));
+  }, ...(integrations ? [integrationsApp(integrations)] : []), runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;
 }
@@ -271,6 +298,10 @@ export interface TeamAppOptions {
   /** Hosted agents, by definition ID (also the path segment: `/api/agents/<id>/v1/...`). */
   agents: ReadonlyMap<string, TeamAgent>;
   directory: TeamDirectory;
+  /** Per-person integration accounts (Atlassian), when an agent uses them: `/api/integrations/...`. */
+  credentials?: CredentialStore;
+  /** Tests: the `fetch` used to reach Atlassian. */
+  integrationOptions?: { fetch?: typeof fetch };
   /**
    * Origins the app is served under by `tailscale serve`, for example
    * `https://machine.tailnet.ts.net` (or `http://machine.tailnet.ts.net:8443`
@@ -331,7 +362,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}) }; };
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
   app.get('/api/session', (req, res) => {
     const { identity, user } = who(req)!;
@@ -352,6 +383,9 @@ export function teamApp(options: TeamAppOptions) {
   const actor = (req: express.Request) => who(req)!.user!;
   const isAdmin = (req: express.Request) => (req as unknown as { role?: string }).role === 'admin';
   const json = express.json({ limit: BODY_LIMIT_BYTES });
+  // Each person's own integration accounts: only signed-in people with a user record (members of some agent).
+  const integrations = options.credentials ? { store: options.credentials, userOf: (req: express.Request) => actor(req).id, ...(options.integrationOptions ? { options: options.integrationOptions } : {}) } : undefined;
+  if (integrations) app.use('/api', (req, res, next) => { if (req.path.startsWith('/integrations/') && !who(req)?.user) return res.status(404).json({ error: 'not_found' }); next(); }, integrationsApp(integrations));
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
   // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
   const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();
@@ -361,14 +395,29 @@ export function teamApp(options: TeamAppOptions) {
   const routers = new Map([...agents].map(([id, agent]) => [id, runtimeRoutes(express(), agent.runtime, 'team', undefined, {
     author: req => authorOf(actor(req)),
     mayAct: (req, run) => isAdmin(req) || run.author?.id === actor(req).id,
-  })]));
+  }, integrations)]));
   app.use('/api/agents/:agent', member, (req, res, next) => routers.get(String(req.params.agent))!(req, res, next));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'not_found' }));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (res.headersSent) return res.end();
+    if (integrationError(error, res)) return;
     if ((error as { type?: unknown } | undefined)?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
     res.status(error instanceof RuntimeFault ? error.status : error instanceof SyntaxError ? 400 : 503).json({ error: error instanceof RuntimeFault ? error.code : 'runtime_unavailable' });
+  });
+  return app;
+}
+
+/** `/integrations/...` (see {@link integrationRoutes}) with its own error handler. */
+function integrationsApp(integrations: RouteIntegrations): express.Express {
+  const app = express();
+  app.use('/integrations', integrationRoutes(integrations.store, integrations.userOf, integrations.options));
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return res.end();
+    if (integrationError(error, res)) return;
+    if ((error as { type?: unknown } | undefined)?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
+    if (error instanceof RuntimeFault || error instanceof SyntaxError) return res.status(error instanceof RuntimeFault ? error.status : 400).json({ error: error instanceof RuntimeFault ? error.code : 'invalid_input' });
+    next(error);
   });
   return app;
 }

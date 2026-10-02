@@ -21,7 +21,7 @@ export { openLettaAgent, createLettaAgent, openAgentHost, openResources, staySil
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
 export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
-export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler } from './interactions.js';
+export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler, type ApprovalPreview } from './interactions.js';
 export {
   UploadStaging, FileInputError, FILE_LIMITS, STAGING_TTL_MS, MAX_NAME_LENGTH, TEXT_EXTENSIONS, prepareFile, detectFileType, isText, decodeText, sanitizeFileName, isPlainFileName, numberedName,
   formatBytes, describeFile, attachmentNote, withAttachmentNote, parseAttachmentNote, decodeFilePart,
@@ -39,7 +39,15 @@ export {
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
-export { createToolBridge, askUserTool, fileTraceWriter, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions } from './tools.js';
+export { createToolBridge, askUserTool, fileTraceWriter, withPreparation, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, PREPARE_CALL, PREPARED_CONTEXT, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions, type PrepareCall, type PreparedCall } from './tools.js';
+export { adfToMarkdown, markdownToAdf, spliceMarkdown, splitBlocks, blockMarkdown, protectedElements, lostElements, validateAdf, isAdfDocument, adfHash, type AdfDocument, type AdfNode, type AdfMark, type MarkdownOptions, type ProtectedElement, type SpliceChange, type SpliceResult } from './adf.js';
+export { ADF_SCHEMA, ADF_SCHEMA_VERSION } from './adf-schema.js';
+export { CredentialStore, publicStatus, LOCAL_USER_ID, LOCAL_ACTOR, ACTOR_CONTEXT, type AtlassianCredentials, type AtlassianStatus, type TurnActor } from './credentials.js';
+export {
+  atlassianTools, ATLASSIAN_TOOL_NAMES, ATLASSIAN_TOOL_PERMISSIONS, ATLASSIAN_LIMITS, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_CONTEXT, WORKSPACE_CONTEXT, AtlassianError,
+  atlassianEnabled, atlassianFetch, atlassianUrl, normalizeSite, connectAtlassian, testAtlassian, responseText, expandMarkdown, parseReference, applyEdits, isSavedDocument, readSavedDocument, savedDocumentPath, mediaOptions, downloadAtlassianMedia,
+  type AtlassianToolName, type AtlassianContext, type AtlassianConnectInput, type AtlassianSource, type AtlassianMedia, type SavedDocument,
+} from './atlassian.js';
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';

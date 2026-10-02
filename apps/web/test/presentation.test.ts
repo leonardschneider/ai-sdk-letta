@@ -145,3 +145,16 @@ test('shell commands read as "Ran `command`", with the exit code only when it fa
   assert.equal(commandOutput({ not: 'text' }), undefined);
   assert.equal(friendlyName('run_command_online'), 'Command with internet access');
 });
+
+test('Atlassian tools read as one line each; approval diffs mark removed and added lines', async () => {
+  const { lineDiff } = await import('../src/presentation.js');
+  assert.equal(toolLabel('atlassian_fetch', 'done', 'Jira issue KAN-1: x', { ref: 'KAN-1' }), 'Fetched KAN-1 from Atlassian');
+  assert.equal(toolLabel('atlassian_fetch', 'done', 'Error (not_connected): Atlassian is not connected', { ref: 'KAN-1' }), 'Couldn’t fetch KAN-1');
+  assert.equal(toolLabel('atlassian_update', 'running', undefined, { file: 'KAN-1.md' }), 'Updating KAN-1 in Atlassian…');
+  assert.equal(toolLabel('atlassian_update', 'error', JSON.stringify({ error: 'user_denied' }), { file: 'KAN-1.md' }), 'Denied: Atlassian update');
+  assert.equal(toolLabel('atlassian_request', 'done', 'GET → 200', { method: 'GET', path: '/rest/api/3/search/jql?jql=x' }), 'Searched Jira');
+  assert.equal(toolLabel('atlassian_request', 'done', 'GET → 200', { method: 'GET', path: '/wiki/api/v2/pages/1' }), 'Read from Confluence');
+  assert.deepEqual(toolSummary('atlassian_fetch', 'Jira issue KAN-1: Title\nmore').fields, [{ label: 'Result', value: 'Jira issue KAN-1: Title' }]);
+  assert.deepEqual(lineDiff('a\nb\nc', 'a\nB\nc'), [{ kind: 'same', text: 'a' }, { kind: 'removed', text: 'b' }, { kind: 'added', text: 'B' }, { kind: 'same', text: 'c' }]);
+  assert.deepEqual(lineDiff('', 'new'), [{ kind: 'added', text: 'new' }]);
+});

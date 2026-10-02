@@ -13,10 +13,28 @@ export type InteractionRequest = {
   title: string;
   /** For approvals: the exact JSON arguments that will run if approved. */
   details?: string;
+  /**
+   * For approvals: what the call will do, prepared by the tool for display
+   * (for example, the changed blocks of a page). Display only; approval is
+   * still bound to `details`.
+   */
+  preview?: ApprovalPreview;
+  /**
+   * For approvals: the user whose own account the call uses (for example,
+   * their Atlassian token). Shared servers let only that person answer.
+   */
+  onBehalfOf?: string;
   options?: Question['options'];
   allowFreeText?: boolean;
   multiSelect?: boolean;
 };
+
+/**
+ * A tool's readable preview of an approval: `text` for any interface (plain
+ * text, for example a before/after of the changed lines), and `data` for
+ * richer ones, keyed by `kind` (for example `'atlassian-edit'`).
+ */
+export type ApprovalPreview = { kind: string; title?: string; text: string; data?: Record<string, unknown> };
 
 /** A human's answer. Approvals use `approved`; questions use `selected` and/or `text`. */
 export type InteractionResponse = { id: string; approved?: boolean; cancelled?: boolean; selected?: string[]; text?: string };

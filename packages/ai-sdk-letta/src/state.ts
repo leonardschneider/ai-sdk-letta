@@ -39,5 +39,7 @@ export function statePaths(root: string) {
     attachments: join(root, 'attachments'),
     /** Resources: `<resources>/<lettaAgentId>/` holds `files/` (one folder per conversation, git-versioned), `git/`, `cache/` and `state.json`. */
     resources: join(root, 'resources'),
+    /** Per-user integration secrets (`credentials/<integration>/<hash of user ID>.json`, 0600). Never in the resources. */
+    credentials: join(root, 'credentials'),
   };
 }

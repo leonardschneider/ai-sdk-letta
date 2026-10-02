@@ -38,12 +38,16 @@
     "@changesets/cli": "3.0.3",
     "@types/node": "22.19.15",
     "patch-package": "8.0.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
     "tsx": "4.23.15",
     "typescript": "5.9.3"
   },
   "overrides": {
     "tsup": {
       "esbuild": "^0.28.1"
-    }
+    },
+    "react": "$react",
+    "react-dom": "$react-dom"
   }
 }

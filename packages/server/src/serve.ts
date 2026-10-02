@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime } from 'ai-sdk-letta';
+import { CredentialStore, atlassianEnabled, createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime } from 'ai-sdk-letta';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory } from './team.js';
@@ -19,6 +19,8 @@ export interface ServeOptions {
   stateDirectory?: string;
   /** Log sink for startup and shutdown lines. @default console.log */
   log?: (line: string) => void;
+  /** Tests only: the `fetch` used to reach Atlassian for the integration routes. */
+  integrations?: { fetch?: typeof fetch };
 }
 
 /** A running server. */
@@ -32,8 +34,9 @@ export interface RunningServer {
 function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
-    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
+    ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
+      // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
       runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
@@ -50,10 +53,11 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
 function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true }).catch(error => { agent = undefined; throw error; });
+  // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
-    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
+    ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       const host = await opened();
       const conversation = await host.open(options);
@@ -109,7 +113,8 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
     const runtime = new ThreadRuntime(host(definition, stateDirectory), join(directory, 'state.json'), owner);
-    const server = guiApp(runtime, owner, port, assets, { id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ui: { latex: definition.ui?.latex ?? true } }).listen(port, '127.0.0.1');
+    const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
+    const server = guiApp(runtime, owner, port, assets, agentInfo(definition), credentials, options.integrations).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
     log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
@@ -159,7 +164,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ui: { latex: definition.ui?.latex ?? true } });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [] });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.
@@ -199,7 +204,8 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto' }, runtime });
     }
     const port = options.port ?? DEFAULT_PORT;
-    const server = teamApp({ port, assets, agents, directory, origins: options.origins }).listen(port, '127.0.0.1');
+    const credentials = definitions.some(atlassianEnabled) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
+    const server = teamApp({ port, assets, agents, directory, origins: options.origins, ...(credentials ? { credentials } : {}), ...(options.integrations ? { integrationOptions: options.integrations } : {}) }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
     let closing: Promise<void> | undefined;

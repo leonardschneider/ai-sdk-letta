@@ -1,6 +1,6 @@
 /** Human label for a tool or field name, e.g. `fetchWeather_now` → "Fetch Weather now". */
 export function friendlyName(value: string): string {
-  return ({ ask_user: 'Question', run_command: 'Command', run_command_online: 'Command with internet access' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
+  return ({ ask_user: 'Question', run_command: 'Command', run_command_online: 'Command with internet access', atlassian_request: 'Atlassian', atlassian_fetch: 'Atlassian fetch', atlassian_update: 'Atlassian update' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
 }
 export function parseArgs(value?: string): Record<string, unknown> {
   try { const parsed: unknown = JSON.parse(value ?? '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
@@ -70,6 +70,25 @@ function fileToolLabel(name: string, phase: ToolPhase, args: Record<string, unkn
   }
   return undefined;
 }
+/** Labels of the Atlassian tools: "Fetched KAN-1", "Updated KAN-1", "Searched Jira". */
+function atlassianLabel(name: string, phase: ToolPhase, args: Record<string, unknown>, result: unknown): string | undefined {
+  const failed = phase === 'error' || (typeof result === 'string' && /^Error \(/.test(result));
+  if (name === 'atlassian_fetch' && typeof args.ref === 'string') {
+    const ref = args.ref.length > 60 ? `${args.ref.slice(0, 59)}…` : args.ref;
+    return phase === 'running' ? `Fetching ${ref} from Atlassian…` : failed ? `Couldn’t fetch ${ref}` : `Fetched ${ref} from Atlassian`;
+  }
+  if (name === 'atlassian_update' && typeof args.file === 'string') {
+    const file = args.file.replace(/\.md$/i, '');
+    return phase === 'running' ? `Updating ${file} in Atlassian…` : failed ? `Didn’t update ${file}` : `Updated ${file} in Atlassian`;
+  }
+  if (name === 'atlassian_request' && typeof args.path === 'string') {
+    const what = args.path.startsWith('/wiki/') ? 'Confluence' : 'Jira';
+    const verb = args.method === 'GET' ? (/search/.test(args.path) ? 'Searched' : 'Read from') : args.method === 'DELETE' ? 'Deleted in' : 'Changed';
+    const running = args.method === 'GET' ? (/search/.test(args.path) ? 'Searching' : 'Reading from') : args.method === 'DELETE' ? 'Deleting in' : 'Changing';
+    return phase === 'running' ? `${running} ${what}…` : failed ? `${what} request didn’t complete` : `${verb} ${what}`;
+  }
+  return undefined;
+}
 /* ------------------------------------------------------------------ */
 /* Shell commands                                                      */
 /* ------------------------------------------------------------------ */
@@ -125,12 +144,15 @@ export function toolLabel(name: string, phase: ToolPhase, result?: unknown, args
   if (shell) return shell;
   const file = fileToolLabel(name, phase, args);
   if (file) return file;
+  const atlassian = atlassianLabel(name, phase, args, result);
+  if (atlassian) return atlassian;
   const tool = friendlyName(name);
   return phase === 'running' ? `Using ${tool}…` : phase === 'done' ? `Used ${tool}` : `${tool} didn’t complete`;
 }
 
 /** Built-in file tools return text for the model; summarize it in one line for the expanded view. */
 export function fileToolSummary(name: string, result: unknown): string | undefined {
+  if (name.startsWith('atlassian_') && typeof result === 'string') { const first = result.split('\n', 1)[0]!.trim(); return first.length > 200 ? `${first.slice(0, 199)}…` : first; }
   if (!['list_files', 'read_file', 'search_files'].includes(name) || typeof result !== 'string') return undefined;
   const first = result.split('\n', 1)[0]!.trim();
   if (name === 'read_file') {
@@ -226,4 +248,20 @@ export function describeArguments(details: string | undefined): Field[] {
   if (Object.keys(args).length) walk(args, '');
   else if (details?.trim()) rows.push({ label: 'Details', value: details });
   return rows;
+}
+
+/** Line diff of two short texts (for a changed block): common lines stay, others are marked removed or added. */
+export function lineDiff(before: string, after: string): { kind: 'same' | 'removed' | 'added'; text: string }[] {
+  const a = before ? before.split('\n') : [], b = after ? after.split('\n') : [];
+  const table = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) table[i]![j] = a[i] === b[j] ? table[i + 1]![j + 1]! + 1 : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);
+  const out: { kind: 'same' | 'removed' | 'added'; text: string }[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { out.push({ kind: 'same', text: a[i]! }); i++; j++; }
+    // Removed lines come before the lines that replace them.
+    else if (i < a.length && (j >= b.length || table[i + 1]![j]! >= table[i]![j + 1]!)) { out.push({ kind: 'removed', text: a[i]! }); i++; }
+    else { out.push({ kind: 'added', text: b[j]! }); j++; }
+  }
+  return out;
 }

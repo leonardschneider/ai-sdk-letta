@@ -960,7 +960,10 @@ export class ThreadRuntime {
       // Shared runtimes tag the turn with its run ID (to show its author in history) and tell the agent who is speaking,
       // and, when the agent can listen, whether it must reply.
       const speaker = (r: Run) => r.author ? { name: r.author.name, login: r.author.login } : { name: '' };
-      const shared = this.queueing ? { otid: run.id,
+      // Tools that use personal credentials (Atlassian) act for the person whose message started the turn
+      // (the first message's author in a combined turn). Single-user runtimes leave it to the host (the local user).
+      const actor = run.author ? { actor: { id: run.author.id, name: run.author.name, login: run.author.login } } : {};
+      const shared = this.queueing ? { otid: run.id, ...actor,
         ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
         ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
       const result = await session.agent.stream(typeof content === 'string'
@@ -1036,6 +1039,12 @@ export class ThreadRuntime {
     // Answering or stopping a combined turn is up to the author of its first message (or an admin), like any turn.
     const lead = run.batchOf ? this.state.runs.find(r => r.id === run.batchOf) ?? run : run;
     return { threadId: run.threadId, status: run.status, ...(lead.author ? { author: lead.author } : {}) };
+  }
+  /** The prompt a running turn is waiting on (approval or question), if any. */
+  pendingInteraction(owner: string, runId: string): InteractionRequest | undefined {
+    const run = this.run(owner, runId);
+    const pending = this.lane(run.threadId).pending;
+    return pending?.runId === runId ? structuredClone(pending.request) : undefined;
   }
   answer(owner: string, runId: string, response: InteractionResponse) {
     const run = this.run(owner, runId);

@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
 import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { COMMAND_TOOLS, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
+import { COMMAND_TOOLS, lineDiff, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
@@ -414,6 +414,7 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
   const card = useRef<HTMLElement>(null);
   useClaimFocus(card);
   const args = parseArgs(request.details);
+  const atlassian = request.preview?.kind === 'atlassian-edit' || request.preview?.kind === 'atlassian-request' ? request.preview : undefined;
   const shell = COMMAND_TOOLS.has(request.tool) && typeof args.command === 'string';
   const cwd = shell && typeof args.cwd === 'string' && args.cwd.trim() && args.cwd.trim() !== '.' ? args.cwd.trim() : undefined;
   const extra = Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'command' && key !== 'cwd'));
@@ -425,13 +426,15 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
       else if (event.key === 'Enter' && event.target === card.current) { event.preventDefault(); void send({ approved: true }); }
     }}>
     <header className="card-head"><ShieldAlert size={16} aria-hidden="true"/><span>Permission needed</span></header>
-    <h2 className="card-title">{shell ? (request.tool === 'run_command_online' ? 'Wants to run a command with internet access' : 'Wants to run a command') : <>Wants to run {friendlyName(request.tool)}</>}</h2>
+    <h2 className="card-title">{atlassian ? atlassianTitle(atlassian) : shell ? (request.tool === 'run_command_online' ? 'Wants to run a command with internet access' : 'Wants to run a command') : <>Wants to run {friendlyName(request.tool)}</>}</h2>
+    {atlassian && <AtlassianApproval preview={atlassian}/>}
     {shell && <>
       <pre className="command-line approval-command" aria-label="Command"><span className="prompt" aria-hidden="true">$ </span>{String(args.command)}</pre>
       {cwd && <p className="command-meta approval-cwd">in {cwd.startsWith('/') ? cwd : `/workspace/${cwd}`}</p>}
       {request.tool === 'run_command_online' && <p className="card-details">It runs in a separate sandbox that can reach the internet and change this conversation’s files. Everything else stays isolated.</p>}
     </>}
-    {!!rows.length && <dl className="approval-args">{rows.map((row, i) => <div key={i}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}
+    {!atlassian && !!rows.length && <dl className="approval-args">{rows.map((row, i) => <div key={i}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}
+    {atlassian && <details className="approval-raw"><summary>Exact request</summary><pre>{atlassian.text}</pre></details>}
     <div className="card-actions">
       <span className="hint" aria-hidden="true"><kbd>Enter</kbd> allow · <kbd>Esc</kbd> deny</span>
       <button type="button" className="btn ghost" disabled={locked} onClick={() => void send({ approved: false })}>Deny</button>
@@ -439,4 +442,43 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
     </div>
     <Outcome outcome={outcome} error={error} busy={busy} onDismiss={onDismiss}/>
   </section>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Atlassian approvals                                                 */
+/* ------------------------------------------------------------------ */
+
+type AtlassianPreviewData = {
+  product?: 'jira' | 'confluence'; target?: string; url?: string; site?: string; account?: string; blocks?: number;
+  changes?: { index: number; removed: number; added: number; before: string; after: string }[];
+  method?: string; path?: string; body?: string;
+};
+function atlassianTitle(preview: NonNullable<InteractionRequest['preview']>): string {
+  const data = (preview.data ?? {}) as AtlassianPreviewData;
+  if (preview.kind === 'atlassian-edit') return data.product === 'confluence' ? 'Wants to edit a Confluence page' : 'Wants to edit a Jira issue';
+  return data.method === 'DELETE' ? 'Wants to delete in Atlassian' : 'Wants to change something in Atlassian';
+}
+/** What an Atlassian call will do: the target, your account, and for edits a before/after of each changed block. */
+function AtlassianApproval({ preview }: { preview: NonNullable<InteractionRequest['preview']> }) {
+  const data = (preview.data ?? {}) as AtlassianPreviewData;
+  const host = data.site ? new URL(data.site).hostname : undefined;
+  return <div className="atl-approval">
+    <p className="card-details atl-target">
+      {data.url ? <a href={data.url} target="_blank" rel="noopener noreferrer">{data.target ?? preview.title}</a> : <span>{data.target ?? preview.title}</span>}
+      {(host || data.account) && <span className="atl-account"> · {[host, data.account && `as ${data.account}`].filter(Boolean).join(' ')}</span>}
+    </p>
+    {preview.kind === 'atlassian-edit' && data.changes && <>
+      <p className="atl-summary">{data.changes.length === 1 ? 'One block changes' : `${data.changes.length} blocks change`}; everything else{data.blocks ? ` (${data.blocks - data.changes.reduce((n, c) => n + c.removed, 0)} of ${data.blocks} blocks)` : ''} stays exactly as it is.</p>
+      <div className="atl-changes">
+        {data.changes.map((change, i) => <section key={i} className="atl-change" aria-label={`Change ${i + 1}`}>
+          <header>{change.removed === 0 ? `New block after block ${change.index}` : change.added === 0 ? `Removed block ${change.index + 1}` : `Block ${change.index + 1}${change.removed > 1 ? `–${change.index + change.removed}` : ''}`}</header>
+          <pre className="atl-diff">{lineDiff(change.before, change.after).map((line, k) => <span key={k} className={`atl-line ${line.kind}`}><span className="atl-sign" aria-hidden="true">{line.kind === 'removed' ? '−' : line.kind === 'added' ? '+' : ' '}</span><span className="sr-only">{line.kind === 'removed' ? 'Removed: ' : line.kind === 'added' ? 'Added: ' : ''}</span>{line.text || ' '}{'\n'}</span>)}</pre>
+        </section>)}
+      </div>
+    </>}
+    {preview.kind === 'atlassian-request' && <>
+      <p className="atl-request"><code>{data.method}</code> <code className="atl-path">{data.path}</code></p>
+      {data.body && <pre className="atl-body">{data.body}</pre>}
+    </>}
+  </div>;
 }
