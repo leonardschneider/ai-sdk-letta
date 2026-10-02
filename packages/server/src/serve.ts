@@ -49,7 +49,8 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  */
 function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true }).catch(error => { agent = undefined; throw error; });
+  // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
@@ -191,9 +192,9 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     for (const definition of definitions) {
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true });
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name });
       runtimes.push(runtime);
-      agents.set(definition.id, { info: agentInfo(definition), runtime });
+      agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto' }, runtime });
     }
     const port = options.port ?? DEFAULT_PORT;
     const server = teamApp({ port, assets, agents, directory, origins: options.origins }).listen(port, '127.0.0.1');

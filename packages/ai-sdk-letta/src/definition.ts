@@ -2,6 +2,7 @@ import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
 import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
+import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 
 /** How a single application tool call is authorized. */
 export type ToolPermission = 'allow' | 'ask' | 'deny';
@@ -63,6 +64,15 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   sandbox?: SandboxConfig;
   /** Browser app presentation, e.g. `{ latex: false }`. @default { latex: true } */
   ui?: Partial<AgentUiSettings>;
+  /**
+   * When the agent replies in conversations shared by several people (team
+   * servers): `'always'`, `'when-addressed'` (only when mentioned or asked
+   * directly), `'agent-decides'`, or `'auto'`: always while one person talks
+   * in a conversation, agent decides once several do. In the other modes the
+   * agent still reads every message (and may use tools and update its memory)
+   * but may only listen. Each conversation can override it. @default 'auto'
+   */
+  replyMode?: ReplyModeSetting;
 }
 
 /** A validated, immutable agent definition. */
@@ -77,6 +87,7 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly toolTimeoutMs: number;
   readonly sandbox?: ResolvedSandboxConfig;
   readonly ui: Readonly<AgentUiSettings>;
+  readonly replyMode: ReplyModeSetting;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -102,6 +113,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const names = Object.keys(input.tools);
   for (const name of names) {
     if ((INTERNAL_MEMORY_TOOLS as readonly string[]).includes(name)) throw new Error(`Tool name "${name}" is reserved for memory operations`);
+    if (name === STAY_SILENT_TOOL) throw new Error(`Tool name "${name}" is reserved: team servers provide it so the agent can listen without replying`);
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) throw new Error(`Invalid tool name "${name}"`);
   }
   const permissions: Record<string, ToolPermission> = {};
@@ -125,9 +137,11 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const toolTimeoutMs = input.toolTimeoutMs ?? 5000;
   if (!Number.isInteger(toolTimeoutMs) || toolTimeoutMs < 1 || toolTimeoutMs > 300_000) throw new Error('toolTimeoutMs must be 1–300000');
   const ui = resolveUi(input.ui);
+  const replyMode = input.replyMode ?? 'auto';
+  if (!REPLY_MODE_SETTINGS.includes(replyMode)) throw new Error(`replyMode must be one of: ${REPLY_MODE_SETTINGS.join(', ')}`);
   return Object.freeze({
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode,
   });
 }
 

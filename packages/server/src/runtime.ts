@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSyn
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import {
+  REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
   type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
@@ -15,7 +16,7 @@ export type RuntimeEvent = { sequence: number; type: string; data: Record<string
 export type DisplayOverride = 'inherit' | 'on' | 'off';
 const DISPLAY_OVERRIDES: readonly DisplayOverride[] = ['inherit', 'on', 'off'];
 // createdAt/lastActivityAt/latex are optional: threads recorded before they existed stay valid (latex: inherit).
-type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'>; createdBy?: RunAuthor };
+type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'>; createdBy?: RunAuthor; replyMode?: ReplyMode };
 /** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
 export type RunImage = { mediaType: string; bytes: number; sha256: string };
 /**
@@ -28,7 +29,15 @@ export type RunAuthor = { id: string; login: string; name: string; avatar?: stri
  * a run may first wait in its conversation's queue (`queued`); `author` names
  * who wrote it.
  */
-export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; files?: RunFile[]; uploads?: string[]; parentRunId: string | null; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string; queuedAt?: string; author?: RunAuthor; notSent?: boolean };
+export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; files?: RunFile[]; uploads?: string[]; parentRunId: string | null; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string; queuedAt?: string; author?: RunAuthor; notSent?: boolean;
+  /** Shared runtimes: the reply mode the turn was sent with. */
+  replyMode?: ReplyMode;
+  /** The agent listened to this turn without replying. */
+  listened?: boolean;
+  /** Queued messages delivered together as one turn: on the first (which carries the turn's events), every message's run ID in order. */
+  batch?: string[];
+  /** On the other messages of such a turn: the first message's run ID. */
+  batchOf?: string };
 /** Metadata of a file sent with a run (as stored in the conversation's folder). */
 export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
 /**
@@ -47,7 +56,22 @@ export type RunInput = { id: string; threadId: string; text: string; parentRunId
  * - `parallel`: conversations run turns at the same time, each in its own
  *   session (needs a host whose `parallel` is true).
  */
-export type RuntimeOptions = { deadlineMs?: number; humanWaitMs?: number; queue?: boolean; parallel?: boolean };
+export type RuntimeOptions = { deadlineMs?: number; humanWaitMs?: number; queue?: boolean; parallel?: boolean;
+  /**
+   * Shared runtimes whose sessions can listen (the agent was opened with
+   * `listening`): the agent's reply mode setting (`'auto'` by default:
+   * always while one person talks in a conversation, agent decides once
+   * several do). Each conversation can override it (`PATCH { replyMode }`).
+   * Several queued messages of a conversation with several people are then
+   * delivered together as one turn.
+   */
+  replyMode?: ReplyModeSetting;
+  /** The agent's name, to recognise mentions (`@Name` or its name), which always get a reply. */
+  agentName?: string;
+  /** How long a typing signal lasts without a new one. @default 5000 */
+  typingMs?: number };
+/** Most queued messages delivered together as one turn (every message a conversation's queue can hold). */
+export const MAX_BATCH = 10;
 /** Most turns waiting in one conversation's queue. */
 export const MAX_QUEUED = 10;
 type State = { version: 1; threads: Thread[]; runs: Run[] };
@@ -59,7 +83,7 @@ export interface RuntimeSession {
   conversationId: string;
   history: UIMessage[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'> & { attachments?: AttachmentStore };
+  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'> & { attachments?: AttachmentStore; listening?: boolean };
   /** Reload display history from the backend without reopening (parallel hosts). */
   reload?(): Promise<UIMessage[]>;
   /** Close only this conversation's session (parallel hosts). */
@@ -118,7 +142,12 @@ export function displayRun(run: Run): UIMessage[] {
       const last = parts.at(-1);
       if (last?.type === 'text') last.text += String(data.text);
       else parts.push({ type: 'text', text: String(data.text) });
-    } else if (event.type === 'tool_started') parts.push({ type: 'dynamic-tool', toolName: String(data.name), toolCallId: String(data.toolCallId), state: 'input-available', input: data.input });
+    } else if (event.type === 'reasoning') {
+      const last = parts.at(-1);
+      if (last?.type === 'reasoning') last.text += String(data.text);
+      else parts.push({ type: 'reasoning', text: String(data.text) });
+    } else if (event.type === 'listened') parts.push({ type: LISTENED_PART as `data-${string}`, data: typeof data.reason === 'string' ? { reason: data.reason } : {} });
+    else if (event.type === 'tool_started') parts.push({ type: 'dynamic-tool', toolName: String(data.name), toolCallId: String(data.toolCallId), state: 'input-available', input: data.input });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'dynamic-tool' && p.toolCallId === data.toolCallId);
       const part = parts[index];
@@ -170,6 +199,10 @@ export class ThreadRuntime {
   readonly parallel: boolean;
   private changes = 0;
   private waiting = new Set<() => void>();
+  /** The agent's reply mode setting, when its sessions can listen (shared runtimes). */
+  readonly replyMode?: ReplyModeSetting;
+  private readonly agentName?: string;
+  private readonly typingMs: number;
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -179,6 +212,12 @@ export class ThreadRuntime {
     this.queueing = !!options.queue;
     this.parallel = !!options.parallel;
     if (this.parallel && !host.parallel) throw new Error('A parallel runtime needs a parallel host');
+    if (options.replyMode !== undefined) {
+      if (!this.queueing) throw new Error('Reply modes need a shared runtime (queue: true)');
+      this.replyMode = options.replyMode;
+    }
+    this.agentName = options.agentName;
+    this.typingMs = options.typingMs ?? 5000;
     if (host.attachmentsRoot) this.uploads = new UploadStaging(join(dirname(filename), 'uploads'));
     this.state = existsSync(filename) ? JSON.parse(readFileSync(filename, 'utf8')) as State : { version: 1, threads: [], runs: [] };
     if (this.state.version !== 1 || !Array.isArray(this.state.threads) || !Array.isArray(this.state.runs)) throw new Error('Invalid runtime state');
@@ -274,15 +313,80 @@ export class ThreadRuntime {
     const { id, title, state, archived, createdAt, lastActivityAt, latex } = thread;
     const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride };
     if (!this.queueing) return base;
+    // Reply modes: the conversation's override, and the mode in effect now (with its participants).
+    const modes = this.replyMode !== undefined ? { replyMode: (thread.replyMode ?? 'inherit') as ReplyModeOverride, replyModeInEffect: this.modeOf(thread), participants: this.participants(thread.id) } : {};
     // Shared runtimes also show who started a conversation and whether a turn is running or waiting.
     const runs = this.state.runs.filter(r => r.threadId === id);
     const running = runs.find(r => r.status === 'running');
     const queued = runs.filter(r => r.status === 'queued').length;
-    return { ...base, ...(thread.createdBy ? { createdBy: thread.createdBy } : {}), ...(running ? { running: running.id } : {}), ...(queued ? { queued } : {}) };
+    const typing = this.typingIn(id);
+    return { ...base, ...modes, ...(typing.length ? { typing: typing.map(({ id: userId, name }) => ({ id: userId, name })) } : {}), ...(thread.createdBy ? { createdBy: thread.createdBy } : {}), ...(running ? { running: running.id } : {}), ...(queued ? { queued } : {}) };
+  }
+  /** People who wrote in a conversation (distinct authors of its messages, sent or waiting). */
+  private participants(threadId: string): number {
+    return new Set(this.state.runs.filter(r => r.threadId === threadId && r.author && !r.notSent).map(r => r.author!.id)).size;
+  }
+  /** The reply mode in effect in a conversation now (see `resolveReplyMode`). */
+  private modeOf(thread: Thread): ReplyMode {
+    return resolveReplyMode(this.replyMode, thread.replyMode, this.participants(thread.id));
   }
   list(owner: string) {
     this.authorize(owner);
     return this.state.threads.filter(t => t.owner === owner).map(t => this.summary(t));
+  }
+
+  /* ---------------- typing presence (shared runtimes) ---------------- */
+
+  /** Who is typing where: thread ID → user ID → (person, expiry). In memory only; never stored, never sent to the agent. */
+  private typists = new Map<string, Map<string, { author: RunAuthor; until: number }>>();
+  private typingTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Someone is typing in a conversation (`typing: true`, repeated as a
+   * heartbeat while they type) or stopped (`false`). Only presence is shared,
+   * never what they type: the input is exactly `{ typing: boolean }`. A
+   * signal lasts {@link RuntimeOptions.typingMs} unless repeated; sending a
+   * message ends it.
+   */
+  typing(owner: string, threadId: string, author: RunAuthor | undefined, input: unknown) {
+    const thread = this.thread(owner, threadId);
+    if (!this.queueing || !author) throw new RuntimeFault('not_found', 404);
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || typeof (input as { typing?: unknown }).typing !== 'boolean') throw new RuntimeFault('invalid_input', 400);
+    if ((input as { typing: boolean }).typing && !thread.archived) {
+      const people = this.typists.get(threadId) ?? new Map();
+      const fresh = !people.has(author.id);
+      people.set(author.id, { author, until: Date.now() + this.typingMs });
+      this.typists.set(threadId, people);
+      if (fresh) this.changed();
+      this.scheduleTypingSweep();
+    } else this.stopTyping(threadId, author.id);
+    return { typing: this.typingIn(threadId) };
+  }
+  /** People typing in a conversation now, in the order they started. */
+  typingIn(threadId: string): RunAuthor[] {
+    const now = Date.now();
+    return [...(this.typists.get(threadId)?.values() ?? [])].filter(entry => entry.until > now).map(entry => entry.author);
+  }
+  private stopTyping(threadId: string, userId: string) {
+    const people = this.typists.get(threadId);
+    if (people?.delete(userId)) { if (!people.size) this.typists.delete(threadId); this.changed(); }
+  }
+  /** Forget expired signals (and tell everyone) shortly after they expire. */
+  private scheduleTypingSweep() {
+    if (this.typingTimer) return;
+    const next = Math.min(...[...this.typists.values()].flatMap(people => [...people.values()].map(entry => entry.until)));
+    if (!Number.isFinite(next)) return;
+    this.typingTimer = setTimeout(() => {
+      this.typingTimer = undefined;
+      const now = Date.now();
+      let removed = false;
+      for (const [threadId, people] of this.typists) {
+        for (const [userId, entry] of people) if (entry.until <= now) { people.delete(userId); removed = true; }
+        if (!people.size) this.typists.delete(threadId);
+      }
+      if (removed) this.changed();
+      this.scheduleTypingSweep();
+    }, Math.max(10, next - Date.now() + 10));
+    this.typingTimer.unref?.();
   }
   /**
    * Local display metadata only: never opens a session or edits backend history.
@@ -294,9 +398,10 @@ export class ThreadRuntime {
     const thread = this.thread(owner, id);
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RuntimeFault('invalid_input', 400);
     const fields = Object.keys(input);
-    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived' && key !== 'latex')) throw new RuntimeFault('invalid_input', 400);
-    const patch = input as { title?: unknown; archived?: unknown; latex?: unknown };
+    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived' && key !== 'latex' && key !== 'replyMode')) throw new RuntimeFault('invalid_input', 400);
+    const patch = input as { title?: unknown; archived?: unknown; latex?: unknown; replyMode?: unknown };
     if (fields.includes('latex') && !DISPLAY_OVERRIDES.includes(patch.latex as DisplayOverride)) throw new RuntimeFault('invalid_input', 400);
+    if (fields.includes('replyMode') && (this.replyMode === undefined || !REPLY_MODE_OVERRIDES.includes(patch.replyMode as ReplyModeOverride))) throw new RuntimeFault('invalid_input', 400);
     let title = thread.title;
     if (fields.includes('title')) {
       // Reject terminal controls and invisible formatting/bidi controls before trimming.
@@ -312,6 +417,7 @@ export class ThreadRuntime {
     thread.title = title;
     if (typeof patch.archived === 'boolean') thread.archived = patch.archived;
     if (patch.latex === 'inherit') delete thread.latex; else if (patch.latex === 'on' || patch.latex === 'off') thread.latex = patch.latex;
+    if (patch.replyMode === 'inherit') delete thread.replyMode; else if (fields.includes('replyMode')) thread.replyMode = patch.replyMode as ReplyMode;
     this.save(); this.changed();
     // The conversation's folder follows its title (after the running turn, if any). A failure never fails the rename.
     if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {
@@ -348,15 +454,58 @@ export class ThreadRuntime {
   }
   /** Turns that reached (or may have reached) the agent: not waiting, not withdrawn before sending. */
   private delivered(threadId: string) { return this.state.runs.filter(r => r.threadId === threadId && r.status !== 'queued' && !r.notSent); }
-  /** In a shared runtime, user turns in display history carry their author (matched by the OTID they were sent with). */
+  /**
+   * In a shared runtime, user turns in display history carry their author
+   * (matched by the OTID they were sent with). A combined turn (several queued
+   * messages sent as one) is shown as its messages again, each with its author.
+   */
   private annotate(threadId: string, messages: UIMessage[]): UIMessage[] {
     if (!this.queueing) return messages;
-    const authors = new Map(this.state.runs.filter(r => r.threadId === threadId && r.author).map(r => [r.id, r.author!]));
-    return messages.map(message => {
+    const runs = new Map(this.state.runs.filter(r => r.threadId === threadId).map(r => [r.id, r]));
+    return this.markListened(runs, messages.flatMap(message => {
       const otid = (message.metadata as { otid?: unknown } | undefined)?.otid;
-      const author = message.role === 'user' && typeof otid === 'string' ? authors.get(otid) : undefined;
-      return author ? { ...message, metadata: { ...(message.metadata as object), author } } : message;
-    });
+      const run = message.role === 'user' && typeof otid === 'string' ? runs.get(otid) : undefined;
+      if (!run) return [message];
+      const members = run.batch?.map(id => runs.get(id)).filter((r): r is Run => !!r && r.threadId === threadId);
+      if (members && members.length > 1) return members.map((member, index): UIMessage => ({ id: `${message.id}-${index}`, role: 'user', parts: [{ type: 'text', text: member.input }],
+        metadata: { ...(message.metadata as object), otid: member.id, ...(member.author ? { author: member.author } : {}) } }));
+      return [run.author ? { ...message, metadata: { ...(message.metadata as object), author: run.author } } : message];
+    }));
+  }
+  /**
+   * A turn the runtime recorded as listened (`run.listened`) whose history has
+   * no listened marker (the agent ended without a word instead of calling
+   * stay_silent): its reply is marked as listened, so it reads the same as live.
+   */
+  private markListened(runs: Map<string, Run>, messages: UIMessage[]): UIMessage[] {
+    const result: UIMessage[] = [];
+    let open: { run: Run; marked: boolean; lastAssistant?: number } | undefined;
+    const close = () => {
+      if (!open || open.marked || !open.run.listened) return;
+      const marker = { type: LISTENED_PART as `data-${string}`, data: {} };
+      if (open.lastAssistant !== undefined) { const m = result[open.lastAssistant]!; result[open.lastAssistant] = { ...m, parts: [...m.parts, marker] }; }
+      else result.push({ id: `${open.run.id}-listened`, role: 'assistant', parts: [marker] });
+    };
+    for (const message of messages) {
+      if (message.role === 'user') {
+        const otid = (message.metadata as { otid?: unknown } | undefined)?.otid;
+        const run = typeof otid === 'string' ? runs.get(otid) : undefined;
+        // The other messages of a combined turn belong to its first one.
+        if (run?.batchOf && open?.run.id === run.batchOf) { result.push(message); continue; }
+        close(); open = run ? { run, marked: false } : undefined;
+      } else if (open) {
+        if (message.parts.some(part => part.type === LISTENED_PART)) open.marked = true;
+        open.lastAssistant = result.length;
+      }
+      result.push(message);
+    }
+    close();
+    return result;
+  }
+  /** Transport observations of a conversation's delivered turns (combined turns shown as their messages, then the reply). */
+  private observed(threadId: string): UIMessage[] {
+    const delivered = this.delivered(threadId);
+    return delivered.filter(r => !r.batchOf).flatMap(run => this.displayTurn(run, (run.batch ?? []).slice(1).map(id => delivered.find(r => r.id === id)).filter((r): r is Run => !!r)));
   }
   async history(owner: string, id: string) {
     const thread = this.thread(owner, id);
@@ -380,7 +529,7 @@ export class ThreadRuntime {
   }
   /** Turns waiting in a thread's queue, oldest first (shared runtimes). */
   private queueOf(threadId: string) {
-    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}),
+    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}), ...(this.sending.has(r.id) ? { sending: true } : {}),
       ...(r.images?.length ? { images: r.images.length } : {}), ...(r.uploads?.length ? { files: r.uploads.length } : {}), ...(r.queuedAt ? { queuedAt: r.queuedAt } : {}) }));
   }
   async view(owner: string, id: string): Promise<Awaited<ReturnType<ThreadRuntime['viewOnce']>>> {
@@ -399,11 +548,13 @@ export class ThreadRuntime {
     if (active && lane.current) return {
       messages: this.annotate(id, lane.current.history.filter(m => m.id !== 'session-status')),
       lastRunId: latest?.id ?? null,
-      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}), ...(active.startedAt && this.queueing ? { startedAt: active.startedAt } : {}), ...(active.images?.length ? { images: active.images.length } : {}), ...(active.files?.length ? { files: active.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
+      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}),
+        // A combined turn: the other messages sent with it, in order.
+        ...(active.batch && active.batch.length > 1 ? { batch: active.batch.slice(1).flatMap(id => { const r = this.state.runs.find(x => x.id === id); return r ? [{ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}) }] : []; }) } : {}), ...(active.startedAt && this.queueing ? { startedAt: active.startedAt } : {}), ...(active.images?.length ? { images: active.images.length } : {}), ...(active.files?.length ? { files: active.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
       status: 'running', ...queue,
     };
     if (latest && !['running', 'completed'].includes(latest.status)) return {
-      messages: this.delivered(id).flatMap(displayRun),
+      messages: this.observed(id),
       lastRunId: latest.id, live: null, status: latest.status, source: 'transport-observations', ...queue,
     };
     return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, source: 'backend-history', ...queue };
@@ -614,6 +765,7 @@ export class ThreadRuntime {
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
+    if (this.queueing && author) this.stopTyping(thread.id, author.id);
     if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author);
     const latest = this.delivered(thread.id).at(-1);
     if (input.parentRunId !== (latest?.id ?? null)) throw new RuntimeFault('history_conflict');
@@ -669,9 +821,29 @@ export class ThreadRuntime {
     run.status = 'cancelled'; run.notSent = true;
     this.emit(run, 'failed', { code });
   }
+  /**
+   * Queued messages sent together with `run` (the oldest waiting one) as one
+   * turn: in a conversation with several people and reply modes, the text-only
+   * messages waiting right behind it, as long as their combined text fits one
+   * turn. Messages with images or files are always sent on their own.
+   */
+  private batchOf(thread: Thread, run: Run): Run[] {
+    const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length;
+    if (this.replyMode === undefined || this.participants(thread.id) < 2 || !textOnly(run)) return [run];
+    const batch = [run];
+    for (const next of this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued' && r !== run)) {
+      const candidate = [...batch, next];
+      if (!textOnly(next) || candidate.length > MAX_BATCH || combinedText(candidate.map(r => ({ speaker: { name: r.author?.name ?? '' }, text: r.input }))).length > MAX_INPUT_CHARACTERS) break;
+      batch.push(next);
+    }
+    return batch;
+  }
+  /** Queued runs being sent: from here on they can no longer be withdrawn. */
+  private sending = new Set<string>();
   private async dispatch(lane: Lane, run: Run) {
     lane.locked = true;
     let launched = false;
+    let batch: Run[] = [run];
     try {
       const thread = this.state.threads.find(t => t.id === run.threadId);
       const latest = this.delivered(run.threadId).at(-1);
@@ -680,19 +852,25 @@ export class ThreadRuntime {
       let staged: ReturnType<UploadStaging['load']> = [];
       try { staged = payload.uploads.length ? this.uploads!.load(payload.uploads) : []; }
       catch (error) { const fault = fileFault(error); this.withdraw(run, fault instanceof RuntimeFault ? fault.code : 'not_sent'); return; }
+      // Decided once, synchronously: the batch is fixed before anything is awaited, and its messages can no longer be withdrawn.
+      batch = this.batchOf(thread, run);
+      for (const member of batch) { this.sending.add(member.id); this.queued.delete(member.id); }
+      if (batch.length > 1) this.changed();
       run.parentRunId = latest?.id ?? null;
-      this.queued.delete(run.id);
-      await this.launch(lane, thread, run, payload.images, payload.names, staged, payload.uploads, run.images ?? []);
+      await this.launch(lane, thread, run, payload.images, payload.names, staged, payload.uploads, run.images ?? [], batch.slice(1));
       launched = true;
     } catch (error) {
-      if (!launched && run.status === 'queued') this.withdraw(run, error instanceof RuntimeFault ? error.code : 'not_sent');
-    } finally { lane.locked = false; if (!launched) this.pump(); }
+      if (!launched) for (const member of batch) if (member.status === 'queued') this.withdraw(member, error instanceof RuntimeFault ? error.code : 'not_sent');
+    } finally {
+      for (const member of batch) this.sending.delete(member.id);
+      lane.locked = false; if (!launched) this.pump();
+    }
   }
   /**
    * Open the session, store the uploads, record the run as running, and drive it.
    * `run` is new (single-owner) or the queued record (shared).
    */
-  private async launch(lane: Lane, thread: Thread, run: Run, images: DecodedImage[], names: (string | undefined)[] | undefined, staged: ReturnType<UploadStaging['load']>, uploadIds: string[], imageMetadata: RunImage[]) {
+  private async launch(lane: Lane, thread: Thread, run: Run, images: DecodedImage[], names: (string | undefined)[] | undefined, staged: ReturnType<UploadStaging['load']>, uploadIds: string[], imageMetadata: RunImage[], others: Run[] = []) {
     const session = await this.openIn(lane, thread);
     // Move the uploads into this conversation's folder (all or none, within its limits) before recording the run.
     let files: StoredFile[] = [];
@@ -703,13 +881,19 @@ export class ThreadRuntime {
     }
     const fileMetadata: RunFile[] = files.map(({ name, kind, mediaType, label, bytes, sha256, pages, lines }) => ({ name, kind, mediaType, label, bytes, sha256, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) }));
     const startedAt = new Date().toISOString();
-    Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt });
+    // Reply mode of this turn (sessions that can listen): a mention always gets a reply.
+    const turn = [run, ...others];
+    const replyMode = this.replyMode !== undefined && session.agent.listening ? this.modeOf(thread) : undefined;
+    const addressed = !!this.agentName && turn.some(r => mentionsAgent(r.input, this.agentName!));
+    Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt, ...(replyMode ? { replyMode } : {}), ...(others.length ? { batch: turn.map(r => r.id) } : {}) });
+    // The other messages of a combined turn are sent with it: they follow its state, and its events are the turn's.
+    for (const other of others) Object.assign(other, { status: 'running', startedAt, parentRunId: run.id, batchOf: run.id });
     thread.lastActivityAt = startedAt;
     if (!this.state.runs.includes(run)) this.state.runs.push(run);
     this.save();
     const control = new AbortController(); lane.active = { run, control };
     this.changed();
-    const text = run.input;
+    const text = others.length ? combinedText(turn.map(r => ({ speaker: { name: r.author?.name ?? '' }, text: r.input }))) : run.input;
     // Exactly the new turn: text (if any), the images, then the stored files by reference, in the order given.
     const content: UserContent = images.length || files.length
       ? [...(text.trim() ? [{ type: 'text' as const, text }] : []),
@@ -722,10 +906,10 @@ export class ThreadRuntime {
         }),
         ...files.map(file => ({ type: 'file' as const, mediaType: file.mediaType, filename: file.name, data: { type: 'reference' as const, reference: { [IMAGE_REFERENCE_PROVIDER]: file.sha256 } } }))]
       : text;
-    void this.drive(lane, session, run, control, content);
+    void this.drive(lane, session, run, control, content, { others, ...(replyMode ? { replyMode, addressed } : {}) });
     return run;
   }
-  private async drive(lane: Lane, session: RuntimeSession, run: Run, control: AbortController, content: UserContent) {
+  private async drive(lane: Lane, session: RuntimeSession, run: Run, control: AbortController, content: UserContent, turn: { others: Run[]; replyMode?: ReplyMode; addressed?: boolean } = { others: [] }) {
     let timedOut = false;
     const expire = () => { timedOut = true; control.abort(); };
     let remaining = this.deadlineMs;
@@ -765,14 +949,20 @@ export class ThreadRuntime {
         if (signal.aborted) { abort(); return; }
         this.emit(run, 'interaction', request);
       }));
-      this.emit(run, 'started', { threadId: run.threadId });
-      // Shared runtimes tag the turn with its run ID (to show its author in history) and tell the agent who is speaking.
-      const shared = this.queueing ? { otid: run.id, ...(run.author ? { speaker: { name: run.author.name, login: run.author.login } } : {}) } : {};
+      this.emit(run, 'started', { threadId: run.threadId, ...(turn.others.length ? { batch: [run.id, ...turn.others.map(r => r.id)] } : {}) });
+      for (const other of turn.others) this.emit(other, 'started', { threadId: run.threadId, batchOf: run.id });
+      // Shared runtimes tag the turn with its run ID (to show its author in history) and tell the agent who is speaking,
+      // and, when the agent can listen, whether it must reply.
+      const speaker = (r: Run) => r.author ? { name: r.author.name, login: r.author.login } : { name: '' };
+      const shared = this.queueing ? { otid: run.id,
+        ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
+        ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
       const result = await session.agent.stream(typeof content === 'string'
         ? { prompt: content, abortSignal: control.signal, ...shared }
         : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
+        else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
         else if (part.type === 'tool-call') this.emit(run, 'tool_started', { toolCallId: part.toolCallId, name: part.toolName, input: part.input, execution: 'external' });
         else if (part.type === 'tool-result') this.emit(run, 'tool_completed', { toolCallId: part.toolCallId, name: part.toolName, output: part.output, execution: 'external' });
         else if (part.type === 'tool-error') this.emit(run, 'tool_failed', { toolCallId: part.toolCallId, name: part.toolName, code: 'tool_failed', ...toolFailureReason(part.error), execution: 'external' });
@@ -780,6 +970,8 @@ export class ThreadRuntime {
       }
       if (lane.pending?.runId === run.id) throw new RuntimeFault('interaction_incomplete');
       if (control.signal.aborted || await result.finishReason !== 'stop') throw new RuntimeFault('runtime_failed');
+      const letta = (await result.providerMetadata)?.letta as { listened?: unknown; reason?: unknown } | undefined;
+      if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
       run.status = 'completed'; this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
       run.status = control.signal.aborted ? 'cancelled' : 'failed';
@@ -787,9 +979,14 @@ export class ThreadRuntime {
       if (lane.pending?.runId === run.id) this.emit(run, 'interaction_ended', { id: lane.pending.request.id, code });
       this.emit(run, 'failed', { code });
     } finally {
+      // The other messages of a combined turn end with it (they were delivered together).
+      for (const other of turn.others) {
+        other.status = run.status;
+        if (run.status === 'completed') this.emit(other, 'completed', {}); else this.emit(other, 'failed', { code: String(run.events.at(-1)?.data.code ?? 'runtime_failed') });
+      }
       // Keep the pre-run display snapshot current for browser reconnects without
       // closing a running SDK session or replaying any transcript into the agent.
-      session.history = [...session.history, ...displayRun(run)];
+      session.history = [...session.history, ...this.displayTurn(run, turn.others)];
       lane.pending = undefined; disconnect(); clearTimeout(timer); clearTimeout(hardTimer); lane.active = undefined; lane.usedAt = Date.now();
       this.changed();
       // The next queued turn of this conversation (or another waiting for a free slot).
@@ -800,13 +997,18 @@ export class ThreadRuntime {
       }
     }
   }
-  /** Shared runtimes keep completed runs small: consecutive text events become one (sequence numbers are kept). */
+  /** Display of a finished turn: one user message per message of a combined turn (each with its author), then the reply. */
+  private displayTurn(run: Run, others: Run[]): UIMessage[] {
+    const [user, assistant] = displayRun(run);
+    return [user!, ...others.map(other => displayRun(other)[0]!), assistant!];
+  }
+  /** Shared runtimes keep completed runs small: consecutive text (or reasoning) events become one (sequence numbers are kept). */
   private compact(run: Run) {
     if (!this.queueing) return;
     const events: RuntimeEvent[] = [];
     for (const event of run.events) {
       const last = events.at(-1);
-      if (event.type === 'text' && last?.type === 'text') events[events.length - 1] = { sequence: event.sequence, type: 'text', data: { text: String(last.data.text) + String(event.data.text) } };
+      if ((event.type === 'text' || event.type === 'reasoning') && last?.type === event.type) events[events.length - 1] = { sequence: event.sequence, type: event.type, data: { text: String(last.data.text) + String(event.data.text) } };
       else events.push(event);
     }
     run.events = events;
@@ -825,7 +1027,9 @@ export class ThreadRuntime {
   /** Who wrote a run and its state, for authorization by a shared server. */
   runInfo(owner: string, id: string): { threadId: string; status: Run['status']; author?: RunAuthor } {
     const run = this.run(owner, id);
-    return { threadId: run.threadId, status: run.status, ...(run.author ? { author: run.author } : {}) };
+    // Answering or stopping a combined turn is up to the author of its first message (or an admin), like any turn.
+    const lead = run.batchOf ? this.state.runs.find(r => r.id === run.batchOf) ?? run : run;
+    return { threadId: run.threadId, status: run.status, ...(lead.author ? { author: lead.author } : {}) };
   }
   answer(owner: string, runId: string, response: InteractionResponse) {
     const run = this.run(owner, runId);
@@ -837,13 +1041,20 @@ export class ThreadRuntime {
   }
   cancel(owner: string, id: string) {
     const run = this.run(owner, id);
-    if (run.status === 'queued') { this.withdraw(run, 'cancelled'); this.pump(); return; }
-    const lane = this.laneOfRun(id);
-    if (lane?.active?.run.id === id) lane.active.control.abort();
+    if (run.status === 'queued') {
+      // Being sent (for example, with other messages as one turn): it can no longer be withdrawn.
+      if (this.sending.has(id)) throw new RuntimeFault('already_sent');
+      this.withdraw(run, 'cancelled'); this.pump(); return;
+    }
+    // A message sent with others as one turn: stopping it stops that turn.
+    const lead = run.batchOf ?? id;
+    const lane = this.laneOfRun(lead);
+    if (lane?.active?.run.id === lead) lane.active.control.abort();
   }
   private closing = false;
   async close() {
     this.closing = true;
+    if (this.typingTimer) { clearTimeout(this.typingTimer); this.typingTimer = undefined; }
     for (const lane of this.lanes.values()) lane.active?.control.abort();
     if (this.saveTimer) { try { this.save(); } catch { /* best effort */ } }
     await Promise.allSettled([...this.lanes.values()].map(lane => this.parallel ? this.closeLane(lane) : Promise.resolve()));

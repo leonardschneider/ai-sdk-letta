@@ -351,6 +351,7 @@ test('team HTTP: identity, Host/Origin/CSRF, agent list, and membership on every
     const routes: [string, string, unknown?][] = [
       ['GET', '/v1/capabilities'], ['GET', '/v1/threads'], ['POST', '/v1/threads', { id: randomUUID(), title: 'x' }],
       ['PATCH', `/v1/threads/${thread}`, { title: 'Hijacked' }], ['GET', `/v1/threads/${thread}/history`], ['GET', `/v1/threads/${thread}/view`],
+      ['POST', `/v1/threads/${thread}/typing`, { typing: true }],
       ['GET', `/v1/threads/${thread}/files`], ['GET', `/v1/threads/${thread}/files/a.txt`],
       ['POST', '/v1/runs', { id: randomUUID(), threadId: thread, text: 'x', parentRunId: null }], ['POST', `/v1/runs/${run}/answer`, { id: 'x', approved: true }],
       ['POST', `/v1/runs/${run}/cancel`, {}], ['GET', `/v1/runs/${run}/events`], ['GET', '/v1/changes?since=0'],

@@ -44,6 +44,12 @@
       "import": "./dist/title.js",
       "default": "./dist/title.js"
     },
+    "./listening": {
+      "ai-sdk-letta-source": "./src/listening.ts",
+      "types": "./dist/listening.d.ts",
+      "import": "./dist/listening.js",
+      "default": "./dist/listening.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

@@ -2,11 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
 import { ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
-import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, type QueuedTurn } from './team.js';
+import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
+import { ReplyModeMenu } from './reply-mode-menu.js';
+import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
+import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, observedParts, userContent, withAuthor, withTime, type FileChip } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withoutListened, withTime, type FileChip } from './messages.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
@@ -28,7 +31,13 @@ import './markdown.css';
 
 type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['kind']; pages?: number; lines?: number };
 type Author = Person & { id: string };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; startedAt?: string }; status: string | null; queue?: QueuedTurn[] };
+/** Other messages delivered with a live turn (queued messages sent together), in order. */
+type BatchMember = { id: string; input: string; author?: Author };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; startedAt?: string; batch?: BatchMember[] }; status: string | null; queue?: QueuedTurn[] };
+/** Whether the quiet "Listened" lines are shown (kept per browser). */
+const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
+/** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
+const TYPING_HEARTBEAT_MS = 1500;
 /** Team mode: who you are, your role in this agent, and the other agents you can switch to. */
 type Team = { user: Author; agents: AgentInfo[]; onSwitch(id: string): void };
 const chip = (file: Pick<FileInfo, 'name' | 'kind' | 'label' | 'bytes' | 'pages' | 'lines'>): FileChip => ({ name: file.name, kind: file.kind, detail: fileDetail(file) });
@@ -124,15 +133,18 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = []) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id); setLiveAuthor(author);
     const events: RuntimeEvent[] = [];
     let ended = false;
     let endedAt: string | undefined;
+    let members = [...batch];
+    // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
     const render = () => setMessages([...base,
       withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author),
-      withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt)]);
+      ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
+      markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
     try {
       const response = await fetch(apiPath(`/v1/runs/${id}/events`), { signal: control.signal });
@@ -146,6 +158,12 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           const event = JSON.parse(line) as RuntimeEvent;
           if (stream.current !== control || control.signal.aborted) return;
           if (event.sequence <= (events.at(-1)?.sequence ?? 0)) continue;
+          // This message was sent together with others as one turn: show that turn instead.
+          if (team && event.type === 'started' && typeof event.data.batchOf === 'string') { control.abort(); liveRun.current = undefined; void refreshView().catch(() => {}); return; }
+          // This message leads a combined turn: fetch the other messages sent with it, to show them as their own bubbles.
+          if (team && event.type === 'started' && Array.isArray(event.data.batch) && event.data.batch.length > 1 && !members.length) {
+            void api<View>(`/v1/threads/${currentRef.current.id}/view`).then(view => { if (view.live?.id === id && view.live.batch && stream.current === control) { members = view.live.batch; render(); } }).catch(() => {});
+          }
           events.push(event);
           if (event.type === 'interaction') {
             const request = event.data as InteractionRequest;
@@ -203,7 +221,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       if (view.live && liveRun.current === view.live.id) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author); return; }
+      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch); return; }
       if (liveRun.current) return;
       setMessages(base);
       setBlocked(!!view.status && !['running', 'completed'].includes(view.status) ? blockedNotice : '');
@@ -229,7 +247,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       const failed = !!view.status && !['running', 'completed'].includes(view.status);
       setBlocked(failed ? blockedNotice : '');
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
-      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author);
+      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch);
     } catch (e) {
       setCurrent(previous);
       toast(errorCode(e) === 'runtime_busy' ? 'Another reply is still running. Try again when it finishes.' : errorCode(e) === 'not_found' && team ? 'That conversation isn’t available in this agent.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
@@ -304,7 +322,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   /** Team mode: you may answer or stop the live turn if you sent it or are an admin. */
   const mayAct = !team || isAdmin || !liveAuthor || liveAuthor.id === team.user.id;
 
-  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride }) {
+  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride; replyMode?: ReplyModeOverride }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
@@ -340,6 +358,53 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     try { await patch(id, { latex: value }); } catch (e) { toast(metadataError(e), { tone: 'error' }); }
   }
 
+  /** Team mode: a conversation's reply mode (agent default, always, when mentioned or asked, agent decides). */
+  async function setReplyMode(id: string, value: ReplyModeOverride) {
+    try { await patch(id, { replyMode: value }); } catch (e) { toast(metadataError(e), { tone: 'error' }); }
+  }
+  const [showListened, setShowListenedState] = useState(() => localStorage.getItem(SHOW_LISTENED) !== 'false');
+  const setShowListened = useCallback((show: boolean) => { localStorage.setItem(SHOW_LISTENED, String(show)); setShowListenedState(show); }, []);
+
+  /**
+   * Team mode: tell the others you are typing in this conversation. Only
+   * presence, never the text: a small heartbeat while you type (the server
+   * forgets it about 5 seconds after the last one), and "stopped" when the
+   * box is emptied or you switch conversations. Sending ends it on the server.
+   */
+  const typingState = useRef<{ thread?: string; at: number }>({ at: 0 });
+  const signalTyping = useCallback((typing: boolean) => {
+    const target = currentRef.current;
+    if (!team || target.draft) return;
+    const state = typingState.current;
+    if (typing) {
+      if (state.thread === target.id && Date.now() - state.at < TYPING_HEARTBEAT_MS) return;
+      state.thread = target.id; state.at = Date.now();
+      void api(`/v1/threads/${target.id}/typing`, { typing: true }).catch(() => {});
+    } else if (state.thread) {
+      const thread = state.thread; state.thread = undefined; state.at = 0;
+      void api(`/v1/threads/${thread}/typing`, { typing: false }).catch(() => {});
+    }
+  }, [team]);
+  // Switching conversations ends your typing in the one you left.
+  useEffect(() => { if (typingState.current.thread && typingState.current.thread !== current.id) signalTyping(false); }, [current.id, signalTyping]);
+
+  /** Team mode: `@` in the composer suggests the agent's name. */
+  const [mention, setMention] = useState<{ start: number; caret: number } | undefined>();
+  const updateMention = useCallback((el: HTMLTextAreaElement) => {
+    if (!team) return;
+    const found = el.selectionStart === el.selectionEnd ? mentionQuery(el.value, el.selectionStart) : undefined;
+    setMention(found && mentionMatches(found.query, agent.name) ? { start: found.start, caret: el.selectionStart } : undefined);
+  }, [team, agent.name]);
+  const chooseMention = useCallback(() => {
+    const el = composerRef.current;
+    if (!mention || !el) return;
+    const next = insertMention(el.value, mention.start, mention.caret, mentionName(agent.name));
+    runtime.thread.composer.setText(next.text);
+    setMention(undefined);
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(next.caret, next.caret); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mention, agent.name]);
+
   /** Title from the first message, only while the conversation still has the default title. */
   async function autoTitle(id: string, text: string) {
     const thread = threadsRef.current.find(t => t.id === id);
@@ -369,6 +434,8 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     if (!text.trim() && !wire.length && !uploads.length) throw new MessageNotSentError();
     if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); throw new MessageNotSentError(); }
     operation.current = true;
+    // Sending ends your typing (the server clears it too).
+    typingState.current = { at: 0 }; setMention(undefined);
     const startedAt = new Date().toISOString();
     const base = messagesRef.current;
     const first = !base.length && !queueing;
@@ -431,7 +498,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   /** Team mode: take a waiting message back before it is sent (its author or an admin). */
   async function withdraw(turn: QueuedTurn) {
     try { await api(`/v1/runs/${turn.id}/cancel`, {}); setQueue(list => list.filter(item => item.id !== turn.id)); void refreshView().catch(() => {}); }
-    catch (e) { toast(errorCode(e) === 'not_your_turn' ? 'Only its author or an admin can withdraw that message.' : 'Couldn’t withdraw that message.', { tone: 'error' }); }
+    catch (e) { toast(errorCode(e) === 'not_your_turn' ? 'Only its author or an admin can withdraw that message.' : errorCode(e) === 'already_sent' ? 'Too late: that message was just sent to the agent.' : 'Couldn’t withdraw that message.', { tone: 'error' }); }
   }
 
   const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running, queued: t.queued ?? 0 } })), [active]);
@@ -441,9 +508,11 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const attachments = useMemo(() => new FileAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? [], filesEnabled ? uploadFile : undefined), [filesEnabled]);
   // Sent files download from where they are now in the resources (the server follows moves and renames).
   const fileLink = useCallback((name: string) => current.draft ? undefined : apiPath(`/v1/threads/${encodeURIComponent(current.id)}/files/${encodeURIComponent(name)}`), [current]);
+  // The quiet "Listened" lines can be hidden (a per-browser setting); the messages themselves always stay.
+  const shown = useMemo(() => showListened ? messages : withoutListened(messages), [messages, showListened]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     // Team mode: the composer stays usable during a reply (messages queue), so the runtime is never "running" for assistant-ui.
-    messages, convertMessage: m => m, isRunning: team ? false : running, isLoading: loading,
+    messages: shown, convertMessage: m => m, isRunning: team ? false : running, isLoading: loading,
     isDisabled: loading || !!blocked || readOnly || (!current.draft && selected?.state !== 'ready'),
     onNew: send, onCancel: cancel, unstable_enableToolInvocations: false,
     adapters: { attachments, threadList: {
@@ -510,6 +579,8 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
               <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
             </>}
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+            {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode}
+              showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {filesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
@@ -529,18 +600,32 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                 <div className="column footer-column">
                   <ThreadPrimitive.ScrollToBottom className="jump" aria-label="Jump to latest"><ArrowDown size={14} aria-hidden="true"/>Jump to latest</ThreadPrimitive.ScrollToBottom>
                   <InteractionDock onDismiss={() => { setInteraction(undefined); setInteractionOutcome(''); focusComposer(); }}/>
-                  {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)}/>}
+                  {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.participants ?? 0) > 1}/>}
+                  {team && !current.draft && !readOnly && <TypingLine people={selected?.typing ?? []} me={team.user.id}/>}
                   {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}</span><button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
                   {readOnly
                     ? <div className="readonly-bar"><span>This conversation is archived and read-only.</span><button type="button" className="btn primary small" onClick={() => void restore(current.id)}><ArchiveRestore size={15} aria-hidden="true"/>Restore</button></div>
                     : <ComposerPrimitive.Root className="composer" data-disabled={(!!blocked || loading) || undefined}>
+                        {mention && <div className="menu mentions" role="listbox" aria-label="Mention">
+                          <div role="option" aria-selected="true" className="menu-item" onMouseDown={event => { event.preventDefault(); chooseMention(); }}>
+                            <span className="brand-mark" aria-hidden="true">✳︎</span><span>{mentionName(agent.name)}</span><span className="mention-handle">@{mentionName(agent.name).split(' ')[0]}</span>
+                          </div>
+                        </div>}
                         <ComposerPrimitive.AttachmentDropzone className="dropzone" disabled={!!blocked || loading}>
                           <ComposerImages fileInfo={id => attachments.uploaded(id)}/>
                           <div className="composer-row">
                             <ComposerPrimitive.AddAttachment className="icon-btn attach-btn" aria-label={filesEnabled ? 'Attach files' : 'Attach images'} title={filesEnabled ? `Attach files: PDF, text, CSV, code (up to ${FILE_LIMITS.maxFileBytes / 1024 / 1024} MB) or images · or paste / drop` : `Attach images (up to ${IMAGE_LIMITS.maxImages}) · or paste / drop`} disabled={!!blocked || loading}><Paperclip size={18} aria-hidden="true"/></ComposerPrimitive.AddAttachment>
                             <ComposerPrimitive.Input ref={composerRef} className="composer-input" aria-label="Message" rows={1} maxRows={10} maxLength={8000} autoFocus
                               addAttachmentOnPaste={false} onPaste={onPaste}
-                              onKeyDown={event => { if (!team && event.key === 'Enter' && !event.shiftKey && running && !event.nativeEvent.isComposing) event.preventDefault(); }}
+                              onKeyDown={event => {
+                                // A suggested @mention: Enter or Tab inserts it, Escape dismisses it.
+                                if (mention && !event.nativeEvent.isComposing && (event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) { event.preventDefault(); chooseMention(); return; }
+                                if (mention && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setMention(undefined); return; }
+                                if (!team && event.key === 'Enter' && !event.shiftKey && running && !event.nativeEvent.isComposing) event.preventDefault();
+                              }}
+                              onChange={event => { updateMention(event.currentTarget); if (team) signalTyping(!!event.currentTarget.value.trim()); }}
+                              onSelect={event => updateMention(event.currentTarget)}
+                              onBlur={() => setMention(undefined)}
                               placeholder={blocked ? 'Start a new chat to continue' : team && running ? (narrow ? 'Queue a message' : `Message ${agent.name} · sent when this reply finishes`) : `Message ${agent.name}`}/>
                             {team
                               ? <>

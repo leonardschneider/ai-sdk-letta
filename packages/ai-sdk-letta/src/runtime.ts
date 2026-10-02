@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
-import type { ToolSet, UIMessage } from 'ai';
+import { jsonSchema, tool, type Tool, type ToolSet, type UIMessage } from 'ai';
 import { LettaAgent } from './agent.js';
 import { creationOptions, dreamingCommand, INTERNAL_MEMORY_TOOLS, type AgentDefinition } from './definition.js';
 import { acquireIdentity, validConversationId, type Identity } from './identity.js';
@@ -14,6 +14,23 @@ import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
 import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout } from './sandbox.js';
+import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
+
+/**
+ * The application-owned tool an agent calls to listen without replying. It
+ * succeeds only in a turn that allows silence (`allowed()`); otherwise it
+ * tells the agent to reply.
+ */
+export function staySilentTool(allowed: () => boolean): Tool<{ reason?: string }, { listening: boolean }> {
+  return tool({
+    description: STAY_SILENT_DESCRIPTION,
+    inputSchema: jsonSchema<{ reason?: string }>(STAY_SILENT_SCHEMA as Parameters<typeof jsonSchema>[0]),
+    execute: async () => ({ listening: allowed() }),
+    toModelOutput: ({ output }: { output: { listening: boolean } }) => output.listening
+      ? { type: 'text' as const, value: 'OK: you listen this turn. End the turn now and write no text.' }
+      : { type: 'error-text' as const, value: 'This turn needs a reply (you were mentioned, or the reply mode is "always"). Write your reply now.' },
+  });
+}
 
 /** Which conversation to open. `null` means "open nothing" (for example, the user quit a picker). */
 export type ConversationChoice = { conversationId: string } | { newTitle: string } | null;
@@ -135,8 +152,12 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
   close(): Promise<void>;
 }
 
-/** Options for {@link openAgentHost}. */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces'>;
+/**
+ * Options for {@link openAgentHost}. `listening`: conversations shared by
+ * several people; the agent gets the `stay_silent` tool so a turn with a
+ * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
+ */
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -242,6 +263,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       })();
       try {
         let turnSignal: AbortSignal | undefined;
+        // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
+        let turnSilence = false;
         // Resources: every file of the agent in one git-backed folder, one folder
         // per conversation. The current conversation is bound here (never from
         // tool arguments); tools may read other conversations' folders too.
@@ -259,12 +282,15 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         }
         const toolContext = Object.freeze({ ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}) });
         // Without a sandbox, the shell tools are never exposed.
-        const allowedTools = sandbox ? undefined : Object.keys(definition.tools).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name));
+        const listening = !!options.listening;
+        const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;
+        const allowedTools = sandbox ? undefined : Object.keys(exposed).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name));
         const sandboxTimeout = definition.sandbox ? sandboxToolTimeout(definition.sandbox) : undefined;
         const shell = sandbox;
         // Background harness work must never open a prompt over an idle chat input.
         const bridge = createToolBridge({
-          tools: definition.tools, permissions: definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+          tools: exposed, permissions: listening ? { ...definition.permissions, [STAY_SILENT_TOOL]: 'allow' } : definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+          ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
           ...(sandboxTimeout ? { toolTimeouts: Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) } : {}),
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           context: () => toolContext,
@@ -284,7 +310,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const live = session;
         const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query));
         assertHistorySettled(history.messages);
-        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools));
+        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
         const configured = await session.sendCommand(dreamingCommand(definition, ready.agentId, ready.conversationId), { responseType: 'set_reflection_settings_response' });
@@ -304,17 +330,18 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const store = resources;
         agent = new LettaAgent<TOOLS>({
           id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
-          open: signal => {
-            turnSignal = signal;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) turnSignal = undefined; } };
+          open: (signal, turn) => {
+            turnSignal = signal; turnSilence = turn.silence;
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; } } };
           },
+          listening, name: definition.name,
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
           delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
           // Whatever the agent changed in the resources during the turn becomes one commit.
           // Folder renames of this conversation wait while a turn runs, then apply after that commit.
           ...(store ? { beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId) } : {}),
         });
-        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query))).messages, Object.keys(definition.tools));
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query))).messages, Object.keys(definition.tools), undefined, { listening });
         self = { agent, conversationId, title: conversationTitle, live, history: reload, truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;

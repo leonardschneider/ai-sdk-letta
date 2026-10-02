@@ -6,12 +6,15 @@ import { ToolInteractions } from './interactions.js';
 import { assertImageBudget, compactImagePart, decodeImagePart, IMAGE_REFERENCE_PROVIDER, imagePartDigest, ImageInputError, isImagePart, toLettaImage, type DecodedImage } from './images.js';
 import { attachmentNote, decodeFilePart, FileInputError, type StoredFile } from './attachments.js';
 import type { AttachmentStore } from './resources.js';
+import { REPLY_MODES, STAY_SILENT_TOOL, turnNote, type ReplyMode, type TurnSpeaker } from './listening.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
 
 /** The subset of a Letta session a turn needs. */
 export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'>;
+/** What a turn allows, passed to {@link LettaAgentOptions.open}: `silence` is true when the agent may listen without replying. */
+export type TurnOptions = { silence: boolean };
 
 /** Display-only state restored when the agent was opened. Never sent to the model. */
 export interface AgentPresentation {
@@ -33,8 +36,8 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   /** Logical definition ID. */
   id: string;
   tools: TOOLS;
-  /** Opens a per-turn view of the (long-lived) Letta session. */
-  open: (signal: AbortSignal) => TurnSession;
+  /** Opens a per-turn view of the (long-lived) Letta session. `turn.silence` says whether the {@link STAY_SILENT_TOOL} tool may succeed in this turn. */
+  open: (signal: AbortSignal, turn: TurnOptions) => TurnSession;
   /** Harness tool names hidden from AI SDK results (MemFS operations). */
   memoryTools?: readonly string[];
   /** Letta-generated agent ID. */
@@ -58,6 +61,15 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   afterTurn?: () => Promise<void>;
   /** Runs when a turn starts, before anything is stored or sent (paired with `afterTurn`). Errors are ignored. */
   beforeTurn?: () => void;
+  /**
+   * The session exposes the {@link STAY_SILENT_TOOL} tool, so turns may pass a
+   * `replyMode` and the agent may listen without replying (see
+   * {@link LettaCallOptions}). Its calls are never AI SDK tool calls; a
+   * listened turn finishes with `providerMetadata.letta.listened`.
+   */
+  listening?: boolean;
+  /** The agent's display name, as people mention it (used in the turn note). */
+  name?: string;
 }
 
 /**
@@ -70,7 +82,25 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
  *   it: a short `<system-reminder>` line before the message ("This message is
  *   from Alice Example (alice@example.com)."). Display history never shows it.
  */
-export type LettaCallOptions = { otid?: string; speaker?: { name: string; login?: string } };
+export type LettaCallOptions = {
+  otid?: string;
+  speaker?: TurnSpeaker;
+  /**
+   * Several queued messages delivered as one turn: their authors, in order
+   * (the turn text labels each message, see `combinedText`). Replaces `speaker`.
+   */
+  speakers?: TurnSpeaker[];
+  /**
+   * Whether the agent must reply to this turn or may only listen (an agent
+   * opened with `listening`). Anything but `'always'` lets it end the turn
+   * with the `stay_silent` tool instead of a reply, unless `addressed`.
+   */
+  replyMode?: ReplyMode;
+  /** The turn mentions the agent: it must reply whatever the `replyMode`. */
+  addressed?: boolean;
+};
+/** Letta-specific result metadata of a turn (`providerMetadata.letta`). `listened`: the agent chose not to reply; `reason` is its private note. */
+export type LettaTurnMetadata = { listened?: boolean; reason?: string };
 /** The line that tells the agent who is speaking (see {@link LettaCallOptions}). Names are cleaned of markup and controls. */
 export function speakerNote(speaker: { name: string; login?: string }): string {
   const clean = (value: string) => value.replace(/[\p{Cc}\p{Cf}<>]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -104,6 +134,9 @@ export function historyKey(messages: ModelMessage[]): string {
         parts.push({ role: message.role, text: null, image: imagePartDigest(part) });
       } else if (message.role === 'user' && part.type === 'file') {
         parts.push({ role: message.role, text: null, file: filePartDigest(part), name: part.filename ?? null });
+      } else if (part.type === 'reasoning' && message.role === 'assistant') {
+        // Reasoning is the model's own, never part of what the history must match.
+        continue;
       } else if (part.type === 'tool-call' && message.role === 'assistant') {
         parts.push({ call: part.toolCallId, name: part.toolName, input: part.input });
       } else if (part.type === 'tool-result' && (message.role === 'assistant' || message.role === 'tool')) {
@@ -279,7 +312,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   readonly interactions: ToolInteractions;
   /** This conversation's attachment folder, when the agent accepts files. */
   readonly attachments?: AttachmentStore;
-  private readonly open: (signal: AbortSignal) => TurnSession;
+  private readonly open: (signal: AbortSignal, turn: TurnOptions) => TurnSession;
+  /** The session exposes `stay_silent`; turns may listen without replying. */
+  readonly listening: boolean;
+  private readonly name?: string;
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
   private readonly afterTurn?: () => Promise<void>;
@@ -303,6 +339,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.attachments = options.attachments;
     this.afterTurn = options.afterTurn;
     this.beforeTurn = options.beforeTurn;
+    this.listening = !!options.listening;
+    this.name = options.name;
   }
   private settled?: Promise<void>;
   /** Resolves when the work after the last turn (see `afterTurn`) is done. */
@@ -323,8 +361,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
+    if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
+    if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
     if (options.otid !== undefined && (typeof options.otid !== 'string' || !OTID.test(options.otid))) throw new Error('Invalid otid');
     if (options.prompt !== undefined && options.messages !== undefined) throw new Error('Use prompt or messages, not both');
     const messages = typeof options.prompt === 'string' ? [...this.history, { role: 'user' as const, content: options.prompt }] : options.messages ?? options.prompt;
@@ -347,25 +387,35 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     // The retained transcript keeps images as hashes only; Letta already holds the bytes.
     // (Compact before cloning: URL objects in image parts are not cloneable.)
     if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) throw new Error('Invalid speaker');
-    const preface = options.speaker ? speakerNote(options.speaker) : '';
+    const speakers = options.speakers ?? (options.speaker ? [options.speaker] : []);
+    // Without a reply mode or several speakers, exactly the note shared runtimes always sent.
+    const preface = options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '';
+    const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
-    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files };
+    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence };
   }
 
-  private model(message: SendMessage, signal: AbortSignal, otid?: string): LanguageModelV4 {
+  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false): LanguageModelV4 {
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
       let session: TurnSession | undefined;
       let completed = false;
       const abort = () => { void session?.abort().catch(() => {}); session?.close(); };
       const calls = new Map<string, string>();
       const memoryCalls = new Set<string>();
+      // stay_silent calls: never AI SDK tool calls; a successful one with no reply text makes the turn "listened".
+      const silentCalls = new Map<string, string | undefined>();
+      let listened: { reason?: string } | undefined;
+      let wrote = false;
       const tokens = usage();
       let textId = 0;
       let textOpen = false;
+      let reasoningId = 0;
+      let reasoningOpen = false;
       const endText = () => { if (textOpen) { emit({ type: 'text-end', id: String(textId) }); textOpen = false; } };
+      const endReasoning = () => { if (reasoningOpen) { emit({ type: 'reasoning-end', id: `reasoning-${reasoningId}` }); reasoningOpen = false; } };
       try {
         signal.throwIfAborted();
-        session = this.open(signal);
+        session = this.open(signal, { silence });
         signal.addEventListener('abort', abort, { once: true });
         this.delivery?.begin();
         await (otid ? session.send(message, { otid }) : session.send(message));
@@ -373,13 +423,24 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         for await (const event of session.stream()) {
           signal.throwIfAborted();
           if (event.type === 'assistant') {
+            endReasoning();
+            if (!event.content) continue;
             if (!textOpen) { textId++; emit({ type: 'text-start', id: String(textId) }); textOpen = true; }
+            if (event.content.trim()) wrote = true;
             emit({ type: 'text-delta', id: String(textId), delta: event.content });
-          } else if (event.type === 'tool_call') {
+          } else if (event.type === 'reasoning') {
             endText();
-            if (calls.has(event.toolCallId) || memoryCalls.has(event.toolCallId)) throw new Error('Duplicate tool call');
+            if (!reasoningOpen) { reasoningId++; emit({ type: 'reasoning-start', id: `reasoning-${reasoningId}` }); reasoningOpen = true; }
+            emit({ type: 'reasoning-delta', id: `reasoning-${reasoningId}`, delta: event.content });
+          } else if (event.type === 'tool_call') {
+            endText(); endReasoning();
+            if (calls.has(event.toolCallId) || memoryCalls.has(event.toolCallId) || silentCalls.has(event.toolCallId)) throw new Error('Duplicate tool call');
             // Harness memory operations are not application tool cards/history.
             if (this.memoryTools.includes(event.toolName)) { memoryCalls.add(event.toolCallId); continue; }
+            if (this.listening && event.toolName === STAY_SILENT_TOOL) {
+              const reason = event.toolInput && typeof event.toolInput.reason === 'string' ? event.toolInput.reason.slice(0, 500) : undefined;
+              silentCalls.set(event.toolCallId, reason); continue;
+            }
             if (!Object.hasOwn(this.tools, event.toolName)) throw new Error('Unexpected tool call');
             calls.set(event.toolCallId, event.toolName);
             emit({ type: 'tool-call', toolCallId: event.toolCallId, toolName: event.toolName, input: JSON.stringify(event.toolInput), providerExecuted: true });
@@ -388,6 +449,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             // the authoritative result. Only known internal calls may use it.
             if (memoryCalls.has(event.toolCallId) && event.uuid.startsWith('synthetic-tool-return-stream-')) continue;
             if (memoryCalls.delete(event.toolCallId)) continue;
+            if (silentCalls.has(event.toolCallId)) {
+              // The tool refuses when this turn needs a reply; only an accepted call listens.
+              const reason = silentCalls.get(event.toolCallId);
+              silentCalls.delete(event.toolCallId);
+              if (!event.isError) listened = { ...(reason ? { reason } : {}) };
+              continue;
+            }
             const toolName = calls.get(event.toolCallId);
             if (!toolName) throw new Error('Unmatched tool result');
             let result: JSONValue = event.content;
@@ -398,9 +466,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             if (typeof event.event.prompt_tokens === 'number') tokens.inputTokens.total = event.event.prompt_tokens;
             if (typeof event.event.completion_tokens === 'number') tokens.outputTokens.total = event.event.completion_tokens;
           } else if (event.type === 'result') {
-            if (!event.success || calls.size || memoryCalls.size) throw new Error('Letta turn failed or left incomplete tools');
-            endText(); completed = true;
-            emit({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: tokens });
+            if (!event.success || calls.size || memoryCalls.size || silentCalls.size) throw new Error('Letta turn failed or left incomplete tools');
+            endText(); endReasoning(); completed = true;
+            // A turn that wrote a reply is a reply, even if the agent also called stay_silent.
+            // A turn that may be silent and ended without a word (for example, after only using a tool) was listened to as well.
+            if (!listened && silence && !wrote) listened = {};
+            const letta: LettaTurnMetadata = listened && !wrote ? { listened: true, ...listened } : {};
+            emit({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: tokens, ...(letta.listened ? { providerMetadata: { letta } } : {}) });
             return;
           }
         }
@@ -419,15 +491,20 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       doGenerate: async () => {
         const content: Awaited<ReturnType<LanguageModelV4['doGenerate']>>['content'] = [];
         let tokens = usage();
+        let metadata: Extract<LanguageModelV4StreamPart, { type: 'finish' }>['providerMetadata'];
         await run(part => {
           if (part.type === 'text-delta') {
             const last = content.at(-1);
             if (last?.type === 'text') last.text += part.delta;
             else content.push({ type: 'text', text: part.delta });
+          } else if (part.type === 'reasoning-delta') {
+            const last = content.at(-1);
+            if (last?.type === 'reasoning') last.text += part.delta;
+            else content.push({ type: 'reasoning', text: part.delta });
           } else if (part.type === 'tool-call' || part.type === 'tool-result') content.push(part);
-          else if (part.type === 'finish') tokens = part.usage;
+          else if (part.type === 'finish') { tokens = part.usage; metadata = part.providerMetadata; }
         });
-        return { content, usage: tokens, warnings: [], finishReason: { unified: 'stop', raw: 'stop' } };
+        return { content, usage: tokens, warnings: [], finishReason: { unified: 'stop', raw: 'stop' }, ...(metadata ? { providerMetadata: metadata } : {}) };
       },
       doStream: async () => ({ stream: new ReadableStream<LanguageModelV4StreamPart>({
         start: controller => {
@@ -445,7 +522,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
       this.delivery?.complete();
       this.history = [...turn.messages, ...result.response.messages];
       return result;
@@ -456,7 +533,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
-    return streamText({ model: this.model(turn.message, turn.signal, turn.otid), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
       onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
       onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
       onFinish: result => {

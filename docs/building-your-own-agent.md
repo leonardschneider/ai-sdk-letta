@@ -223,6 +223,7 @@ export const agent = defineAgent({
   toolTimeoutMs: 10_000,
   dreaming: { trigger: 'step-count', stepCount: 25 },
   ui: { latex: false },                            // recipes need no maths (the default is true)
+  replyMode: 'auto',                               // team servers: when it replies in shared conversations
 });
 ```
 
@@ -240,10 +241,28 @@ Each conversation can override it from its ⋯ menu or the Σ button in the
 header (LaTeX: Agent default / On / Off). The terminal UI always shows the
 text as written.
 
+`replyMode` matters only on a team server (below), where several people
+share a conversation. The agent reads every message, but may only *listen*:
+
+- `'always'`: it replies to every message.
+- `'when-addressed'`: it replies when mentioned (`@Kitchen`, `@Kitchen Helper`
+  or its name) or asked directly; otherwise it listens.
+- `'agent-decides'`: it replies when it can help, and listens while people
+  talk among themselves.
+- `'auto'` (the default): `'always'` while one person writes in a
+  conversation, `'agent-decides'` once several do.
+
+A mention always gets a reply. Each conversation can override the mode from
+the ear button in its header. A listened turn still runs fully (the agent may
+use tools and update its memory); the app shows a quiet "Listened" line
+instead of a reply.
+
 `defineAgent` throws immediately if a tool has no entry
 (`Missing permission for tool(s): ...`), if an entry names an unknown tool,
 if `ask_user` is set to `'ask'` (it is already interactive; it defaults to
-`'allow'`), or if `ui` has an unknown key or a non-boolean `latex`. Put the definition in its own module and import it from each
+`'allow'`), if a tool is named `stay_silent` (reserved, see below), if
+`replyMode` is not one of the values above, or if `ui` has an unknown key or a
+non-boolean `latex`. Put the definition in its own module and import it from each
 entry point, so a mistake fails at startup, before any Letta call.
 
 ## 6. Human in the loop
@@ -427,8 +446,10 @@ people in your tailnet, behind `tailscale serve`. Tailscale tells the app who
 each person is; each agent has its own members (owners are admins of all and
 add the others from the app), and members share everything inside an agent.
 Conversations run at the same time, and messages sent to a busy conversation
-wait in a visible queue. See "Sharing with your team" in the README for the
-Tailscale steps.
+wait in a visible queue; in a conversation with several people, messages
+that waited are delivered to the agent together, as one turn. The agent
+replies according to its `replyMode` and may listen without replying (see
+section 5). See "Sharing with your team" in the README for the Tailscale steps.
 
 ```ts
 // src/team.ts
@@ -452,6 +473,13 @@ in different conversations at the same time. `speaker` tells the agent who
 wrote a turn, and `otid` tags the turn so you can find it in history later
 (its user message carries `metadata.otid`).
 
+With `listening: true`, the agent also gets the app-owned `stay_silent` tool,
+and a turn may pass `replyMode` (and `addressed` when it mentions the agent;
+`mentionsAgent` checks that). In modes other than `'always'`, the agent may
+end the turn without a reply: the result has no text and
+`providerMetadata.letta.listened` is `true` (with its private note as
+`reason`). The tool refuses when the turn needs a reply.
+
 ```ts
 // src/host.ts
 import { openAgentHost } from 'ai-sdk-letta';
@@ -465,6 +493,24 @@ try {
     b.agent.generate({ prompt: 'List what to buy for pancakes.' }),
   ]);
   console.log(menu.text, list.text);
+} finally { await host.close(); }
+```
+
+```ts
+// src/listening.ts
+import { mentionsAgent, openAgentHost } from 'ai-sdk-letta';
+import { agent } from './agent.js';
+
+const host = await openAgentHost(agent, { listening: true });
+try {
+  const chat = await host.open({ newTitle: 'Dinner party' });
+  const text = 'Sam, can you bring dessert on Saturday?';
+  const result = await chat.agent.generate({
+    prompt: text, speaker: { name: 'Alex' },
+    replyMode: 'agent-decides', addressed: mentionsAgent(text, agent.name),
+  });
+  const letta = result.providerMetadata?.letta as { listened?: boolean; reason?: string } | undefined;
+  console.log(letta?.listened ? `Listened (${letta.reason ?? 'no note'})` : result.text);
 } finally { await host.close(); }
 ```
 

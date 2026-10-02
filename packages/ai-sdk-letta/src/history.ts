@@ -1,6 +1,7 @@
 import type { LettaCodeSession, ListMessagesOptions, ListMessagesResult, LettaConversation } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
 import { decodeImagePart } from './images.js';
+import { STAY_SILENT_TOOL } from './listening.js';
 
 /** Maximum backend records loaded when restoring a conversation's display history. */
 export const HISTORY_LIMIT = 10_000;
@@ -113,13 +114,27 @@ function timestamp(row: Row, user = false): { metadata?: { createdAt?: string; o
   return { metadata: { ...(Number.isFinite(time) ? { createdAt: new Date(time).toISOString() } : {}), ...(otid ? { otid } : {}) } };
 }
 
+/** Data part that marks a turn the agent listened to without replying (see {@link projectHistory}'s `listening`). */
+export const LISTENED_PART = 'data-listened';
+/** Options of {@link projectHistory}. */
+export interface ProjectionOptions {
+  /**
+   * The conversation is shared and the agent may listen without replying
+   * (it has the `stay_silent` tool). A turn it listened to ends with an
+   * assistant message holding a `data-listened` part (`{ reason? }`, its
+   * private note); the model's reasoning, when the backend recorded it,
+   * becomes `reasoning` parts. Without it, reasoning is omitted as before.
+   */
+  listening?: boolean;
+}
+
 /** Display projection only. Never reconstruct the model's context from this.
  * Completed allowlisted app tools become inert output cards; everything else is
- * omitted, including pending approvals, reasoning, system, memory and events.
- * User images become `file` parts with a `data:` URL (newest first, within
- * `imageBudget` bytes); the rest become an `[Image]` text placeholder.
+ * omitted, including pending approvals, reasoning (unless `listening`), system,
+ * memory and events. User images become `file` parts with a `data:` URL (newest
+ * first, within `imageBudget` bytes); the rest become an `[Image]` text placeholder.
  */
-export function projectHistory(messages: ListMessagesResult['messages'], appTools: readonly string[], imageBudget = HISTORY_IMAGE_BUDGET): UIMessage[] {
+export function projectHistory(messages: ListMessagesResult['messages'], appTools: readonly string[], imageBudget = HISTORY_IMAGE_BUDGET, options: ProjectionOptions = {}): UIMessage[] {
   const returns = new Map<string, Row>();
   for (const message of messages) {
     const row = message as unknown as Row;
@@ -136,17 +151,38 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
   }
   const shownCalls = new Set<string>();
   const projected: UIMessage[] = [];
+  // The listened marker of the current turn: removed if the agent replied after all.
+  let listened: UIMessage | undefined;
+  // The agent wrote a reply in the current turn: then it is a reply, even if it also called stay_silent (as live).
+  let replied = false;
   for (const message of messages) {
     const row = message as unknown as Row;
     if (row.message_type === 'user_message' || row.message_type === 'assistant_message') {
       const role = row.message_type === 'user_message' ? 'user' : 'assistant';
       const text = textContent(row.content, role === 'user');
       const attached = role === 'user' ? images.get(message.id) ?? [] : [];
+      if (role === 'user' && (text || attached.length)) { listened = undefined; replied = false; }
+      if (role === 'assistant' && text) { replied = true; if (listened) { projected.splice(projected.indexOf(listened), 1); listened = undefined; } }
       if (text || attached.length) projected.push({ id: `history-${message.id}`, role, parts: [...(text ? [{ type: 'text' as const, text }] : []), ...attached], ...timestamp(row, role === 'user') });
+    } else if (options.listening && row.message_type === 'reasoning_message') {
+      const text = typeof row.reasoning === 'string' ? sanitizeText(row.reasoning).trim() : '';
+      if (text) projected.push({ id: `history-${message.id}`, role: 'assistant', parts: [{ type: 'reasoning', text }], ...timestamp(row) });
     } else if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
       const call = record(row.tool_call);
       const id = call?.tool_call_id;
       const name = call?.name;
+      if (options.listening && call && name === STAY_SILENT_TOOL && typeof id === 'string' && !shownCalls.has(id)) {
+        // Only a call the app accepted (it refuses when the turn needs a reply) means the agent listened.
+        const output = returns.get(id);
+        if (output?.status !== 'success' || replied) continue;
+        shownCalls.add(id);
+        let reason: string | undefined;
+        try { const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : call.arguments; if (typeof args?.reason === 'string') reason = sanitizeText(args.reason).trim().slice(0, 500) || undefined; } catch { /* no note */ }
+        if (listened) projected.splice(projected.indexOf(listened), 1);
+        listened = { id: `history-${message.id}`, role: 'assistant', parts: [{ type: LISTENED_PART, data: reason ? { reason } : {} }], ...timestamp(row) };
+        projected.push(listened);
+        continue;
+      }
       if (!call || typeof id !== 'string' || typeof name !== 'string' || !appTools.includes(name) || shownCalls.has(id)) continue;
       const output = returns.get(id);
       if (!output || !['success', 'error'].includes(String(output.status))) continue;
@@ -172,15 +208,21 @@ export function assertHistorySettled(messages: ListMessagesResult['messages']) {
   // Conservative: do not resume an abandoned prompt or half-completed tool chain.
   let pendingUser = false;
   const calls = new Set<string>();
+  const silent = new Set<string>();
   for (const message of messages) {
     const row = message as unknown as Row;
     if (row.message_type === 'user_message' && (textContent(row.content, true) || imageItems(row.content).length)) pendingUser = true;
     if (row.message_type === 'assistant_message' && textContent(row.content)) pendingUser = false;
     if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
-      const id = record(row.tool_call)?.tool_call_id;
-      if (typeof id === 'string') calls.add(id);
+      const call = record(row.tool_call);
+      const id = call?.tool_call_id;
+      if (typeof id === 'string') { calls.add(id); if (call?.name === STAY_SILENT_TOOL) silent.add(id); }
     }
-    if (row.message_type === 'tool_return_message' && typeof row.tool_call_id === 'string') calls.delete(row.tool_call_id);
+    if (row.message_type === 'tool_return_message' && typeof row.tool_call_id === 'string') {
+      calls.delete(row.tool_call_id);
+      // A turn the agent listened to (stay_silent accepted) is answered without text.
+      if (silent.has(row.tool_call_id) && row.status === 'success') pendingUser = false;
+    }
   }
   if (pendingUser || calls.size) throw new Error('Conversation history has an unfinished or uncertain turn. Inspect backend; no implicit retry or repair. Select another conversation to continue.');
 }
