@@ -9,10 +9,17 @@ import { useToast } from './toasts.js';
 /* People                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Initials of a name (first letters of the first two words), for avatars without a picture. */
-export function initials(name: string): string {
-  const words = name.trim().split(/[\s._@-]+/u).filter(Boolean);
-  return ((words[0]?.[0] ?? '?') + (words.length > 1 ? words[1]![0]! : '')).toUpperCase();
+/**
+ * Initials for an avatar without a picture: the first letter (or digit) of
+ * the first two words of the name, skipping punctuation, brackets, symbols and
+ * emoji ("Mia (simulated)" → "MS", "Ångström" → "Å"). Falls back to the
+ * login's first letter, then "?".
+ */
+export function initials(name: string, login = ''): string {
+  const firsts = (text: string) => text.split(/[\s._@-]+/u).map(word => word.match(/[\p{L}\p{N}]/u)?.[0]).filter((c): c is string => !!c);
+  const fromName = firsts(name.normalize('NFC'));
+  const letters = fromName.length ? fromName : firsts(login.split('@')[0] ?? '').slice(0, 1);
+  return letters.length ? letters.slice(0, 2).join('').toLocaleUpperCase() : '?';
 }
 /** A stable hue per person, so initials avatars are told apart. */
 export function hue(seed: string): number { let h = 0; for (const c of seed) h = (h * 31 + c.codePointAt(0)!) % 360; return h; }
@@ -22,7 +29,7 @@ export function Avatar({ person, size = 24 }: { person: Pick<Person, 'name' | 'l
   const [failed, setFailed] = useState(false);
   const style = { width: size, height: size, fontSize: Math.round(size * 0.42), '--avatar-hue': hue(person.login) } as React.CSSProperties;
   if (person.avatar && !failed) return <img className="avatar" style={style} src={person.avatar} alt="" referrerPolicy="no-referrer" loading="lazy" onError={() => setFailed(true)}/>;
-  return <span className="avatar initials" style={style} aria-hidden="true">{initials(person.name || person.login)}</span>;
+  return <span className="avatar initials" style={style} aria-hidden="true">{initials(person.name, person.login)}</span>;
 }
 
 /** The person signed in (via Tailscale), at the foot of the sidebar. */
@@ -159,22 +166,41 @@ export function MembersDialog({ agent, onClose }: { agent: AgentInfo; onClose():
 /* Queue                                                               */
 /* ------------------------------------------------------------------ */
 
-export type QueuedTurn = { id: string; input: string; author?: Person & { id: string }; images?: number; files?: number; queuedAt?: string };
+export type QueuedTurn = { id: string; input: string; author?: Person & { id: string }; images?: number; files?: number; queuedAt?: string; sending?: boolean };
 
 /** Turns waiting behind the running one, oldest first. Their authors (and admins) can withdraw them before they are sent. */
-export function QueueList({ queue, me, canWithdraw, onWithdraw }: { queue: readonly QueuedTurn[]; me?: string; canWithdraw(turn: QueuedTurn): boolean; onWithdraw(turn: QueuedTurn): void }) {
+export function QueueList({ queue, me, canWithdraw, onWithdraw, together = false }: { queue: readonly QueuedTurn[]; me?: string; canWithdraw(turn: QueuedTurn): boolean; onWithdraw(turn: QueuedTurn): void; together?: boolean }) {
   if (!queue.length) return null;
   return <section className="queue" aria-label={`${queue.length} message${queue.length === 1 ? '' : 's'} waiting`}>
-    <header className="queue-head"><Clock size={14} aria-hidden="true"/><span>{queue.length === 1 ? '1 message waiting' : `${queue.length} messages waiting`} · sent in order when the reply finishes</span></header>
+    <header className="queue-head"><Clock size={14} aria-hidden="true"/><span>{queue.length === 1 ? '1 message waiting' : `${queue.length} messages waiting`} · {together ? 'sent together when the reply finishes' : 'sent in order when the reply finishes'}</span></header>
     <ol className="queue-list">
-      {queue.map(turn => <li key={turn.id} className="queue-item">
+      {queue.map(turn => <li key={turn.id} className="queue-item" data-sending={turn.sending || undefined}>
         {turn.author ? <Avatar person={turn.author} size={20}/> : <span className="avatar initials" aria-hidden="true">?</span>}
         <span className="queue-author">{turn.author && turn.author.id === me ? 'You' : turn.author?.name ?? 'Someone'}</span>
         <span className="queue-text">{turn.input.trim() || (turn.images ? 'Image' : turn.files ? 'File' : '')}{(turn.images || turn.files) && turn.input.trim() ? ` · ${[turn.images && `${turn.images} image${turn.images === 1 ? '' : 's'}`, turn.files && `${turn.files} file${turn.files === 1 ? '' : 's'}`].filter(Boolean).join(', ')}` : ''}</span>
-        {canWithdraw(turn) && <button type="button" className="icon-btn small" aria-label={`Withdraw: ${turn.input.slice(0, 60)}`} title="Withdraw (not sent yet)" onClick={() => onWithdraw(turn)}><X size={14}/></button>}
+        {turn.sending ? <span className="queue-sending">Sending…</span> : canWithdraw(turn) && <button type="button" className="icon-btn small" aria-label={`Withdraw: ${turn.input.slice(0, 60)}`} title="Withdraw (not sent yet)" onClick={() => onWithdraw(turn)}><X size={14}/></button>}
       </li>)}
     </ol>
   </section>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Typing                                                              */
+/* ------------------------------------------------------------------ */
+
+/** "Mia is typing…", "Mia and Otto are typing…", "Mia, Otto and 2 others are typing…". */
+export function typingText(names: readonly string[]): string {
+  if (!names.length) return '';
+  if (names.length === 1) return `${names[0]} is typing…`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing…`;
+  if (names.length === 3) return `${names[0]}, ${names[1]} and ${names[2]} are typing…`;
+  return `${names[0]}, ${names[1]} and ${names.length - 2} others are typing…`;
+}
+
+/** Other members typing in this conversation, above the composer. Your own typing is never shown. */
+export function TypingLine({ people, me }: { people: readonly { id: string; name: string }[]; me?: string }) {
+  const names = people.filter(person => person.id !== me).map(person => person.name);
+  return <div className="typing" role="status" aria-live="polite">{names.length > 0 && <span className="typing-chip"><span className="typing-dots" aria-hidden="true"><span/><span/><span/></span><span>{typingText(names)}</span></span>}</div>;
 }
 
 /* ------------------------------------------------------------------ */

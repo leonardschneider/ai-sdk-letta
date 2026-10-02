@@ -180,6 +180,15 @@ a.menu-item { text-decoration: none; }
 .latex-btn[data-active] { color: var(--text-2); }
 .latex-btn[data-override] { color: var(--accent); }
 .latex-btn + .resources-btn { margin-left: 0; }
+/* Team conversations: when the agent replies. Sits before the LaTeX button. */
+.reply-mode-btn { margin-left: auto; color: var(--text-3); }
+.reply-mode-btn[data-override] { color: var(--accent); }
+.reply-mode-btn + .latex-btn { margin-left: 0; }
+.reply-mode-menu { max-width: min(340px, calc(100vw - 16px)); }
+.menu-item-two-line { align-items: flex-start; }
+.menu-item-two-line .menu-check { margin-top: 3px; }
+.menu-text { display: flex; flex-direction: column; min-width: 0; }
+.menu-hint { font-size: 12.5px; color: var(--text-3); line-height: 1.35; }
 @keyframes pop { from { opacity: 0; transform: translateY(-3px) scale(.98); } }
 
 /* ---------- Top bar ---------- */
@@ -270,6 +279,18 @@ button.line-summary:hover { color: var(--text); background: var(--hover); }
 @media (prefers-reduced-motion: reduce) { .shimmer, .spin, .thinking .dot { animation: none; } .shimmer { color: var(--text-2); background: none; } }
 .line-detail { margin: 4px 0 8px 9px; padding: 2px 0 2px 16px; border-left: 2px solid var(--border); }
 .group-body > .line { margin: 2px 0; }
+/* A turn the agent listened to: one quiet line, no bubble. */
+.msg.listened { margin: -10px 0 14px; }
+.listened-line { margin: 0; font-size: 13px; }
+.listened-line > .line-summary { padding: 1px 6px 1px 2px; color: var(--text-3); }
+.listened-line > .line-summary:hover { color: var(--text-2); }
+.listened-line .line-icon { opacity: .85; }
+.listened-line .line-meta { font-size: 12px; }
+.listened-detail { display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--text-2); }
+.listened-detail p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.listened-note, .listened-thoughts { display: flex; flex-direction: column; gap: 2px; }
+.listened-label { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); }
+.listened-thoughts p { font-style: italic; }
 .tool-detail { font-size: 13.5px; color: var(--text-2); }
 .tool-detail p { margin: 4px 0 8px; }
 .question-text { color: var(--text); font-weight: 550; }
@@ -526,6 +547,23 @@ body[data-resizing] iframe { pointer-events: none; }
 .queue-author { font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
 .queue-item .icon-btn { color: var(--text-3); }
+.queue-item[data-sending] .queue-text { color: var(--text-3); }
+.queue-sending { font-size: 12px; color: var(--text-3); flex-shrink: 0; }
+/* Who else is typing in this conversation: a quiet line above the composer. */
+/* Space is reserved (the composer never jumps); the text sits on the page colour, so replies scrolling under the footer never show through it. */
+.typing { display: flex; align-items: center; min-height: 20px; margin: -6px 0 -4px; padding-left: 8px; font-size: 12.5px; color: var(--text-3); pointer-events: none; }
+/* While someone types, the whole row is opaque: a message scrolled under the footer never shows through or beside the line. */
+.typing:not(:empty) { background: var(--bg); box-shadow: 0 -6px 8px var(--bg); }
+.typing-chip { display: inline-flex; align-items: center; gap: 7px; padding: 1px 8px 1px 6px; }
+.typing-dots { display: inline-flex; gap: 3px; }
+.typing-dots span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: blink 1.2s infinite ease-in-out both; }
+.typing-dots span:nth-child(2) { animation-delay: .15s; }
+.typing-dots span:nth-child(3) { animation-delay: .3s; }
+@media (prefers-reduced-motion: reduce) { .typing-dots span { animation: none; } }
+/* @ mentions: suggestions above the composer. */
+.mentions { position: absolute; left: 12px; bottom: calc(100% + 6px); min-width: 220px; max-width: calc(100% - 24px); z-index: 20; }
+.mentions .menu-item[aria-selected="true"] { background: var(--hover); }
+.mention-handle { color: var(--text-3); font-size: 13px; margin-left: auto; padding-left: 12px; }
 /* Someone else's approval or question: shown, not answerable. */
 .waiting-card .card-head { color: var(--text-2) !important; }
 .waiting-card .card-details { margin-bottom: 0; }

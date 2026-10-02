@@ -670,6 +670,33 @@ first). Only the person who sent a message, or an admin, can answer its
 approvals and questions or stop its reply; everyone else sees who it is
 waiting for. The agent switcher lists only the agents you belong to.
 
+**Group conversations.** When several people share an agent, it does not
+have to answer every message:
+
+- **Reply modes.** *Always*, *When mentioned or asked*, or *Agent decides*.
+  The agent's `replyMode` sets the default (`'auto'`: *always* when the agent
+  has one member, *agent decides* when it has several, from the first message
+  of every conversation); each conversation can override it
+  from the ear button in its header. Typing `@` in the message box suggests
+  the agent's name, and a mention always gets a reply.
+- **Listening.** The agent still reads every message (it may use tools and
+  update its memory) but may stay silent. It does so by calling the
+  application's `stay_silent` tool, which only succeeds when the turn allows
+  silence. The app then shows a quiet **Listened** line instead of a reply
+  (no bubble, no new-message badge). Click it to see the agent's private
+  note, any thoughts the model shared, and the tools it used. "Show
+  'Listened' lines" in the same menu hides these lines in your browser.
+- **Messages that waited are sent together.** When several messages are
+  queued behind a running reply, they reach the agent as one turn
+  ("[Mia] … / [Otto] …"), so it answers them together. Each message keeps its
+  own bubble and author, and can be withdrawn until it is sent. For an agent
+  with one member, and for messages with images or files, each message is
+  still its own turn.
+- **Typing.** "Mia is typing…" appears above the message box when someone
+  else is typing in the same conversation. Only the fact that they are
+  typing is shared, never the text, and it disappears about 5 seconds after
+  their last keystroke or when they send. The agent never sees it.
+
 **How identity works.** `tailscale serve` proxies each request to the app on
 127.0.0.1 and adds `Tailscale-User-Login`, `Tailscale-User-Name` and
 `Tailscale-User-Profile-Pic`, after removing any such headers the browser
@@ -824,6 +851,14 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   the next request (open pages learn of it then). Queued messages live in
   memory until sent: a restart withdraws them (marked "not sent"), never
   replays them.
+- **Listening.** Whether the agent replies is the model's judgement, guided
+  by the reply mode in a short per-turn note; it can misjudge (for example,
+  reply to a remark or stay silent on a vague question), and mentions are
+  matched by name only. With `openai-codex/gpt-5.5` on the local backend,
+  Letta streams no reasoning text, so a Listened line shows the agent's own
+  note (the `reason` it gives `stay_silent`) and its tool calls; "thoughts"
+  appear only for models whose reasoning Letta returns. Typing presence and
+  reply-mode choices are per server process (typing is never stored).
 - **Text, images and files.** Up to 8,000 characters, 4 images (PNG, JPEG,
   GIF, WebP; 5 MB each, 10 MB total) and, with the file tools, 8 files
   (PDF or text, 25 MB each) per turn. No Office documents, no OCR (scanned
@@ -843,7 +878,10 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   after a browser refresh shows `[Image]` until it completes.
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
-  limit; the HTTP runtime closes prompts earlier (four minutes by default).
+  limit; the HTTP runtime closes prompts earlier (four minutes by default,
+  not counted against the three minutes of inference per turn). The Letta
+  SDK's own per-turn timeout is set to ten minutes (`TURN_TIMEOUT_MS`) so it
+  never ends a turn that is waiting for a person.
 - **The sandbox is experimental.** It relies on the AI SDK's
   `Experimental_SandboxSession` and on two young provider packages, all
   marked experimental and pinned exactly (`@lgrammel/apple-container-sandbox`

@@ -69,7 +69,9 @@ export async function uploadResource(folder: string, file: File): Promise<{ path
 /** A person as the team server shows them. */
 export type Person = { id?: string; login: string; name: string; avatar?: string };
 /** An agent as the browser knows it (team servers add the viewer's role). */
-export type AgentInfo = { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member' };
+export type AgentInfo = { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
+  /** Team servers: when the agent replies unless a conversation overrides it. */
+  replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */
 export type Session =
   | { mode?: undefined; csrf: string; agent: AgentInfo; versions?: import('./versions.js').Versions }

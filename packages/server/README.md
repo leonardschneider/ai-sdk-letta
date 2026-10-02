@@ -24,6 +24,23 @@ npm install @ai-sdk-letta/server ai-sdk-letta ai
   only for changes); answering or stopping a turn needs its author or an
   admin (`not_your_turn`, 403). `GET /v1/changes?since=N` long-polls for
   changes made by others. `ThreadRuntime` takes `{ queue, parallel }` for this.
+- Group conversations (team servers; `ThreadRuntime` option `replyMode`, the
+  agent's setting, `agentName`, and `members`, how many people share the
+  agent): each turn is sent with the reply mode in effect (`'always'`,
+  `'when-addressed'`, `'agent-decides'`; the agent's `'auto'` is always with
+  one member, agent decides with several) and whether it
+  mentions the agent. The agent may listen without replying (the
+  `stay_silent` tool): the run then has a `listened` event (`{ reason? }`)
+  and `reasoning` events when the model shares them, and no text. Threads are
+  listed with `replyMode` (the override, `'inherit'` by default),
+  `replyModeInEffect`, `members` and `typing` (`[{ id, name }]`), and
+  `PATCH /v1/threads/:id` accepts `replyMode`. Queued text messages of an
+  agent with several members are sent together as one turn (the first
+  run has `batch`, the others `batchOf`; each keeps its author in history);
+  a queued message being sent can no longer be withdrawn (`already_sent`).
+  `POST /v1/threads/:id/typing` takes exactly `{ typing: boolean }` (a
+  heartbeat while typing; it expires after 5 s and on send); it is kept in
+  memory only and never reaches the agent.
 
 Routes (under `/api` for the GUI): `GET /v1/capabilities`, `GET|POST /v1/threads`,
 `PATCH /v1/threads/:id`, `GET /v1/threads/:id/history`, `GET /v1/threads/:id/view`,

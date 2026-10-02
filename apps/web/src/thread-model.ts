@@ -4,7 +4,9 @@ import { nodesText, parseTitle, titleText } from 'ai-sdk-letta/title';
 /** A thread as listed by the server. `latex` is absent from older servers (treated as `'inherit'`). */
 export type ThreadSummary = { id: string; title: string; state: string; archived?: boolean; createdAt?: string; lastActivityAt?: string; latex?: 'inherit' | 'on' | 'off';
   /** Team servers: who started it, the run in progress, and how many messages wait. */
-  createdBy?: { id: string; login: string; name: string; avatar?: string }; running?: string; queued?: number };
+  createdBy?: { id: string; login: string; name: string; avatar?: string }; running?: string; queued?: number;
+  /** Team servers: the conversation's reply mode override, the mode in effect now, how many people share the agent, and who is typing. */
+  replyMode?: import('ai-sdk-letta/listening').ReplyModeOverride; replyModeInEffect?: import('ai-sdk-letta/listening').ReplyMode; members?: number; typing?: { id: string; name: string }[] };
 export const DEFAULT_TITLE = 'New conversation';
 export const TITLE_LIMIT = 120;
 const hidden = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;

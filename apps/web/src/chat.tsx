@@ -1,13 +1,13 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
-import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
+import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { COMMAND_TOOLS, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
-import type { MessageAuthor as Author } from './messages.js';
+import type { Listened, MessageAuthor as Author } from './messages.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -51,6 +51,8 @@ export function Message() {
   const role = useAuiState(s => s.message.role);
   const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
   const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text.trim()));
+  const listened = useAuiState(s => (s.message.metadata.custom as { listened?: Listened } | undefined)?.listened);
+  if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} time={time}/></MessagePrimitive.Root>;
   return <MessagePrimitive.Root className="msg" data-role={role}>
     <MessageAuthor role={role}/>
     <div className="msg-body">
@@ -104,6 +106,30 @@ function AssistantParts() {
       }
     }}
   </MessagePrimitive.GroupedParts>;
+}
+
+/**
+ * A turn the agent listened to without replying: one quiet line ("Listened"),
+ * collapsed. Expanded, it shows what the agent noted or thought and the tools
+ * it used (each collapsed as usual). No bubble, no copy button.
+ */
+function ListenedLine({ listened, time }: { listened: Listened; time?: string }) {
+  const reasoning = useAuiState(s => s.message.parts.filter(p => p.type === 'reasoning').map(p => p.type === 'reasoning' ? p.text : '').join('\n\n').trim());
+  const tools = useAuiState(s => s.message.parts.filter(p => p.type === 'tool-call').length);
+  const label = `Listened${time ? ` · ${formatTime(time)}` : ''}`;
+  return <Disclosure className="listened-line" tone="listened" label={`${label}. Show what the agent noted`}
+    summary={<><Ear size={14} className="line-icon" aria-hidden="true"/><span className="line-label">Listened</span>
+      {tools > 0 && <span className="line-meta">{tools === 1 ? 'used 1 tool' : `used ${tools} tools`}</span>}
+      {time && <time className="line-meta" dateTime={time} title={fullFormat.format(new Date(time))}>{formatTime(time)}</time>}</>}>
+    <div className="listened-detail">
+      {listened.reason && <p className="listened-note"><span className="listened-label">Note</span>{listened.reason}</p>}
+      {reasoning && <div className="listened-thoughts"><span className="listened-label">Thoughts</span><p>{reasoning}</p></div>}
+      {!listened.reason && !reasoning && <p className="muted">The agent read this and chose not to reply. It recorded no thoughts.</p>}
+      {tools > 0 && <MessagePrimitive.GroupedParts groupBy={groupTools}>
+        {({ part, children }) => part.type === 'group-tools' ? part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</> : part.type === 'tool-call' ? <ToolPart {...part}/> : <></>}
+      </MessagePrimitive.GroupedParts>}
+    </div>
+  </Disclosure>;
 }
 
 /** Shown until the first streamed content, and while the agent works between steps. */

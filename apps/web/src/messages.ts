@@ -45,6 +45,32 @@ export function withAuthor(message: ThreadMessageLike, author: MessageAuthor | u
   return author ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, author } } } : message;
 }
 
+/** A turn the agent listened to without replying: its private note (the agent's own words), if any. */
+export type Listened = { reason?: string };
+/** Data part of a projected history message that marks a listened turn (`LISTENED_PART` in ai-sdk-letta). */
+const LISTENED = 'data-listened';
+const isListenedMarker = (part: Part) => (part.type as string) === LISTENED;
+/** The listened marker of an assistant message, if the agent listened in that turn. */
+export function listenedOf(message: Pick<ThreadMessageLike, 'metadata'>): Listened | undefined {
+  return (message.metadata?.custom as { listened?: Listened } | undefined)?.listened;
+}
+/**
+ * Assistant messages after merging: a message with the listened marker
+ * becomes a listened turn (metadata `listened`, its reasoning and tool calls
+ * kept for the expandable line). Elsewhere reasoning is never shown, so it is
+ * dropped from replies.
+ */
+export function markListened(message: ThreadMessageLike): ThreadMessageLike {
+  if (message.role !== 'assistant' || typeof message.content === 'string') return message;
+  const marker = message.content.find(isListenedMarker) as { data?: { reason?: unknown } } | undefined;
+  if (!marker) {
+    const content = message.content.filter(part => part.type !== 'reasoning');
+    return content.length === message.content.length ? message : { ...message, content };
+  }
+  const reason = typeof marker.data?.reason === 'string' && marker.data.reason.trim() ? marker.data.reason.trim() : undefined;
+  return { ...message, content: message.content.filter(part => !isListenedMarker(part)), metadata: { ...message.metadata, custom: { ...message.metadata?.custom, listened: reason ? { reason } : {} } } };
+}
+
 /** A user bubble's content: images first (as the composer shows them), then file chips, then the text. */
 export function userContent(text: string, images: readonly string[] = [], files: readonly FileChip[] = []): Part[] {
   return [...images.map((image): Part => image.startsWith('data:image/') ? { type: 'image', image } : { type: 'text', text: IMAGE_PLACEHOLDER }), ...fileParts(files), ...(text.trim() ? [{ type: 'text' as const, text }] : [])];
@@ -60,6 +86,8 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     if (id && result) { try { completions.set(id, JSON.parse(result)); } catch { /* Unstructured notifications stay hidden. */ } }
   }
   const converted = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && !message.parts.some(p => p.type === 'text' && /^\s*<(task-notification|system-reminder)>/.test(p.text))).map(message => withAuthor(withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
+    if (part.type === 'reasoning' && message.role === 'assistant') return part.text.trim() ? [{ type: 'reasoning', text: part.text }] : [];
+    if ((part.type as string) === LISTENED && message.role === 'assistant') return [{ type: LISTENED, data: (part as { data?: unknown }).data ?? {} } as unknown as Part];
     if (part.type === 'text') {
       if (message.role !== 'user') return [{ type: 'text', text: part.text }];
       // The attachment note becomes file chips; the rest stays text.
@@ -76,7 +104,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     }
     return [];
   })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined));
-  return mergeAssistantRuns(converted);
+  return mergeAssistantRuns(converted).map(markListened);
 }
 
 /** Images (and image placeholders), then file chips, then text in user bubbles; assistant parts keep their order. */
@@ -103,6 +131,14 @@ export function mergeAssistantRuns(messages: ThreadMessageLike[]): ThreadMessage
   return merged.filter(message => message.role !== 'assistant' || typeof message.content === 'string' || message.content.length);
 }
 
+/**
+ * Hide the turns the agent listened to (the "hide listened" setting). The
+ * messages it listened to stay; only the quiet "Listened" lines go.
+ */
+export function withoutListened(messages: readonly ThreadMessageLike[]): ThreadMessageLike[] {
+  return messages.filter(message => !listenedOf(message));
+}
+
 /** Display reducer only. Tool calls/results never dispatch any executable callback. */
 export function observedParts(events: RuntimeEvent[]): Part[] {
   const parts: Part[] = [];
@@ -112,7 +148,13 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
       const last = parts.at(-1);
       if (last?.type === 'text') parts[parts.length - 1] = { type: 'text', text: last.text + String(d.text) };
       else parts.push({ type: 'text', text: String(d.text) });
-    } else if (event.type === 'tool_started') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
+    } else if (event.type === 'reasoning') {
+      // Kept for a listened turn's expandable line; never shown in a reply (see markListened).
+      const last = parts.at(-1);
+      if (last?.type === 'reasoning') parts[parts.length - 1] = { type: 'reasoning', text: last.text + String(d.text) };
+      else parts.push({ type: 'reasoning', text: String(d.text) });
+    } else if (event.type === 'listened') parts.push({ type: LISTENED, data: typeof d.reason === 'string' ? { reason: d.reason } : {} } as unknown as Part);
+    else if (event.type === 'tool_started') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'tool-call' && p.toolCallId === d.toolCallId);
       const part = parts[index];

@@ -72,6 +72,12 @@ export interface ToolBridgeOptions {
    * it never comes from the model.
    */
   context?: () => Readonly<Record<string, unknown>> | undefined;
+  /**
+   * Tools whose calls do not count towards the per-session limit of 100 calls
+   * (each call ID still runs at most once). The runtime uses it for
+   * `stay_silent`, which a long-lived shared conversation calls on many turns.
+   */
+  uncounted?: readonly string[];
 }
 
 /** One item of a tool result as sent to Letta (the Agent SDK's `AgentToolResultContent`): text, or a base64 image. */
@@ -125,6 +131,7 @@ export function createToolBridge(options: ToolBridgeOptions) {
   const allowed = new Set(Object.keys(definitions).filter(n => (!restrict || restrict.has(n)) && Object.hasOwn(permissions, n) && (permissions[n] === 'allow' || permissions[n] === 'ask') && (n === ASK_USER_TOOL || typeof definitions[n]?.execute === 'function')));
   const sessionId = randomUUID();
   const seen = new Set<string>();
+  const uncountedSeen = new Set<string>();
   const validators = new Map<string, ReturnType<Ajv['compile']>>();
   const ajv = new Ajv({ strict: false, allErrors: false });
   const validateArguments = async (name: string, args: unknown) => {
@@ -144,8 +151,9 @@ export function createToolBridge(options: ToolBridgeOptions) {
   const denied = (name: string, id: string, code: string): ToolOutput => { emit(name, id, 'denied', Date.now(), code); return { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true }; };
   const execute = async (name: string, id: string, args: unknown, sdkSignal?: AbortSignal): Promise<ToolOutput> => {
     if (!allowed.has(name)) return denied(name, id, 'tool_denied');
-    if (seen.has(id) || seen.size >= 100) return denied(name, id, 'duplicate_or_limit');
-    seen.add(id);
+    const counted = !options.uncounted?.includes(name);
+    if (seen.has(id) || uncountedSeen.has(id) || (counted && seen.size >= 100) || uncountedSeen.size >= 100_000) return denied(name, id, 'duplicate_or_limit');
+    (counted ? seen : uncountedSeen).add(id);
     const definition = definitions[name]!;
     // Snapshot before any await; caller mutation cannot change an approved call.
     try { args = structuredClone(args); } catch { return denied(name, id, 'invalid_arguments'); }

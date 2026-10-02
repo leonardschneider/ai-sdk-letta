@@ -93,6 +93,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   const upload = express.raw({ limit: UPLOAD_BODY_LIMIT_BYTES, type: 'application/octet-stream' });
   app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && (req.path === '/v1/uploads' || req.path === '/v1/resources/upload') ? upload : small)(req, res, next));
   app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: runtime.parallel ? Runtime.MAX_PARALLEL_TURNS : 1, queue: runtime.queueing, edits: false,
+    ...(runtime.replyMode !== undefined ? { replyModes: { agent: runtime.replyMode, batching: true } } : {}),
     images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes },
     files: runtime.uploads ? { types: ['text', 'pdf', 'image'], textExtensions: [...TEXT_EXTENSIONS], maxFileBytes: FILE_LIMITS.maxFileBytes, maxFilesPerMessage: FILE_LIMITS.maxFilesPerMessage, maxConversationFiles: FILE_LIMITS.maxConversationFiles, maxConversationBytes: FILE_LIMITS.maxConversationBytes } : null }));
   /**
@@ -156,7 +157,9 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title, author(req))));
-  // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off' }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
+  /** Shared runtimes: you are typing in this conversation (`{ typing: true }`, a heartbeat) or stopped (`{ typing: false }`). Nothing else is accepted, never text. */
+  app.post('/v1/threads/:id/typing', (req, res) => res.json(runtime.typing(owner, req.params.id, author(req), req.body)));
+  // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off', replyMode: 'inherit' | 'always' | 'when-addressed' | 'agent-decides' (shared runtimes) }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
   app.patch('/v1/threads/:id', async (req, res) => { const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary); });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
@@ -208,6 +211,8 @@ export interface GuiAgentInfo {
   files?: boolean;
   /** The definition's `ui` settings: whether replies render LaTeX unless a conversation overrides it. @default { latex: true } */
   ui?: { latex: boolean };
+  /** Team servers: the agent's reply mode setting (see `AgentDefinition.replyMode`). */
+  replyMode?: string;
 }
 
 /**
@@ -326,7 +331,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true } }; };
+  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}) }; };
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
   app.get('/api/session', (req, res) => {
     const { identity, user } = who(req)!;
@@ -348,9 +353,11 @@ export function teamApp(options: TeamAppOptions) {
   const isAdmin = (req: express.Request) => (req as unknown as { role?: string }).role === 'admin';
   const json = express.json({ limit: BODY_LIMIT_BYTES });
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
-  app.post('/api/agents/:agent/members', member, json, (req, res) => res.status(201).json(directory.addMember(String(req.params.agent), actor(req), req.body)));
+  // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
+  const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();
+  app.post('/api/agents/:agent/members', member, json, (req, res) => { const added = directory.addMember(String(req.params.agent), actor(req), req.body); membersChanged(String(req.params.agent)); res.status(201).json(added); });
   app.patch('/api/agents/:agent/members/:user', member, json, (req, res) => res.json(directory.setRole(String(req.params.agent), actor(req), String(req.params.user), req.body)));
-  app.delete('/api/agents/:agent/members/:user', member, (req, res) => { directory.removeMember(String(req.params.agent), actor(req), String(req.params.user)); res.json({ removed: true }); });
+  app.delete('/api/agents/:agent/members/:user', member, (req, res) => { directory.removeMember(String(req.params.agent), actor(req), String(req.params.user)); membersChanged(String(req.params.agent)); res.json({ removed: true }); });
   const routers = new Map([...agents].map(([id, agent]) => [id, runtimeRoutes(express(), agent.runtime, 'team', undefined, {
     author: req => authorOf(actor(req)),
     mayAct: (req, run) => isAdmin(req) || run.author?.id === actor(req).id,
