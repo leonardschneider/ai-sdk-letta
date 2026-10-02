@@ -448,7 +448,7 @@ export class AutomationService {
       agent.store.update(state => { const s = state.schedules.find(x => x.id === record.id); if (s) { s.state = 'scheduled'; s.handle = handle; } });
     } catch (error) {
       agent.store.update(state => { const s = state.schedules.find(x => x.id === record.id); if (s) { s.state = 'failed'; s.error = (error as Error).message; } });
-      this.log(`Scheduling a task with ${scheduler.orchestrator.kind} failed: ${(error as Error).message}`);
+      this.log(`Scheduling a task with ${scheduler.orchestrator.kind} failed: ${(error as Error).message}${(error as { detail?: string }).detail ? ` (${(error as { detail?: string }).detail})` : ''}`);
       throw error instanceof Error && /^[a-z_]{1,40}$/.test(error.message) ? error : new Error('scheduler_failed');
     }
     this.changed();
@@ -498,16 +498,34 @@ export class AutomationService {
   }
   /** After a task fired: take its job out of the orchestrator, once the run ended (so its execution history keeps the outcome). */
   async retire(agent: AutomationAgent, scheduleId: string) {
-    const schedule = agent.store.read().schedules.find(s => s.id === scheduleId);
-    if (!schedule?.handle || !this.scheduler || schedule.cleanedAt) return;
-    try {
-      await this.scheduler.orchestrator.deleteJob(schedule.handle);
-      agent.store.update(state => { const s = state.schedules.find(x => x.id === scheduleId); if (s) s.cleanedAt = new Date().toISOString(); });
-    } catch (error) { this.log(`Removing a fired task from ${this.scheduler.orchestrator.kind} failed (it will not fire again): ${(error as Error).message}`); }
+    // One removal per task at a time (the end of its run and the periodic cleanup may both ask).
+    const pending = this.retiring.get(scheduleId);
+    if (pending) return pending;
+    const work = (async () => {
+      const schedule = agent.store.read().schedules.find(s => s.id === scheduleId);
+      if (!schedule?.handle || !this.scheduler || schedule.cleanedAt) return;
+      try {
+        // Deleting is idempotent (missing jobs count as removed); one retry for a busy orchestrator.
+        await this.scheduler.orchestrator.deleteJob(schedule.handle).catch(async () => { await new Promise(resolve => setTimeout(resolve, 2000)); await this.scheduler!.orchestrator.deleteJob(schedule.handle!); });
+        agent.store.update(state => { const s = state.schedules.find(x => x.id === scheduleId); if (s) s.cleanedAt = new Date().toISOString(); });
+      } catch (error) { this.log(`Removing a fired task from ${this.scheduler.orchestrator.kind} failed (it will not fire again; it is retried later): ${(error as Error).message}${(error as { detail?: string }).detail ? ` (${(error as { detail?: string }).detail})` : ''}`); }
+    })().finally(() => this.retiring.delete(scheduleId));
+    this.retiring.set(scheduleId, work);
+    return work;
   }
-  /** Remove jobs of tasks that fired a while ago (best effort, at most a few per call). */
+  private retiring = new Map<string, Promise<void>>();
+  /** When the run of a fired task ends, remove its job from the orchestrator (a little later, so its execution is recorded first). */
+  retireWhenDone(agent: AutomationAgent, scheduleId: string, runId: string) {
+    void (async () => {
+      const view = await this.waitFor(agent, this.runById(agent, runId), AUTOMATION_LIMITS.startTimeoutMs + 20 * 60_000).catch(() => undefined);
+      if (this.closed || !view || ['queued', 'running'].includes(view.status)) return;
+      await new Promise(resolve => setTimeout(resolve, 15_000).unref?.());
+      if (!this.closed) await this.retire(agent, scheduleId);
+    })();
+  }
+  /** Remove jobs of tasks that fired (and ended) earlier but are still in the orchestrator (best effort, a few per call). */
   private async cleanup(agent: AutomationAgent) {
-    const old = agent.store.read().schedules.filter(s => s.state === 'fired' && !s.cleanedAt && s.firedAt && Date.now() - Date.parse(s.firedAt) > 60 * 60_000).slice(0, 5);
+    const old = agent.store.read().schedules.filter(s => (s.state === 'fired' || s.state === 'cancelled') && s.handle && !s.cleanedAt && (s.state === 'cancelled' || (s.firedAt && Date.now() - Date.parse(s.firedAt) > 10 * 60_000))).slice(0, 5);
     for (const schedule of old) await this.retire(agent, schedule.id);
   }
   /** Cancel a task that has not fired: its job is removed from the orchestrator. */
@@ -638,10 +656,11 @@ export function automationApp(service: AutomationService): express.Express {
     const found = service.authenticateSchedule(String(req.params.id), bearer(req));
     if (!found) return unauthorized(req, res);
     let run = service.fire(found.agent, found.schedule);
-    // Wait for the outcome so the orchestrator's execution shows it (an HTTP error fails it there too).
-    const wait = Math.min(600, Math.max(0, Number(req.query.wait ?? 0) || 0));
+    // Remove the job from the orchestrator once the run ended (whether or not this request waited for it).
+    service.retireWhenDone(found.agent, found.schedule.id, run.id);
+    // Wait for the outcome so the orchestrator's execution shows it (a failed run fails it there too).
+    const wait = Math.min(AUTOMATION_LIMITS.maxWaitSeconds, Math.max(0, Number(req.query.wait ?? 0) || 0));
     if (wait) run = await service.waitFor(found.agent, service.runById(found.agent, run.id), wait * 1000, until(req, res)).catch(() => run);
-    if (!['queued', 'running'].includes(run.status)) setTimeout(() => void service.retire(found.agent, found.schedule.id), 30_000).unref?.();
     if (!res.writableEnded && !res.destroyed) res.status(run.status === 'failed' || run.status === 'cancelled' ? 422 : ['queued', 'running'].includes(run.status) ? 202 : 200).json(run);
   });
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));

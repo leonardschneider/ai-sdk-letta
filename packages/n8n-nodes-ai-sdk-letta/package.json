@@ -22,7 +22,9 @@
     "node": ">=22.19.0"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && mkdir -p dist/icons dist/nodes/AiSdkLetta && cp icons/*.svg dist/icons/ && cp nodes/AiSdkLetta/*.svg nodes/AiSdkLetta/*.json dist/nodes/AiSdkLetta/",

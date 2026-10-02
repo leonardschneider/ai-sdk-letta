@@ -548,8 +548,8 @@ export class ThreadRuntime {
   async history(owner: string, id: string) {
     const thread = this.thread(owner, id);
     const lane = this.lane(id);
-    // Several people may open the same idle conversation at once: wait briefly for another reader rather than refusing.
-    for (let i = 0; this.parallel && lane.locked && !lane.active && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 100));
+    // Several readers may open the same idle conversation at once (people, a reloaded page, an automation): wait briefly for another reader rather than refusing.
+    for (let i = 0; lane.locked && !lane.active && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 100));
     return this.exclusive(lane, async () => {
       let session: RuntimeSession;
       const current = lane.current;

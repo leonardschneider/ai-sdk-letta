@@ -17,6 +17,7 @@ rename the ID, edit the tools.
 - [7. Optional built-ins: files, shell, images, Atlassian](#7-optional-built-ins-files-shell-images-atlassian)
 - [8. Memory and dreaming](#8-memory-and-dreaming)
 - [9. Run it](#9-run-it)
+- [9a. Run it from n8n or Conductor](#9a-run-it-from-n8n-or-conductor)
 - [10. State, identity, starting fresh](#10-state-identity-starting-fresh)
 - [11. Test it](#11-test-it)
 - [12. Troubleshooting](#12-troubleshooting)
@@ -592,6 +593,116 @@ Rules for `generate` and `stream`:
   (delivery is uncertain). Close it and open the agent again.
 - Tool calls appear in results as `providerExecuted`: the AI SDK displays
   them but never runs them a second time.
+
+## 9a. Run it from n8n or Conductor
+
+Scheduling and workflows belong to an orchestrator: [n8n](https://n8n.io) or
+[Conductor OSS](https://conductor-oss.org). The server has no timers of its
+own; it serves an **automation API** that orchestrators call, on a separate
+loopback port:
+
+```ts
+// src/automations.ts
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { closeOnSignals, startGuiServer } from '@ai-sdk-letta/server';
+import { agent } from './agent.js';
+
+const assets = join(dirname(createRequire(import.meta.url).resolve('@ai-sdk-letta/web/package.json')), 'dist');
+const server = await startGuiServer(agent, assets, {
+  port: 4400,
+  // The automation API on 127.0.0.1:4402. n8n or Conductor in Docker on this machine reach it as http://host.docker.internal:4402.
+  automation: {
+    port: 4402,
+    // Optional: lets the agent schedule one-off tasks (schedule_task, below) in n8n.
+    scheduler: { kind: 'n8n', url: 'http://127.0.0.1:5678', apiKey: process.env.N8N_API_KEY ?? '', callbackUrl: 'http://host.docker.internal:4402' },
+  },
+});
+closeOnSignals(server);
+```
+
+1. **Create a token** for each workflow: in the app, **Automations → New
+   token** (agent admins; the token is shown once), or from the command line
+   with `createAutomationToken(agent, { name, via })`. A token is bound to
+   this agent and to the person it acts for (you; on a team server, the admin
+   who created it): its turns use that person's accounts, such as Atlassian.
+2. **Start turns** with `POST /v1/automation/runs` and
+   `Authorization: Bearer <token>`:
+   `{ "text": "...", "idempotencyKey": "...", "title": "Daily report" }`
+   (or `"threadId"` for a known conversation, `"newConversation": true` for a
+   fresh one). The idempotency key is required: an orchestrator that retries
+   gets the same run, never a second turn. Add `?wait=110` to wait for the
+   reply (long poll, up to 120 s), or poll `GET /v1/automation/runs/<id>?wait=`;
+   `POST /v1/automation/runs/<id>/cancel` stops it. The run has `status`,
+   `text` (the reply), `tools` (name and outcome), `files` (created or
+   changed in the resources) and `conversation`.
+3. **Unattended runs never wait for a person.** A tool that needs approval
+   ends the run with `status: "failed"` and `error.code: "approval_required"`
+   (and `error.tool`); `ask_user` with `"question_required"`. The tool never
+   runs, the agent ends its turn with a short sentence, and the conversation
+   stays usable. To let a workflow use an `'ask'` tool, pre-approve it on its
+   token; `'deny'` stays denied, and questions are never pre-approved.
+
+```ts
+// src/automation.test.ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { tool, jsonSchema } from 'ai';
+import { createToolBridge, ToolInteractions } from 'ai-sdk-letta';
+
+test('an unattended turn refuses a call that needs approval, without running it', async () => {
+  let published = 0;
+  const publish = tool({
+    inputSchema: jsonSchema<{ note: string }>({ type: 'object', properties: { note: { type: 'string' } }, required: ['note'] }),
+    execute: async () => { published++; return { ok: true }; },
+  });
+  const bridge = createToolBridge({ tools: { publish }, permissions: { publish: 'ask' }, interactions: new ToolInteractions(), unattended: () => ({ preApproved: [] }) });
+  const result = await bridge.execute('publish', 'call-1', { note: 'Shipped' });
+  assert.equal(JSON.parse(result.content[0]!.text!).error, 'approval_required');
+  assert.equal(published, 0);
+});
+```
+
+**n8n.** The community node in
+[`packages/n8n-nodes-ai-sdk-letta`](../packages/n8n-nodes-ai-sdk-letta) adds
+an *ai-sdk-letta* node (Run Turn and Wait, Start Turn, Get Run, Cancel Run)
+and an *ai-sdk-letta API* credential (server URL and token). With **On Error →
+Continue (using error output)**, a run that needed approval goes to the error
+output with `error.code`, so the workflow can branch on it; see its example
+workflow. It is not on npm yet: build it and install the packed `.tgz` in
+n8n's `~/.n8n/nodes` (its README has the steps).
+
+**Conductor OSS.** [`examples/orchestration`](../examples/orchestration) has
+two workflow definitions: `ai_sdk_letta_run_turn` uses only Conductor's own
+`HTTP` and `DO_WHILE` tasks (the token comes from the Conductor server's
+`CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN` environment variable, referenced as
+`${workflow.secrets.AI_SDK_LETTA_TOKEN}`), and `ai_sdk_letta_run_turn_worker`
+runs the `ai_sdk_letta_turn` worker (Conductor's JavaScript SDK) for long
+turns. Both fail the workflow with `approval_required: …` when the turn needed
+a person. Schedule them with Conductor's scheduler
+(`conductor/weekday-report.schedule.json`).
+
+**The agent can schedule tasks too.** Add `schedulingTools` with
+`SCHEDULING_TOOL_PERMISSIONS` (`schedule_task: 'ask'`): the agent can then run
+a prompt once, later (`"in 2 hours"`, or an ISO time with a zone), in this
+conversation or a new one. The user approves each one; the orchestrator gets
+a one-off job (n8n: a small workflow and a credential through its public API;
+Conductor: a schedule bounded to that minute) that calls the server back with
+a single-use token, and the job is removed after it ran. The run is
+unattended, with nothing pre-approved. Agent admins see and cancel scheduled
+tasks under Automations.
+
+```ts
+// src/scheduling.ts
+import { defineAgent, schedulingTools, SCHEDULING_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+export const planner = defineAgent({
+  id: 'planner', name: 'Planner', model: 'openai-codex/gpt-5.5',
+  instructions: 'When the user asks for something later, use schedule_task.',
+  tools: { ...schedulingTools },
+  permissions: { ...SCHEDULING_TOOL_PERMISSIONS },
+});
+```
 
 ## 10. State, identity, starting fresh
 

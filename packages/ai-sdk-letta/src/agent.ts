@@ -125,7 +125,7 @@ export type LettaCallOptions = {
  */
 export function unattendedNote(source?: string): string {
   const from = source ? source.replace(/[\p{Cc}\p{Cf}<>]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
-  return `<system-reminder>\nThis turn was started by an automation${from ? ` (${from})` : ''}, not by a person in the chat, and nobody is watching it live. Do the task and reply with the result; the reply is read later. Nobody can answer questions or approve actions now: do not call ask_user, and if a tool says approval is required, stop and say which action needs approval.\n</system-reminder>\n`;
+  return `<system-reminder>\nThis turn was started by an automation${from ? ` (${from})` : ''}, not by a person in the chat, and nobody is watching it live. Do the task and reply with the result; the reply is read later. Nobody can answer questions or approve actions now. If you cannot do the task without an answer, call ask_user anyway: the run then stops and reports that it needed a person. If a tool says approval is required, stop and say which action needs approval.\n</system-reminder>\n`;
 }
 /** Letta-specific result metadata of a turn (`providerMetadata.letta`). `listened`: the agent chose not to reply; `reason` is its private note. */
 export type LettaTurnMetadata = { listened?: boolean; reason?: string };

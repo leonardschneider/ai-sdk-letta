@@ -1,7 +1,7 @@
 {
   "name": "ai_sdk_letta_run_turn",
   "version": 1,
-  "description": "Run one turn of an ai-sdk-letta agent and wait for the reply, with Conductor's own HTTP tasks (no worker). The token comes from the CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN environment variable of the Conductor server.",
+  "description": "Run one turn of an ai-sdk-letta agent and wait for the reply, with Conductor's own HTTP and DO_WHILE tasks (no worker; Conductor OSS has no HTTP_POLL task). Each check is a long poll the server holds up to 110 s. The token comes from the CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN environment variable of the Conductor server.",
   "schemaVersion": 2,
   "ownerEmail": "ai-sdk-letta@example.invalid",
   "inputParameters": [
@@ -16,9 +16,9 @@
       "name": "start_turn",
       "taskReferenceName": "start",
       "type": "HTTP",
-      "description": "Start the turn. Idempotent: a retried task returns the same run. Waits up to 50 s for a quick reply.",
+      "description": "Start the turn (idempotent: a retried task returns the same run) and wait up to 110 s for a quick reply.",
       "inputParameters": {
-        "uri": "${workflow.input.serverUrl}/v1/automation/runs?wait=50",
+        "uri": "${workflow.input.serverUrl}/v1/automation/runs?wait=110",
         "method": "POST",
         "headers": {
           "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}",
@@ -31,40 +31,46 @@
         "accept": "application/json",
         "contentType": "application/json",
         "connectionTimeOut": 5000,
-        "readTimeOut": 60000
+        "readTimeOut": 125000
       },
       "retryCount": 3
     },
     {
       "name": "wait_for_turn",
       "taskReferenceName": "wait",
-      "type": "HTTP_POLL",
-      "description": "Poll the run until it ended (the server's minimum interval applies, 60 s by default).",
+      "type": "DO_WHILE",
+      "description": "Until the run ended: ask for it again, each request held by the server up to 110 s (at most 15 times).",
       "inputParameters": {
-        "http_request": {
-          "uri": "${workflow.input.serverUrl}/v1/automation/runs/${start.output.response.body.id}",
-          "method": "GET",
-          "headers": {
-            "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
-          },
-          "accept": "application/json",
-          "terminationCondition": "(function(){ var s = $.output.response.body.status; return s === 'completed' || s === 'failed' || s === 'cancelled'; })();",
-          "pollingInterval": 60,
-          "pollingStrategy": "FIXED",
-          "maxPollCount": 30,
-          "connectionTimeOut": 5000,
-          "readTimeOut": 30000
+        "keepLastN": 2,
+        "started": "${start.output.response.body.status}"
+      },
+      "loopCondition": "(function(){ var s = $.check_ref && $.check_ref.response ? $.check_ref.response.body.status : $.started; return (s === 'queued' || s === 'running') && $.wait.iteration < 15; })();",
+      "loopOver": [
+        {
+          "name": "check_turn_status",
+          "taskReferenceName": "check_ref",
+          "type": "HTTP",
+          "inputParameters": {
+            "uri": "${workflow.input.serverUrl}/v1/automation/runs/${start.output.response.body.id}?wait=110",
+            "method": "GET",
+            "headers": {
+              "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
+            },
+            "accept": "application/json",
+            "connectionTimeOut": 5000,
+            "readTimeOut": 125000
+          }
         }
-      }
+      ]
     },
     {
-      "name": "check_turn",
-      "taskReferenceName": "check",
+      "name": "check_outcome",
+      "taskReferenceName": "outcome",
       "type": "SWITCH",
       "evaluatorType": "value-param",
       "expression": "status",
       "inputParameters": {
-        "status": "${wait.output.response.body.status}"
+        "status": "${check_ref.output.response.body.status}"
       },
       "decisionCases": {
         "completed": []
@@ -76,11 +82,12 @@
           "type": "TERMINATE",
           "inputParameters": {
             "terminationStatus": "FAILED",
-            "terminationReason": "${wait.output.response.body.error.code}: ${wait.output.response.body.error.message}",
+            "terminationReason": "${check_ref.output.response.body.error.code}: ${check_ref.output.response.body.error.message}",
             "workflowOutput": {
-              "error": "${wait.output.response.body.error}",
-              "runId": "${wait.output.response.body.id}",
-              "conversation": "${wait.output.response.body.conversation}"
+              "error": "${check_ref.output.response.body.error}",
+              "runId": "${check_ref.output.response.body.id}",
+              "conversation": "${check_ref.output.response.body.conversation}",
+              "reply": "${check_ref.output.response.body.text}"
             }
           }
         }
@@ -88,11 +95,11 @@
     }
   ],
   "outputParameters": {
-    "runId": "${wait.output.response.body.id}",
-    "status": "${wait.output.response.body.status}",
-    "reply": "${wait.output.response.body.text}",
-    "conversation": "${wait.output.response.body.conversation}",
-    "tools": "${wait.output.response.body.tools}",
-    "files": "${wait.output.response.body.files}"
+    "runId": "${check_ref.output.response.body.id}",
+    "status": "${check_ref.output.response.body.status}",
+    "reply": "${check_ref.output.response.body.text}",
+    "conversation": "${check_ref.output.response.body.conversation}",
+    "tools": "${check_ref.output.response.body.tools}",
+    "files": "${check_ref.output.response.body.files}"
   }
 }

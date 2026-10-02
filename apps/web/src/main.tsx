@@ -226,7 +226,12 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     if (!follow || target.draft || operation.current || viewing.current) return;
     viewing.current = true;
     try {
-      const view = await api<View>(`/v1/threads/${target.id}/view`);
+      // A single-user server reads one conversation at a time: wait briefly if another read holds it (never an error to show).
+      let view: View | undefined;
+      for (let attempt = 0; !view; attempt++) {
+        try { view = await api<View>(`/v1/threads/${target.id}/view`); }
+        catch (e) { if (errorCode(e) !== 'runtime_busy' || attempt >= 5) throw e; await new Promise(r => setTimeout(r, 300 * (attempt + 1))); }
+      }
       if (currentRef.current.id !== target.id) return;
       setQueue(view.queue ?? []);
       if (view.live && liveRun.current === view.live.id) return;
@@ -294,7 +299,8 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   }, [connecting]);
 
   // Team mode, and automations: follow what others do (new conversations, turns, the queue) with a long poll.
-  const summaryKey = useRef('');
+  // The last seen state of every conversation: the open one is refreshed only when it changed (never for another's turn).
+  const seen = useRef(new Map<string, string>());
   useEffect(() => {
     if (!follow || connecting) return;
     const control = new AbortController();
@@ -308,14 +314,16 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           if (version === since) continue;
           const first = since === -1;
           since = version;
-          if (first) continue;
           const list = await api<ThreadSummary[]>('/v1/threads');
           if (control.signal.aborted) return;
+          const keyOf = (t: ThreadSummary) => `${t.running ?? ''}|${t.queued ?? 0}|${t.lastActivityAt ?? ''}|${t.title}`;
+          const previous = seen.current;
+          seen.current = new Map(list.map(t => [t.id, keyOf(t)]));
+          if (first) continue;
           setThreads(list);
           // Refresh the open conversation only when it changed (its turns, queue or title).
           const open = list.find(t => t.id === currentRef.current.id);
-          const key = open ? `${open.id}|${open.running ?? ''}|${open.queued ?? 0}|${open.lastActivityAt ?? ''}` : '';
-          if (key !== summaryKey.current) { summaryKey.current = key; await refreshView().catch(() => {}); }
+          if (open && previous.get(open.id) !== keyOf(open)) await refreshView().catch(() => {});
         } catch { if (control.signal.aborted) return; await new Promise(resolve => setTimeout(resolve, 3000)); }
       }
     })();

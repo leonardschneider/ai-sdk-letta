@@ -36,6 +36,6 @@ test('the Conductor definitions are valid JSON and use the token only through a 
     assert.doesNotMatch(text, /lta_[A-Za-z0-9_-]{10,}/, `${name} holds no token`);
   }
   const workflow = JSON.parse(readFileSync(new URL('ai_sdk_letta_run_turn.json', directory), 'utf8')) as { tasks: { type: string; inputParameters: Record<string, unknown> }[] };
-  assert.deepEqual(workflow.tasks.map(t => t.type), ['HTTP', 'HTTP_POLL', 'SWITCH']);
+  assert.deepEqual(workflow.tasks.map(t => t.type), ['HTTP', 'DO_WHILE', 'SWITCH'], 'Conductor OSS has no HTTP_POLL task');
   assert.match(JSON.stringify(workflow), /\$\{workflow\.secrets\.AI_SDK_LETTA_TOKEN\}/);
 });

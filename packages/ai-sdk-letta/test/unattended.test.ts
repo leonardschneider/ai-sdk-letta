@@ -72,7 +72,7 @@ test('pre-approved ask tools run without a prompt; calls on someone else\'s acco
 test('unattendedNote tells the agent who started the turn, without markup from the source', () => {
   const note = unattendedNote('n8n <b>');
   assert.match(note, /^<system-reminder>\nThis turn was started by an automation \(n8n b\)/);
-  assert.match(note, /do not call ask_user/);
+  assert.match(note, /call ask_user anyway: the run then stops/);
   assert.doesNotMatch(unattendedNote(), /\(\)/);
 });
 

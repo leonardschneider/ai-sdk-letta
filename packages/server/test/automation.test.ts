@@ -477,14 +477,14 @@ test('orchestrator adapters: n8n creates a credential, a workflow and activates 
   assert.equal(JSON.stringify(workflow!.body).includes('lta_secret'), false, 'the token lives in the n8n credential, not the workflow');
   assert.equal(workflow!.body!.nodes[0].parameters.rule.interval[0].expression, '0 5 6 3 10 *');
   assert.equal(workflow!.body!.settings.timezone, 'UTC');
-  assert.equal(workflow!.body!.nodes[1].parameters.url, job.fireUrl);
+  assert.equal(workflow!.body!.nodes[1].parameters.url, `${job.fireUrl}?wait=110`);
   assert.equal(activate!.url, 'http://127.0.0.1:5678/api/v1/workflows/wf-9/activate');
   requests.length = 0; failActivate = true;
   await assert.rejects(n8n.createJob(job), (error: Error) => error.message === 'scheduler_failed' && !error.message.includes('lta_secret'));
   assert.deepEqual(requests.filter(r => r.method === 'DELETE').map(r => r.url), ['http://127.0.0.1:5678/api/v1/workflows/wf-9', 'http://127.0.0.1:5678/api/v1/credentials/cred-9']);
   requests.length = 0;
   await n8n.deleteJob({ externalId: 'wf-9', credentialId: 'cred-9' });
-  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(r => `${r.method} ${r.url.replace('http://127.0.0.1:5678', '')}`), ['POST /api/v1/workflows/wf-9/deactivate', 'DELETE /api/v1/workflows/wf-9', 'DELETE /api/v1/credentials/cred-9'], 'n8n refuses to delete a published workflow');
   requests.length = 0;
   const conductor = conductorOrchestrator({ url: 'http://127.0.0.1:8080', fetch: fake });
   assert.deepEqual(await conductor.createJob(job), { externalId: 'ai_sdk_letta_task_task1' });

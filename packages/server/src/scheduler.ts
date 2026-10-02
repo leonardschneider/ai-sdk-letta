@@ -38,6 +38,7 @@ const base = (url: string) => {
 /** The cron fields (seconds first) of one UTC minute: fires once a year at most, and the job is deleted after it fired. */
 export const cronAt = (at: string) => { const d = new Date(at); return `0 ${d.getUTCMinutes()} ${d.getUTCHours()} ${d.getUTCDate()} ${d.getUTCMonth() + 1} *`; };
 
+/** `missing`: also accept 404 (and n8n's 404-like answers) as "already gone". */
 async function call(options: AdapterOptions, path: string, init: RequestInit & { headers: Record<string, string> }, accept404 = false): Promise<unknown> {
   const control = AbortSignal.timeout(options.timeoutMs ?? 15_000);
   let response: Response;
@@ -45,8 +46,10 @@ async function call(options: AdapterOptions, path: string, init: RequestInit & {
   catch { throw new Error('scheduler_unreachable'); }
   if (accept404 && response.status === 404) return undefined;
   // Never surface the orchestrator's error text (it may echo request data); only a fixed code.
-  if (response.status === 401 || response.status === 403) throw new Error('scheduler_unauthorized');
-  if (!response.ok) throw new Error('scheduler_failed');
+  // The status and step (never a body or a secret) help whoever reads the server log.
+  const fail = (code: string) => Object.assign(new Error(code), { detail: `HTTP ${response.status} on ${init.method ?? 'GET'} ${path.replace(/\?.*$/, '')}` });
+  if (response.status === 401 || response.status === 403) throw fail('scheduler_unauthorized');
+  if (!response.ok) throw fail('scheduler_failed');
   const text = await response.text();
   try { return text ? JSON.parse(text) : undefined; } catch { return text; }
 }
@@ -74,7 +77,8 @@ export function n8nOrchestrator(options: N8nOrchestratorOptions): Orchestrator {
           nodes: [
             { id: 'a1b2c3d4-0000-4000-8000-000000000001', name: 'At the scheduled time', type: 'n8n-nodes-base.scheduleTrigger', typeVersion: 1.2, position: [0, 0], parameters: { rule: { interval: [{ field: 'cronExpression', expression: cronAt(job.at) }] } } },
             { id: 'a1b2c3d4-0000-4000-8000-000000000002', name: 'Run the scheduled task', type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2, position: [240, 0],
-              parameters: { method: 'POST', url: job.fireUrl, authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth', sendBody: true, specifyBody: 'json', jsonBody: '{}', options: { timeout: 30000 } },
+              // Waits for the turn's outcome (up to 120 s), so the execution shows it; a run that needed approval fails it.
+              parameters: { method: 'POST', url: `${job.fireUrl}?wait=110`, authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth', sendBody: true, specifyBody: 'json', jsonBody: '{}', options: { timeout: 125000 } },
               credentials: { httpHeaderAuth: { id: credential.id, name: `ai-sdk-letta task ${job.id}` } } },
           ],
           connections: { 'At the scheduled time': { main: [[{ node: 'Run the scheduled task', type: 'main', index: 0 }]] } },
@@ -90,6 +94,8 @@ export function n8nOrchestrator(options: N8nOrchestratorOptions): Orchestrator {
       }
     },
     async deleteJob(handle) {
+      // n8n refuses to delete a published (active) workflow: deactivate it first.
+      await call(options, `/api/v1/workflows/${encodeURIComponent(handle.externalId)}/deactivate`, { method: 'POST', headers }, true);
       await call(options, `/api/v1/workflows/${encodeURIComponent(handle.externalId)}`, { method: 'DELETE', headers }, true);
       if (handle.credentialId) await call(options, `/api/v1/credentials/${encodeURIComponent(handle.credentialId)}`, { method: 'DELETE', headers }, true);
     },
@@ -116,7 +122,8 @@ export function conductorOrchestrator(options: ConductorOrchestratorOptions): Or
   let registered: Promise<void> | undefined;
   const register = () => registered ??= (async () => {
     const definition = { name: CONDUCTOR_FIRE_WORKFLOW, version: 1, description: 'Runs one task scheduled by an ai-sdk-letta agent (calls the server back).', schemaVersion: 2, inputParameters: ['fireUrl', 'token'], maskedFields: ['token'], timeoutSeconds: 300, timeoutPolicy: 'TIME_OUT_WF', ownerEmail: 'ai-sdk-letta@example.invalid',
-      tasks: [{ name: 'fire_task', taskReferenceName: 'fire', type: 'HTTP', inputParameters: { uri: '${workflow.input.fireUrl}', method: 'POST', headers: { Authorization: 'Bearer ${workflow.input.token}' }, body: {}, accept: 'application/json', contentType: 'application/json', connectionTimeOut: 5000, readTimeOut: 30000 } }],
+      // Waits for the turn's outcome (up to 120 s), so the execution shows it; a run that needed approval fails it.
+      tasks: [{ name: 'fire_task', taskReferenceName: 'fire', type: 'HTTP', inputParameters: { uri: '${workflow.input.fireUrl}?wait=110', method: 'POST', headers: { Authorization: 'Bearer ${workflow.input.token}' }, body: {}, accept: 'application/json', contentType: 'application/json', connectionTimeOut: 5000, readTimeOut: 125000 } }],
       outputParameters: { run: '${fire.output.response.body}' } };
     // Create, or update in place when it already exists.
     await call(options, '/api/metadata/workflow', { method: 'PUT', headers, body: JSON.stringify([definition]) });
