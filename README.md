@@ -24,7 +24,10 @@ puts the two together:
   deadlines, cancellation and a metadata-only audit trail.
 - **Human-in-the-loop is yours.** Per-call approvals and a built-in `ask_user`
   question tool go through an interaction broker that you connect to any UI.
-  A terminal UI and a browser UI are included.
+  A terminal UI and a browser UI are included. For choices that can wait,
+  the agent asks for a [decision](#decisions): it pauses the work, everyone
+  in the agent is notified in the app, and the work resumes (or stops) when
+  someone decides.
 - **Defined in code, stable identity.** You give the agent a logical ID. The
   first run creates the Letta agent and records the generated ID; later runs
   reopen the same agent, memory and conversations, and never create a duplicate.
@@ -64,7 +67,7 @@ flowchart LR
 | [`@ai-sdk-letta/provider`](packages/provider) | AI SDK `LanguageModel` for Letta agents; a port of Letta's provider | **MIT** (Letta) | yes |
 | [`@ai-sdk-letta/tui`](apps/tui) | Terminal UI (patched `@ai-sdk/tui`) with `/resume`, `/search`, approvals and questions | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
 | [`@ai-sdk-letta/web`](apps/web) | assistant-ui browser app served by the server package | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
-| [`n8n-nodes-ai-sdk-letta`](packages/n8n-nodes-ai-sdk-letta) | n8n community node: run a turn, wait for the reply, branch on `approval_required` | **MIT** (n8n's rule for community nodes) | not yet |
+| [`n8n-nodes-ai-sdk-letta`](packages/n8n-nodes-ai-sdk-letta) | n8n community node: run a turn, wait for the reply (and through decisions), branch on `approval_required` | **MIT** (n8n's rule for community nodes) | not yet |
 | [`examples/basic`](examples/basic) | A minimal agent with one custom tool, in the terminal and the browser | Apache-2.0 | no |
 | [`examples/orchestration`](examples/orchestration) | Conductor OSS workflow definitions, a Conductor worker, schedules | Apache-2.0 | no |
 
@@ -151,7 +154,7 @@ Both run [`examples/basic`](examples/basic). The first run creates a Letta
 agent named "Example Assistant"; later runs reopen it. Useful variables:
 `LETTA_MODEL` (model handle), `AGENT_ID` (logical ID, for a throwaway agent),
 `AI_SDK_LETTA_STATE_DIR` (state directory), `TEXT_STATS_PERMISSION=ask` (try
-approvals). Pass options after `--`, for example `npm run gui -- --port 4500`
+approvals), `DECISIONS=1` (try [decisions](#decisions)). Pass options after `--`, for example `npm run gui -- --port 4500`
 or `npm run tui -- --new "Planning"`.
 
 To build your own agent, follow [Building your own agent](docs/building-your-own-agent.md),
@@ -475,6 +478,59 @@ The example agent includes them with `ATLASSIAN=1` (`ATLASSIAN=1 npm run gui`).
   collect API tokens; run it for yourself or your team on your own machine.
   OAuth (3LO) may come later.
 
+### Decisions
+
+`ask_user` waits a few minutes inside a turn. When a choice is the people's
+to make and can wait (a report format, a plan, a direction; not permission
+for a tool), add the decision tools:
+
+```ts
+import { decisionTools, DECISION_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...decisionTools, lookup_order },                           // request_decision, cancel_decision
+  permissions: { ...DECISION_TOOL_PERMISSIONS, lookup_order: 'ask' },  // both 'allow': asking is itself the human gate
+});
+```
+
+- **The agent asks, then stops.** `request_decision({ question, options:
+  [{ id, label, description? }], context?, allowComment? })` (1 to 8 options)
+  records a pending decision with the server and answers at once ("Decision
+  requested (id …). End your turn now …"). Every later tool call of that turn
+  is refused (`decision_pending`) and never runs, so the agent ends the turn
+  with one sentence. Nothing holds the turn open: no timeout, and the
+  decision can stay open for days.
+- **Everyone in the agent is notified, in the app.** A bell next to the
+  agent's name counts the open decisions of every agent you belong to (live,
+  through the app's change feed); its panel lists them (agent, conversation,
+  question, who asked, how long ago) and opens the conversation. There, the
+  agent's request is a card with the options, an optional comment and **Stop
+  this work**.
+- **Any member decides, once.** The first decider wins; someone a moment
+  later is told who decided what. The decision records who decided, when,
+  the option and the comment (single-user app: you).
+- **The work resumes, or stops.** The outcome reaches the agent as a new
+  message of the same conversation, through its normal queue
+  (`[Decision] Mia chose “CSV table” … Comment: …`, or "decided to stop this
+  work"), with a note to resume or stop; in a group the agent always
+  replies. The app shows it as one line, "Decided by Mia: CSV table · 2 min
+  ago", and the card becomes a compact line with the choice.
+- **Discussing meanwhile.** People can keep chatting with the agent while a
+  decision is open; each turn reminds the agent that it is pending (a chat
+  message is not the decision). A new `request_decision` in the conversation
+  replaces the open one (one per conversation), `cancel_decision` withdraws
+  it, and archiving the conversation closes it.
+- **Kept and delivered exactly once.** Decisions live next to the
+  conversation records (`decisions.json`, 0600, written atomically) and
+  survive restarts: an open decision is still open and decidable after a
+  restart, and an outcome decided but not yet sent is sent after it, once.
+  An outcome turn that may have reached the agent is never sent again.
+- **Workflows can wait for them**: see [Automations](#automations-n8n-conductor).
+
+Without the server (a plain script), the tool answers `decisions_unavailable`
+and the agent asks in its reply instead. Step by step:
+[the guide](docs/building-your-own-agent.md#6a-decisions-that-can-wait).
+
 ### Shell commands (sandbox)
 
 Add the built-in sandbox tools and a `sandbox` option to let the agent run
@@ -708,6 +764,16 @@ automations start appear in their conversations as you watch, with a small
 "via n8n", "via Conductor", "via API" or "scheduled · n8n" badge above the
 message; a tool that needed approval reads "Needed approval: …".
 
+**Decisions.** With the [decision tools](#decisions), a bell next to the
+agent's name shows how many decisions wait for you, across your agents, and
+updates live; a dot on the menu button says so on a phone. Its panel opens
+the conversation. The agent's request is a card where it asked (options,
+comment, **Stop this work**); while it is open and out of view, a "Decision
+waiting" bar above the message box brings you to it. Once decided, the card
+becomes one line ("Asked: … · decided", expandable to the options and the
+comment) and the outcome reads "Decided by Mia: CSV table · 2 min ago". The
+conversation in the sidebar is marked while a decision waits there.
+
 **Atlassian.** With the Atlassian tools, the foot of the sidebar shows
 **Connect Atlassian** (or your connected site): a dialog for site, email and
 API token, with Test connection, Replace token and Disconnect. Approval cards
@@ -860,7 +926,8 @@ the last four characters are stored (`<state>/server/<id>/automation.json`,
 | Request | What it does |
 | --- | --- |
 | `POST /v1/automation/runs` `{ text, idempotencyKey, title? \| threadId? , newConversation?, replyMode? }` | Start a turn: in the newest conversation with that `title` (default: the token's name), a new one, or a known one. `?wait=<s>` waits up to 120 s for it to end. The same `idempotencyKey` (or `Idempotency-Key` header) returns the same run, so retries never start a second turn. |
-| `GET /v1/automation/runs/<id>?wait=<s>` | The run: `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `text` (the reply), `tools` (name and outcome), `files` (created or changed in the resources), `conversation`, `error` |
+| `GET /v1/automation/runs/<id>?wait=<s>` | The run: `status` (`queued`, `running`, `completed`, `failed`, `cancelled`, `decision_pending`), `text` (the reply), `tools` (name and outcome), `files` (created or changed in the resources), `conversation`, `error`; `decision` when it asked for one, `resumes` when it brought a decision's outcome |
+| `GET /v1/automation/decisions/<id>?wait=<s>` | A decision one of the token's runs asked for: `status` (`pending`, `decided`, `stopped`, `cancelled`), `question`, `options`, `decidedBy`, `choice`, `comment`, `decidedAt`, and `resume.runId` (the run that resumed the work). `?wait=` waits up to 120 s for someone to decide. |
 | `POST /v1/automation/runs/<id>/cancel` | Stop it, or withdraw it while it waits |
 | `GET /v1/automation/files?path=` | Download a file of the agent's resources |
 | `GET /v1/automation/whoami` | The token's agent, name and user (n8n's credential test) |
@@ -880,10 +947,20 @@ like `atlassian_request`); `'deny'` stays denied, questions are never
 pre-approved, and a call that uses someone else's account still needs that
 person.
 
+**Decisions in workflows.** An unattended run may ask for a
+[decision](#decisions): it is not a failure. The run ends with
+`status: "decision_pending"` and its `decision`; people decide in the app;
+the work resumes in a new run of the same conversation, for the same token
+(unattended, with its pre-approvals). Wait for it with
+`GET /v1/automation/decisions/<id>?wait=110`, then get
+`decision.resume.runId`. "Stop this work" resumes too: the run that follows
+has `resumes.outcome: "stopped"`, and the agent only acknowledges.
+
 **n8n.** The community node in [`packages/n8n-nodes-ai-sdk-letta`](packages/n8n-nodes-ai-sdk-letta)
 (not on npm yet; its README shows how to install the built package): an
 *ai-sdk-letta API* credential (server URL, token) and an *ai-sdk-letta* node
-with Run Turn and Wait, Start Turn, Get Run and Cancel Run. A run that needed
+with Run Turn and Wait, Start Turn, Get Run, Cancel Run and Wait for
+Decision (Run Turn and Wait can also **wait through decisions**). A run that needed
 approval fails the node with `approval_required: …`; with **On Error →
 Continue (using error output)** it goes to the error output instead, with
 `error.code`, `error.tool` and the conversation, for an IF branch. Example:
@@ -898,7 +975,10 @@ SDK that waits for long turns without holding a thread. The token is a
 Conductor secret (`CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN` in the Conductor
 server's environment, used as `${workflow.secrets.AI_SDK_LETTA_TOKEN}`), so it
 never appears in workflow inputs. A turn that needed a person fails the
-workflow with `approval_required: …` or `question_required: …`. Schedules use
+workflow with `approval_required: …` or `question_required: …`. Both wait
+through decisions: the worker checks every minute (up to three days), and
+`ai_sdk_letta_run_turn_decisions` polls the decision with `HTTP` and
+`DO_WHILE` tasks, then the resumed run. Schedules use
 Conductor's scheduler (`conductor/weekday-report.schedule.json`).
 
 **The agent schedules tasks.** With `schedulingTools` in the definition
@@ -1008,6 +1088,9 @@ single-user agent before it is given up (`start_timeout`).
   non-members (the same as an unknown agent); answering approvals and
   questions, and stopping a reply, need the person who sent the message or an
   admin of that agent (403 otherwise); only admins change members.
+  Decisions are seen and decided by the agent's members only (404 for anyone
+  else); any member may decide, and who did is recorded. The notification
+  feed (`/api/decisions`) lists only the agents you belong to.
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
 - **The automation API** listens on its own port, on loopback (or a Docker
@@ -1042,6 +1125,8 @@ State lives in one directory, resolved in this order:
     <id>.<conv>.turn.pending.json   a turn whose delivery is unconfirmed
   tool-traces/             metadata-only tool audit (NDJSON, per day)
   server/<id>/gui|api/     thread and run records for the HTTP runtime
+  server/<id>/gui|team/decisions.json
+                           decisions the agent asked for: question, options, who asked, who decided what and when (0600)
     uploads/.staging/      browser uploads not yet sent (removed after 24 hours)
   resources/<letta agent ID>/
                            all files, git-versioned: files/ (one folder per conversation), git/, cache/, state.json
@@ -1135,9 +1220,17 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   matched, show as placeholders. Jira has no optimistic locking: a change
   made in the instant between the final check and the write can still be
   overwritten.
+- **Decisions.** Notifications are in the app only (no e-mail or chat
+  messages yet), and any member of the agent may decide (no assignment to
+  one person). One open decision per conversation; up to 200 open per agent.
+  The outcome reaches the agent through the conversation's queue: in the
+  single-user app it waits while another reply runs; a conversation whose
+  last turn failed is read-only, so an outcome decided there is not sent
+  (the decision shows it). A chat message is never taken as the decision:
+  only the card is.
 - **Automations.** Runs are unattended by design: a workflow that needs a
-  person's approval fails (`approval_required`) instead of waiting; deciding
-  later (a person answers, the workflow resumes) is not built yet. The n8n node
+  person's approval fails (`approval_required`) instead of waiting. Only
+  [decisions](#decisions) can be waited for (`decision_pending`). The n8n node
   is not on npm yet. Scheduled tasks run once (no recurring schedules from the
   agent; use the orchestrator for those) and on whole minutes in UTC. On n8n,
   the fire token sits in an n8n credential (encrypted by n8n); on Conductor

@@ -9,9 +9,11 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, observedParts, userContent, withAuthor, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
+import { DecisionBell, DecisionsContext, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
+import { decideError, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
 import { AutomationsDialog, AutomationsRow } from './automations.js';
-import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
+import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
 import type { Versions } from './versions.js';
@@ -35,7 +37,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[] }; status: string | null; queue?: QueuedTurn[] };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[] };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -97,7 +99,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const [membersOpen, setMembersOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   // Automations (n8n, Conductor, scripts) start turns too: the app follows changes it did not make, also when one person uses it.
-  const follow = !!team || !!agent.automations;
+  // Decisions: their outcomes start turns too (someone decides, the work resumes).
+  const decisionsEnabled = team ? team.agents.some(a => a.decisions) : !!agent.decisions;
+  const follow = !!team || !!agent.automations || !!agent.decisions;
   const mayManageAutomations = !!agent.automations && (!team || agent.role === 'admin');
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(!unreachable);
@@ -144,7 +148,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource, decision?: DecisionOutcome) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id); setLiveAuthor(author);
     const events: RuntimeEvent[] = [];
@@ -153,7 +157,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     let members = [...batch];
     // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
     const render = () => setMessages([...base,
-      withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source),
+      withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
       markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
@@ -233,11 +237,12 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         catch (e) { if (errorCode(e) !== 'runtime_busy' || attempt >= 5) throw e; await new Promise(r => setTimeout(r, 300 * (attempt + 1))); }
       }
       if (currentRef.current.id !== target.id) return;
+      void loadDecisions(target.id);
       setQueue(view.queue ?? []);
       if (view.live && liveRun.current === view.live.id) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source); return; }
+      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision); return; }
       if (liveRun.current) return;
       setMessages(base);
       setBlocked(!!view.status && !['running', 'completed'].includes(view.status) ? blockedNotice : '');
@@ -259,11 +264,12 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         catch (e) { if (errorCode(e) !== 'runtime_busy' || attempt >= 5) throw e; await new Promise(r => setTimeout(r, 300 * (attempt + 1))); }
       }
       localStorage.setItem(SAVED_THREAD, id); lastRun.current = view.lastRunId;
+      void loadDecisions(id);
       const base = historyMessages(view.messages); setMessages(base); setQueue(view.queue ?? []);
       const failed = !!view.status && !['running', 'completed'].includes(view.status);
       setBlocked(failed ? blockedNotice : '');
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
-      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source);
+      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision);
     } catch (e) {
       setCurrent(previous);
       toast(errorCode(e) === 'runtime_busy' ? 'The agent is replying in another conversation. Try again when it finishes.' : errorCode(e) === 'not_found' && team ? 'That conversation isn’t available in this agent.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
@@ -316,7 +322,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           since = version;
           const list = await api<ThreadSummary[]>('/v1/threads');
           if (control.signal.aborted) return;
-          const keyOf = (t: ThreadSummary) => `${t.running ?? ''}|${t.queued ?? 0}|${t.lastActivityAt ?? ''}|${t.title}`;
+          const keyOf = (t: ThreadSummary) => `${t.running ?? ''}|${t.queued ?? 0}|${t.lastActivityAt ?? ''}|${t.title}|${t.pendingDecision ?? ''}`;
           const previous = seen.current;
           seen.current = new Map(list.map(t => [t.id, keyOf(t)]));
           if (first) continue;
@@ -524,7 +530,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     catch (e) { toast(errorCode(e) === 'not_your_turn' ? 'Only its author or an admin can withdraw that message.' : errorCode(e) === 'already_sent' ? 'Too late: that message was just sent to the agent.' : 'Couldn’t withdraw that message.', { tone: 'error' }); }
   }
 
-  const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running, queued: t.queued ?? 0 } })), [active]);
+  const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running, queued: t.queued ?? 0, decision: !!t.pendingDecision } })), [active]);
   const adapterArchived = useMemo<ExternalStoreThreadData<'archived'>[]>(() => archived.map(t => ({ status: 'archived', id: t.id, title: t.title, custom: { state: t.state } })), [archived]);
   const readOnly = !!selected?.archived;
   const runtimeRef = useRef<AssistantRuntime | undefined>(undefined);
@@ -571,6 +577,58 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   useEffect(() => { document.title = selected ? `${titleText(selected.title)} · ${agent.name}` : agent.name; }, [selected, agent.name]);
   useEffect(() => { if (!membersOpen) return; setDrawer(false); }, [membersOpen]);
 
+  /* ---------------- decisions ---------------- */
+  const feed = useDecisionFeed(decisionsEnabled && !connecting && !unreachable);
+  const [threadDecisions, setThreadDecisions] = useState<ReadonlyMap<string, DecisionView>>(new Map());
+  const decisionsThread = useRef<string | undefined>(undefined);
+  /** The open conversation's decisions (cards and lines), refreshed when anything changes. */
+  async function loadDecisions(threadId: string) {
+    if (!agent.decisions) return;
+    try {
+      const { decisions } = await api<{ decisions: DecisionView[] }>(`/v1/decisions?thread=${encodeURIComponent(threadId)}`);
+      if (currentRef.current.id !== threadId) return;
+      decisionsThread.current = threadId;
+      setThreadDecisions(new Map(decisions.map(d => [d.id, d])));
+    } catch { /* kept as it was */ }
+  }
+  useEffect(() => { setThreadDecisions(new Map()); decisionsThread.current = undefined; }, [current.id]);
+  // The bell changed (a decision asked, decided or withdrawn anywhere): the open conversation's cards follow.
+  const feedKey = feed.decisions.map(d => d.id).join(',');
+  useEffect(() => { if (!current.draft && feed.loaded) void loadDecisions(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [feedKey]);
+  const loading_ = useRef(new Set<string>());
+  const decisionsState = useMemo<DecisionsState>(() => ({
+    byId: threadDecisions, team: !!team, ...(team ? { me: team.user.id } : {}),
+    ensure: id => {
+      if (loading_.current.has(id) || threadDecisions.has(id)) return;
+      loading_.current.add(id);
+      void api<DecisionView>(`/v1/decisions/${encodeURIComponent(id)}`).then(decision => { if (decision.threadId === currentRef.current.id) setThreadDecisions(map => new Map(map).set(decision.id, decision)); }).catch(() => {}).finally(() => loading_.current.delete(id));
+    },
+    decide: async (id, body) => {
+      let response: Response;
+      try { response = await fetch(apiPath(`/v1/decisions/${encodeURIComponent(id)}/decide`), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...setCsrfHeader() }, body: JSON.stringify(body) }); }
+      catch { throw new Error('Couldn’t reach the server. Nothing was sent; try again.'); }
+      const data = await response.json().catch(() => ({})) as DecisionView & { error?: string; decision?: DecisionView };
+      const settled = response.ok ? data : data.decision;
+      if (settled) setThreadDecisions(map => new Map(map).set(settled.id, settled));
+      if (!response.ok) throw new Error(decideError(data.error ?? `http_${response.status}`, data.decision, team?.user.id));
+      // The work resumes in a new turn of this conversation: show it as it starts.
+      void refreshView().catch(() => {});
+      setTimeout(() => void refreshView().catch(() => {}), 600);
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [threadDecisions, team]);
+  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending') : undefined;
+  /** Open a decision from the bell: its conversation (switching agents on a team server). */
+  const openDecision = useCallback((decision: FeedDecision) => {
+    setDrawer(false);
+    const focus = () => setTimeout(() => document.getElementById(`decision-${decision.id}`)?.scrollIntoView({ block: 'center' }), 300);
+    if (team && decision.agent.id !== agent.id) { localStorage.setItem(`${SAVED}:${decision.agent.id}`, decision.thread.id); team.onSwitch(decision.agent.id); return; }
+    if (currentRef.current.id === decision.thread.id) { focus(); return; }
+    void select(decision.thread.id).then(focus);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team, agent.id]);
+  const bell = decisionsEnabled ? <DecisionBell decisions={feed.decisions} showAgent={!!team && team.agents.length > 1} {...(team ? { me: { id: team.user.id, name: team.user.name } } : {})} onOpen={openDecision}/> : undefined;
+
   const title = current.draft ? 'New chat' : selected?.title ?? '';
   const agentLatex = agent.ui?.latex;
   const latex = resolveLatex(agentLatex, current.draft ? undefined : selected?.latex);
@@ -583,6 +641,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const waitingFor = team && !mayAct ? liveAuthor?.name ?? 'the person who sent it' : undefined;
   return <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer, ...(waitingFor ? { waitingFor } : {}) }}>
     <AuthorContext.Provider value={team?.user.id}>
+    <DecisionsContext.Provider value={decisionsState}>
     <FileLinkContext.Provider value={fileLink}>
     <LatexContext.Provider value={latex}>
     <AssistantRuntimeProvider runtime={runtime}>
@@ -590,14 +649,14 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
-            agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)}
+            agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : {})}
             footer={<>{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
           <header className="topbar">
-            <button type="button" className="icon-btn menu-btn" aria-label="Open sidebar" aria-controls="sidebar" aria-expanded={drawer} onClick={() => setDrawer(true)}><Menu size={18}/></button>
+            <button type="button" className="icon-btn menu-btn" aria-label={feed.decisions.length ? `Open sidebar (${feed.decisions.length === 1 ? '1 decision' : `${feed.decisions.length} decisions`} waiting)` : 'Open sidebar'} aria-controls="sidebar" aria-expanded={drawer} data-dot={feed.decisions.length > 0 || undefined} onClick={() => setDrawer(true)}><Menu size={18}/></button>
             {!narrow && !layout.sidebar && <>
               <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
               <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
@@ -624,6 +683,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                 <div className="column footer-column">
                   <ThreadPrimitive.ScrollToBottom className="jump" aria-label="Jump to latest"><ArrowDown size={14} aria-hidden="true"/>Jump to latest</ThreadPrimitive.ScrollToBottom>
                   <InteractionDock onDismiss={() => { setInteraction(undefined); setInteractionOutcome(''); focusComposer(); }}/>
+                  <PendingDecisionBar decision={pendingHere}/>
                   {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.members ?? 0) > 1}/>}
                   {team && !current.draft && !readOnly && <TypingLine people={selected?.typing ?? []} me={team.user.id}/>}
                   {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}</span><button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
@@ -683,6 +743,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     </AssistantRuntimeProvider>
     </LatexContext.Provider>
     </FileLinkContext.Provider>
+    </DecisionsContext.Provider>
     </AuthorContext.Provider>
   </InteractionContext.Provider>;
 }

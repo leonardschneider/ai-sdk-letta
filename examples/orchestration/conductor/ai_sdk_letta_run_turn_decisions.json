@@ -1,0 +1,170 @@
+{
+  "name": "ai_sdk_letta_run_turn_decisions",
+  "version": 1,
+  "description": "Run one turn of an ai-sdk-letta agent and wait for the reply, waiting through decisions: when the agent asks people to decide (status decision_pending), poll the decision (each request held by the server up to 110 s) until someone decided in the app, then follow the run that resumed the work. Conductor's own HTTP, DO_WHILE and SWITCH tasks only (no worker). One decision per workflow; for agents that may ask again, use the worker (ai_sdk_letta_run_turn_worker).",
+  "schemaVersion": 2,
+  "ownerEmail": "ai-sdk-letta@example.invalid",
+  "inputParameters": [
+    "serverUrl",
+    "text",
+    "title"
+  ],
+  "timeoutSeconds": 259200,
+  "timeoutPolicy": "TIME_OUT_WF",
+  "tasks": [
+    {
+      "name": "start_turn",
+      "taskReferenceName": "start",
+      "type": "HTTP",
+      "description": "Start the turn (idempotent) and wait up to 110 s.",
+      "inputParameters": {
+        "uri": "${workflow.input.serverUrl}/v1/automation/runs?wait=110",
+        "method": "POST",
+        "headers": {
+          "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}",
+          "Idempotency-Key": "${workflow.workflowId}"
+        },
+        "body": {
+          "text": "${workflow.input.text}",
+          "title": "${workflow.input.title}"
+        },
+        "accept": "application/json",
+        "contentType": "application/json",
+        "connectionTimeOut": 5000,
+        "readTimeOut": 125000
+      },
+      "retryCount": 3
+    },
+    {
+      "name": "wait_for_turn",
+      "taskReferenceName": "wait",
+      "type": "DO_WHILE",
+      "description": "Until the first run ended (completed, failed, or decision_pending).",
+      "inputParameters": {
+        "keepLastN": 2,
+        "started": "${start.output.response.body.status}"
+      },
+      "loopCondition": "(function(){ var s = $.check_ref && $.check_ref.response ? $.check_ref.response.body.status : $.started; return (s === 'queued' || s === 'running') && $.wait.iteration < 15; })();",
+      "loopOver": [
+        {
+          "name": "check_turn_status",
+          "taskReferenceName": "check_ref",
+          "type": "HTTP",
+          "inputParameters": {
+            "uri": "${workflow.input.serverUrl}/v1/automation/runs/${start.output.response.body.id}?wait=110",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+            "accept": "application/json",
+            "connectionTimeOut": 5000,
+            "readTimeOut": 125000
+          }
+        }
+      ]
+    },
+    {
+      "name": "route_first_run",
+      "taskReferenceName": "first",
+      "type": "SWITCH",
+      "evaluatorType": "value-param",
+      "expression": "status",
+      "inputParameters": {
+        "status": "${check_ref.output.response.body.status}"
+      },
+      "decisionCases": {
+        "completed": [
+          {
+            "name": "done_without_decision",
+            "taskReferenceName": "done_without_decision",
+            "type": "TERMINATE",
+            "inputParameters": {
+              "terminationStatus": "COMPLETED",
+              "workflowOutput": {
+                "runId": "${check_ref.output.response.body.id}",
+                "reply": "${check_ref.output.response.body.text}",
+                "conversation": "${check_ref.output.response.body.conversation}"
+              }
+            }
+          }
+        ],
+        "decision_pending": [
+          {
+            "name": "wait_for_decision",
+            "taskReferenceName": "decide",
+            "type": "DO_WHILE",
+            "description": "Until someone decided in the app (each request held up to 110 s; about 3 days at most).",
+            "inputParameters": { "keepLastN": 2 },
+            "loopCondition": "(function(){ var s = $.decision_ref && $.decision_ref.response ? $.decision_ref.response.body.status : 'pending'; return s === 'pending' && $.decide.iteration < 2300; })();",
+            "loopOver": [
+              {
+                "name": "check_decision",
+                "taskReferenceName": "decision_ref",
+                "type": "HTTP",
+                "inputParameters": {
+                  "uri": "${workflow.input.serverUrl}/v1/automation/decisions/${check_ref.output.response.body.decision.id}?wait=110",
+                  "method": "GET",
+                  "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+                  "accept": "application/json",
+                  "connectionTimeOut": 5000,
+                  "readTimeOut": 125000
+                }
+              }
+            ]
+          },
+          {
+            "name": "wait_for_resumed_run",
+            "taskReferenceName": "resumed",
+            "type": "DO_WHILE",
+            "description": "The run that resumed (or stopped) the work, until it ended.",
+            "inputParameters": { "keepLastN": 2 },
+            "loopCondition": "(function(){ var s = $.resumed_ref && $.resumed_ref.response ? $.resumed_ref.response.body.status : 'queued'; return (s === 'queued' || s === 'running') && $.resumed.iteration < 15; })();",
+            "loopOver": [
+              {
+                "name": "check_resumed_run",
+                "taskReferenceName": "resumed_ref",
+                "type": "HTTP",
+                "inputParameters": {
+                  "uri": "${workflow.input.serverUrl}/v1/automation/runs/${decision_ref.output.response.body.resume.runId}?wait=110",
+                  "method": "GET",
+                  "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+                  "accept": "application/json",
+                  "connectionTimeOut": 5000,
+                  "readTimeOut": 125000
+                }
+              }
+            ]
+          },
+          {
+            "name": "done_after_decision",
+            "taskReferenceName": "done_after_decision",
+            "type": "TERMINATE",
+            "inputParameters": {
+              "terminationStatus": "COMPLETED",
+              "workflowOutput": {
+                "runId": "${resumed_ref.output.response.body.id}",
+                "status": "${resumed_ref.output.response.body.status}",
+                "reply": "${resumed_ref.output.response.body.text}",
+                "conversation": "${resumed_ref.output.response.body.conversation}",
+                "decision": "${decision_ref.output.response.body}"
+              }
+            }
+          }
+        ]
+      },
+      "defaultCase": [
+        {
+          "name": "turn_failed",
+          "taskReferenceName": "turn_failed",
+          "type": "TERMINATE",
+          "inputParameters": {
+            "terminationStatus": "FAILED",
+            "terminationReason": "${check_ref.output.response.body.error.code}: ${check_ref.output.response.body.error.message}",
+            "workflowOutput": {
+              "error": "${check_ref.output.response.body.error}",
+              "runId": "${check_ref.output.response.body.id}"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

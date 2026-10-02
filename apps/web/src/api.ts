@@ -78,6 +78,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   integrations?: string[];
   /** The server serves the automation API (admins manage its tokens). */
   automations?: boolean;
+  /** The agent can ask for decisions: members see and decide them (the bell). */
+  decisions?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

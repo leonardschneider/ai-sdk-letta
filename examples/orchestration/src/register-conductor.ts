@@ -1,6 +1,6 @@
 /**
  * Register the example definitions with a Conductor server (OSS: no
- * authentication): the task `ai_sdk_letta_turn` and both workflows.
+ * authentication): the task `ai_sdk_letta_turn` and the workflows.
  *
  *   CONDUCTOR_URL=http://127.0.0.1:8080 npm run register --workspace @ai-sdk-letta/example-orchestration
  */
@@ -14,5 +14,5 @@ async function call(method: string, path: string, body: unknown) {
 }
 await call('POST', '/api/metadata/taskdefs', file('ai_sdk_letta_turn.taskdef.json'));
 // PUT creates or updates.
-await call('PUT', '/api/metadata/workflow', [file('ai_sdk_letta_run_turn.json'), file('ai_sdk_letta_run_turn_worker.json')]);
-console.log(`Registered ai_sdk_letta_turn, ai_sdk_letta_run_turn and ai_sdk_letta_run_turn_worker on ${base}.`);
+await call('PUT', '/api/metadata/workflow', [file('ai_sdk_letta_run_turn.json'), file('ai_sdk_letta_run_turn_worker.json'), file('ai_sdk_letta_run_turn_decisions.json')]);
+console.log(`Registered ai_sdk_letta_turn, ai_sdk_letta_run_turn, ai_sdk_letta_run_turn_worker and ai_sdk_letta_run_turn_decisions on ${base}.`);

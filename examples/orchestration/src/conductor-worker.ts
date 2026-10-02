@@ -4,7 +4,9 @@
  * workflow's ID as idempotency key (a re-polled or retried task never starts
  * a second turn), then waits for it in short steps: while the turn runs, the
  * task stays IN_PROGRESS and Conductor calls the worker back, so no thread
- * waits on a long turn and the worker can restart at any time.
+ * waits on a long turn and the worker can restart at any time. A turn that
+ * asks people to decide (`request_decision`) keeps the task IN_PROGRESS until
+ * someone decided in the app, then follows the run that resumed the work.
  *
  *   CONDUCTOR_SERVER_URL=http://127.0.0.1:8080/api \
  *   AI_SDK_LETTA_URL=http://127.0.0.1:4402 AI_SDK_LETTA_TOKEN=lta_… \
@@ -33,6 +35,8 @@ const worker: ConductorWorker = {
     text: String(task.inputData?.text ?? ''),
     ...(typeof task.inputData?.title === 'string' && task.inputData.title ? { title: task.inputData.title } : {}),
     ...(typeof task.outputData?.runId === 'string' ? { runId: task.outputData.runId } : {}),
+    // A run that asked people to decide: keep checking the decision (people decide in the app).
+    ...(typeof task.outputData?.decisionId === 'string' ? { decisionId: task.outputData.decisionId } : {}),
   }),
 };
 

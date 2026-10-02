@@ -8,6 +8,7 @@ import { authorOf, servedOrigin, tailscaleIdentity, type TailscaleIdentity, type
 import { atlassianMediaRoute, integrationError, integrationRoutes } from './integrations.js';
 import { LOCAL_USER_ID, type CredentialStore } from 'ai-sdk-letta';
 import { automationAdminRoutes, type AutomationEndpoint, type AutomationService } from './automation.js';
+import { DecisionConflict, type DecisionBoard, type PublicDecision } from './decisions.js';
 
 /** The automation API of a server, for the app's Automations dialog. */
 export type AppAutomation = { service: AutomationService; endpoint: AutomationEndpoint };
@@ -189,6 +190,26 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
   app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id, true); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
   app.post('/v1/runs/:id/cancel', (req, res) => { mayAct(req, req.params.id); runtime.cancel(owner, req.params.id); res.json({ accepted: true }); });
+  /* ---------------- decisions ---------------- */
+  const board = () => { if (!runtime.decisions) throw new RuntimeFault('not_found', 404); return runtime.decisions; };
+  /** Decisions: `?thread=<id>` that conversation's (newest 50, any status), otherwise the pending ones. */
+  app.get('/v1/decisions', (req, res) => {
+    if (!runtime.decisions) return res.json({ decisions: [] });
+    const thread = typeof req.query.thread === 'string' ? req.query.thread : undefined;
+    if (thread) runtime.threadSummary(owner, thread) ?? (() => { throw new RuntimeFault('not_found', 404); })();
+    res.json({ decisions: thread ? board().forThread(thread) : board().pending() });
+  });
+  app.get('/v1/decisions/:id', (req, res) => res.json(board().get(req.params.id)));
+  /**
+   * Decide: `{ choice, comment? }` or `{ stop: true, comment? }`. Any member of
+   * the agent may decide, once: the first decider wins, later attempts get 409
+   * `already_decided` with the decision as decided (who, what, when).
+   */
+  app.post('/v1/decisions/:id/decide', (req, res) => {
+    const who = access ? access.author(req) : { id: LOCAL_USER_ID, name: 'You' };
+    try { res.json(board().decide(req.params.id, who, req.body)); }
+    catch (error) { if (error instanceof DecisionConflict) return res.status(409).json({ error: error.code, decision: error.decision }); throw error; }
+  });
   /**
    * Long poll: answers `{ version }` as soon as threads or runs change after
    * `?since=` (or after about 25 seconds), so other people's turns show up.
@@ -243,6 +264,64 @@ export interface GuiAgentInfo {
   integrations?: readonly string[];
   /** The server serves the automation API: admins manage its tokens (Automations). */
   automations?: boolean;
+  /** The agent can request decisions (it has `request_decision`): members see and decide them. */
+  decisions?: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* Decisions: the notification feed                                    */
+/* ------------------------------------------------------------------ */
+
+/** One agent's decisions, for {@link DecisionFeed}. */
+export type FeedAgent = { agent: { id: string; name: string }; board: DecisionBoard; runtime: ThreadRuntime; owner: string };
+/** A pending decision in the notification feed: with its agent and conversation title. */
+export type FeedDecision = PublicDecision & { agent: { id: string; name: string }; thread: { id: string; title: string } };
+
+/**
+ * Pending decisions across several agents, with one change counter, for the
+ * notification bell (`GET /api/decisions?since=`).
+ */
+export class DecisionFeed {
+  private changes = 0;
+  private waiting = new Set<() => void>();
+  constructor(readonly agents: readonly FeedAgent[]) {
+    // Any change of a runtime (a decision, a conversation renamed or archived) may change what the bell lists:
+    // the version moves only when the list does.
+    for (const entry of agents) entry.runtime.observe(() => this.check());
+    this.key = this.signature();
+  }
+  private key: string;
+  private signature() { return JSON.stringify(this.agents.map(entry => this.pending(id => id === entry.agent.id).map(d => [d.id, d.status, d.thread.title]))); }
+  private check() { const key = this.signature(); if (key !== this.key) { this.key = key; this.changed(); } }
+  private changed() { this.changes++; const waiting = [...this.waiting]; this.waiting.clear(); for (const wake of waiting) wake(); }
+  get version() { return this.changes; }
+  waitForChange(since: number, timeoutMs: number, signal?: AbortSignal): Promise<number> {
+    if (since !== this.changes || signal?.aborted) return Promise.resolve(this.changes);
+    return new Promise(resolve => {
+      const done = () => { clearTimeout(timer); this.waiting.delete(done); signal?.removeEventListener('abort', done); resolve(this.changes); };
+      const timer = setTimeout(done, timeoutMs);
+      this.waiting.add(done);
+      signal?.addEventListener('abort', done, { once: true });
+    });
+  }
+  /** Pending decisions of the agents `visible` allows, oldest first. Decisions of archived conversations never show. */
+  pending(visible: (agentId: string) => boolean): FeedDecision[] {
+    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().flatMap(decision => {
+      const thread = entry.runtime.threadSummary(entry.owner, decision.threadId);
+      return thread && !thread.archived ? [{ ...decision, agent: { ...entry.agent }, thread: { id: thread.id, title: thread.title } }] : [];
+    })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+}
+/** `GET .../decisions?since=<version>`: `{ version, decisions }`, at once or when they change (about 25 seconds at most). */
+export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Request) => (agentId: string) => boolean): express.RequestHandler {
+  return async (req, res) => {
+    const since = req.query.since === undefined ? -1 : Number(req.query.since);
+    if (!Number.isSafeInteger(since)) throw new RuntimeFault('invalid_cursor', 400);
+    const control = new AbortController();
+    res.on('close', () => control.abort());
+    const version = since === feed.version ? await feed.waitForChange(since, 25_000, control.signal) : feed.version;
+    if (!res.writableEnded && !res.destroyed) res.json({ version, decisions: feed.pending(visible(req)) });
+  };
 }
 
 /**
@@ -273,10 +352,11 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
+  const feed = runtime.decisions ? new DecisionFeed([{ agent: { id: agent.id, name: agent.name }, board: runtime.decisions, runtime, owner }]) : undefined;
   const integrations = credentials ? { store: credentials, userOf: local, ...(integrationOptions ? { options: integrationOptions } : {}) } : undefined;
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
@@ -286,6 +366,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   }, ...(integrations ? [integrationsApp(integrations)] : []),
   // The local user owns the single-user app: they manage its automation tokens.
   ...(automation ? [express.Router().use('/automations', automationAdminRoutes(automation.service, () => agent.id, { actor: () => ({ id: LOCAL_USER_ID, name: 'You' }), isAdmin: () => true }, automation.endpoint))] : []),
+  // Pending decisions (the notification bell): `?since=<version>` waits until they change.
+  ...(feed ? [express.Router().get('/decisions', decisionFeedRoute(feed, () => () => true))] : []),
   runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;
@@ -373,7 +455,9 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}) }; };
+  // Pending decisions of every agent you belong to (the notification bell).
+  const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
   app.get('/api/session', (req, res) => {
     const { identity, user } = who(req)!;
@@ -405,6 +489,7 @@ export function teamApp(options: TeamAppOptions) {
     }, automation.endpoint);
     app.use('/api/agents/:agent/automations', member, (req, res, next) => { (req as unknown as Record<symbol, string>)[AGENT] = String(req.params.agent); routes(req, res, next); });
   }
+  app.get('/api/decisions', decisionFeedRoute(feed, req => { const user = who(req)?.user; return agentId => !!user && !!directory.role(agentId, user.id); }));
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
   // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
   const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();

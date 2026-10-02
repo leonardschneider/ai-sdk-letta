@@ -1,14 +1,14 @@
 {
   "name": "ai_sdk_letta_run_turn_worker",
   "version": 1,
-  "description": "Run one turn of an ai-sdk-letta agent with the ai_sdk_letta_turn worker (src/conductor-worker.ts), which waits for long turns without polling every minute. Fails with approval_required / question_required when the turn needed a person.",
+  "description": "Run one turn of an ai-sdk-letta agent with the ai_sdk_letta_turn worker (src/conductor-worker.ts), which waits for long turns without polling every minute, and through decisions the agent asks people to make in the app (checking every minute, up to 3 days). Fails with approval_required / question_required when the turn needed a person.",
   "schemaVersion": 2,
   "ownerEmail": "ai-sdk-letta@example.invalid",
   "inputParameters": [
     "text",
     "title"
   ],
-  "timeoutSeconds": 1800,
+  "timeoutSeconds": 259200,
   "timeoutPolicy": "TIME_OUT_WF",
   "tasks": [
     {
@@ -26,6 +26,7 @@
     "reply": "${turn.output.text}",
     "conversation": "${turn.output.conversation}",
     "tools": "${turn.output.tools}",
-    "files": "${turn.output.files}"
+    "files": "${turn.output.files}",
+    "resumes": "${turn.output.resumes}"
   }
 }

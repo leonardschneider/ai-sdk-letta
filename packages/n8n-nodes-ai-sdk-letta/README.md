@@ -1,8 +1,9 @@
 # n8n-nodes-ai-sdk-letta
 
 An [n8n](https://n8n.io) community node for [ai-sdk-letta](https://github.com/leonardschneider/ai-sdk-letta)
-agents: send a message to an agent from a workflow, wait for its reply, and
-branch when the run needed a person's approval.
+agents: send a message to an agent from a workflow, wait for its reply (and
+for decisions people make in the app), and branch when the run needed a
+person's approval.
 
 > **Not on npm yet.** Install it from a build of this repository (below).
 > Unofficial: not affiliated with Letta, Vercel or n8n.
@@ -15,6 +16,8 @@ branch when the run needed a person's approval.
 - **Start Turn**: send it without waiting (returns the run ID).
 - **Get Run**: a run by ID, optionally waiting until it ended.
 - **Cancel Run**: stop it, or withdraw it while it waits.
+- **Wait for Decision**: wait until people decided what a run asked (in the
+  app), then for the run that resumed the work (see below).
 
 Runs from n8n are **unattended**. When the agent needs approval for a tool
 (or wants to ask a question), the run fails with `approval_required` (or
@@ -22,6 +25,18 @@ Runs from n8n are **unattended**. When the agent needs approval for a tool
 node's **Settings → On Error → Continue (using error output)** to branch on
 it: the error output carries `error.code`, `error.tool`, `error.runId` and
 `error.conversationId`. Or pre-approve the tool on the token.
+
+**Decisions are not failures.** When the agent asks people to decide
+(`request_decision`), the run ends with status `decision_pending` and its
+`decision` (`id`, `question`, `options`). Someone decides in the ai-sdk-letta
+app, and the work resumes in a new run. Either turn on **Options → Wait
+Through Decisions** in Run Turn and Wait (it waits within the node's wait
+time, and returns the resumed run, with `decided`), or follow the node with
+**Wait for Decision** (`Decision ID`: `{{ $json.decision.id }}`), for
+example after an IF on `{{ $json.status }}`. A decision nobody made in time
+fails the node with `timeout`; the decision stays open. "Stop this work"
+returns the resumed run with `resumes.outcome: "stopped"`. Long waits keep
+the n8n execution running; for waits of days, use a Wait node and Get Run.
 
 The idempotency key defaults to the execution, node run and item, so n8n's
 retries never start a second turn.

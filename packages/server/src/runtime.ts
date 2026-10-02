@@ -1,8 +1,10 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
+import type { DecisionBoard } from './decisions.js';
 import {
   REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
+  decisionOutcomeNote,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
   type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
@@ -31,6 +33,12 @@ export type RunAuthor = { id: string; login: string; name: string; avatar?: stri
  * the automation's (token's) name. Never a secret.
  */
 export type RunSource = { kind: 'automation' | 'schedule'; via: 'n8n' | 'conductor' | 'api'; tokenId: string; name: string };
+/**
+ * A turn that brings a decision's outcome to the agent (see `DecisionBoard`):
+ * which decision, what was decided and by whom. Shown in the app as a compact
+ * "Decided by …" line instead of a message bubble.
+ */
+export type RunDecision = { id: string; outcome: 'decided' | 'stopped'; question: string; by: { id: string; name: string }; choice?: { id: string; label: string }; comment?: string };
 /** How an automation's turn runs: unattended (nobody is asked), with the tools pre-approved for it and the reply mode it asks for. */
 export type RunAutomation = { source: RunSource; preApproved: readonly string[]; onBehalfOf?: string; replyMode?: ReplyMode };
 /**
@@ -56,7 +64,9 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** When the turn ended (completed, failed, cancelled or withdrawn). */
   endedAt?: string;
   /** An unattended turn needed a person: the first refused call (`approval_required` or `question_required`) and its tool. The turn itself ended normally. */
-  refused?: { code: string; tool: string } };
+  refused?: { code: string; tool: string };
+  /** The turn brings a decision's outcome to the agent. */
+  decision?: RunDecision };
 /** Metadata of a file sent with a run (as stored in the conversation's folder). */
 export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
 /**
@@ -181,7 +191,7 @@ export function displayRun(run: Run): UIMessage[] {
     const part = parts[i];
     if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: `Turn ${run.status}; execution not confirmed.` };
   }
-  const metadata = run.startedAt || run.author || run.source ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}) } } : {};
+  const metadata = run.startedAt || run.author || run.source || run.decision ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}) } } : {};
   // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
   // Files are shown by the same "Attached: ..." note the agent received.
   const note = run.files?.length ? attachmentNote(run.files) : '';
@@ -192,6 +202,8 @@ export function displayRun(run: Run): UIMessage[] {
 
 /** Run fields of an automation's turn. */
 const automationFields = (automation?: RunAutomation): Partial<Run> => automation ? { source: { ...automation.source }, unattended: { preApproved: [...automation.preApproved], ...(automation.onBehalfOf ? { onBehalfOf: automation.onBehalfOf } : {}) }, ...(automation.replyMode ? { replyModeOverride: automation.replyMode } : {}) } : {};
+/** What the browser may know about a decision's outcome turn (no user IDs beyond the decider's). */
+export const publicDecisionRun = (decision: RunDecision) => ({ id: decision.id, outcome: decision.outcome, question: decision.question, by: { ...decision.by }, ...(decision.choice ? { choice: { ...decision.choice } } : {}), ...(decision.comment ? { comment: decision.comment } : {}) });
 /** What the browser may know about a run's source (no token ID). */
 export const publicSource = (source: RunSource) => ({ kind: source.kind, via: source.via, name: source.name });
 const sameImages = (a: RunImage[] = [], b: RunImage[] = []) => a.length === b.length && a.every((image, index) => image.sha256 === b[index]!.sha256);
@@ -229,6 +241,8 @@ export class ThreadRuntime {
   private readonly agentName?: string;
   private readonly typingMs: number;
   private readonly members: () => number;
+  /** The agent's decisions, when the server keeps them (set by `DecisionBoard`). */
+  decisions?: DecisionBoard;
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -276,7 +290,11 @@ export class ThreadRuntime {
     this.changes++;
     const waiting = [...this.waiting]; this.waiting.clear();
     for (const wake of waiting) wake();
+    for (const observer of this.observers) { try { observer(); } catch { /* observer */ } }
   }
+  private observers = new Set<() => void>();
+  /** Call `observer` after every visible change (see {@link version}). Returns an unsubscribe function. */
+  observe(observer: () => void): () => void { this.observers.add(observer); return () => this.observers.delete(observer); }
   /**
    * A counter that increases whenever threads or runs change (created, renamed,
    * archived, a run queued, started or ended). Pass the last value back to
@@ -338,7 +356,8 @@ export class ThreadRuntime {
   /** Display metadata only; timestamps are omitted for legacy threads that never recorded them. */
   private summary(thread: Thread) {
     const { id, title, state, archived, createdAt, lastActivityAt, latex } = thread;
-    const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride };
+    const pendingDecision = this.decisions?.pending().find(d => d.threadId === id)?.id;
+    const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride, ...(pendingDecision ? { pendingDecision } : {}) };
     if (!this.queueing) return base;
     // Reply modes: the conversation's override, the mode in effect now, and how many people share the agent.
     const modes = this.replyMode !== undefined ? { replyMode: (thread.replyMode ?? 'inherit') as ReplyModeOverride, replyModeInEffect: this.modeOf(thread), members: this.memberCount() } : {};
@@ -359,6 +378,13 @@ export class ThreadRuntime {
   }
   /** The agent's members changed: listed reply modes may have changed too (wakes `waitForChange`). */
   membersChanged() { this.changed(); }
+  /** A decision changed (requested, decided, cancelled): open pages refresh (wakes `waitForChange`). */
+  decisionsChanged() { this.changed(); }
+  /** The turn running in a conversation now, if any (a copy). */
+  activeRun(threadId: string): Run | undefined {
+    const run = this.lane(threadId).active?.run;
+    return run && run.threadId === threadId ? structuredClone(run) : undefined;
+  }
   list(owner: string) {
     this.authorize(owner);
     return this.state.threads.filter(t => t.owner === owner).map(t => this.summary(t));
@@ -445,6 +471,8 @@ export class ThreadRuntime {
     const retitled = thread.title !== title;
     thread.title = title;
     if (typeof patch.archived === 'boolean') thread.archived = patch.archived;
+    // An archived conversation's pending decision can no longer be decided.
+    if (patch.archived === true) this.decisions?.archived(id);
     if (patch.latex === 'inherit') delete thread.latex; else if (patch.latex === 'on' || patch.latex === 'off') thread.latex = patch.latex;
     if (patch.replyMode === 'inherit') delete thread.replyMode; else if (fields.includes('replyMode')) thread.replyMode = patch.replyMode as ReplyMode;
     this.save(); this.changed();
@@ -491,12 +519,13 @@ export class ThreadRuntime {
   private annotate(threadId: string, messages: UIMessage[]): UIMessage[] {
     if (!this.queueing) {
       // Single-user runtimes tag only automation turns (their OTID is the run ID), to show what started them.
-      const sources = new Map(this.state.runs.filter(r => r.threadId === threadId && r.source).map(r => [r.id, r.source!]));
-      if (!sources.size) return messages;
+      // (and the turns that brought a decision's outcome, shown as a compact line).
+      const tagged = new Map(this.state.runs.filter(r => r.threadId === threadId && (r.source || r.decision)).map(r => [r.id, r]));
+      if (!tagged.size) return messages;
       return messages.map(message => {
         const otid = (message.metadata as { otid?: unknown } | undefined)?.otid;
-        const source = message.role === 'user' && typeof otid === 'string' ? sources.get(otid) : undefined;
-        return source ? { ...message, metadata: { ...(message.metadata as object), source: publicSource(source) } } : message;
+        const run = message.role === 'user' && typeof otid === 'string' ? tagged.get(otid) : undefined;
+        return run ? { ...message, metadata: { ...(message.metadata as object), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}) } } : message;
       });
     }
     const runs = new Map(this.state.runs.filter(r => r.threadId === threadId).map(r => [r.id, r]));
@@ -507,7 +536,7 @@ export class ThreadRuntime {
       const members = run.batch?.map(id => runs.get(id)).filter((r): r is Run => !!r && r.threadId === threadId);
       if (members && members.length > 1) return members.map((member, index): UIMessage => ({ id: `${message.id}-${index}`, role: 'user', parts: [{ type: 'text', text: member.input }],
         metadata: { ...(message.metadata as object), otid: member.id, ...(member.author ? { author: member.author } : {}) } }));
-      return [run.author || run.source ? { ...message, metadata: { ...(message.metadata as object), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}) } } : message];
+      return [run.author || run.source || run.decision ? { ...message, metadata: { ...(message.metadata as object), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}) } } : message];
     }));
   }
   /**
@@ -567,7 +596,7 @@ export class ThreadRuntime {
   }
   /** Turns waiting in a thread's queue, oldest first (shared runtimes). */
   private queueOf(threadId: string) {
-    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}), ...(r.source ? { source: publicSource(r.source) } : {}), ...(this.sending.has(r.id) ? { sending: true } : {}),
+    return this.state.runs.filter(r => r.threadId === threadId && r.status === 'queued').map(r => ({ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}), ...(r.source ? { source: publicSource(r.source) } : {}), ...(r.decision ? { decision: publicDecisionRun(r.decision) } : {}), ...(this.sending.has(r.id) ? { sending: true } : {}),
       ...(r.images?.length ? { images: r.images.length } : {}), ...(r.uploads?.length ? { files: r.uploads.length } : {}), ...(r.queuedAt ? { queuedAt: r.queuedAt } : {}) }));
   }
   async view(owner: string, id: string): Promise<Awaited<ReturnType<ThreadRuntime['viewOnce']>>> {
@@ -586,7 +615,7 @@ export class ThreadRuntime {
     if (active && lane.current) return {
       messages: this.annotate(id, lane.current.history.filter(m => m.id !== 'session-status')),
       lastRunId: latest?.id ?? null,
-      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}), ...(active.source ? { source: publicSource(active.source) } : {}),
+      live: { id: active.id, input: active.input, ...(active.author ? { author: active.author } : {}), ...(active.source ? { source: publicSource(active.source) } : {}), ...(active.decision ? { decision: publicDecisionRun(active.decision) } : {}),
         // A combined turn: the other messages sent with it, in order.
         ...(active.batch && active.batch.length > 1 ? { batch: active.batch.slice(1).flatMap(id => { const r = this.state.runs.find(x => x.id === id); return r ? [{ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}) }] : []; }) } : {}), ...(active.startedAt && this.queueing ? { startedAt: active.startedAt } : {}), ...(active.images?.length ? { images: active.images.length } : {}), ...(active.files?.length ? { files: active.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
       status: 'running', ...queue,
@@ -784,7 +813,7 @@ export class ThreadRuntime {
    * told to the agent), and a turn sent while another of its conversation is
    * running or waiting is queued (status `queued`) instead of refused.
    */
-  async start(owner: string, input: RunInput, author?: RunAuthor, automation?: RunAutomation) {
+  async start(owner: string, input: RunInput, author?: RunAuthor, automation?: RunAutomation, extra: { decision?: RunDecision } = {}) {
     this.authorize(owner);
     if (!input || typeof input !== 'object' || !uuid.test(input.id) || typeof input.text !== 'string' || input.text.length > MAX_INPUT_CHARACTERS || (input.parentRunId !== null && !uuid.test(input.parentRunId)) || (input.images !== undefined && !Array.isArray(input.images))
       || (input.files !== undefined && (!Array.isArray(input.files) || input.files.some(id => typeof id !== 'string' || !uuid.test(id))))) throw new RuntimeFault('invalid_input', 400);
@@ -799,13 +828,13 @@ export class ThreadRuntime {
     const thread = this.thread(owner, input.threadId);
     const previous = this.state.runs.find(r => r.id === input.id);
     if (previous) {
-      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || !sameUploads(previous.uploads, uploadIds) || (!this.queueing && previous.parentRunId !== input.parentRunId) || previous.author?.id !== author?.id || previous.source?.tokenId !== automation?.source.tokenId) throw new RuntimeFault('id_conflict');
+      if (previous.threadId !== input.threadId || previous.input !== input.text || !sameImages(previous.images, imageMetadata) || !sameUploads(previous.uploads, uploadIds) || (!this.queueing && previous.parentRunId !== input.parentRunId) || previous.author?.id !== author?.id || previous.source?.tokenId !== automation?.source.tokenId || previous.decision?.id !== extra.decision?.id) throw new RuntimeFault('id_conflict');
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
     if (this.queueing && author) this.stopTyping(thread.id, author.id);
     if (automation && (automation.replyMode !== undefined && !(['always', 'when-addressed', 'agent-decides'] as string[]).includes(automation.replyMode))) throw new RuntimeFault('invalid_input', 400);
-    if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author, automation);
+    if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author, automation, extra.decision);
     const latest = this.delivered(thread.id).at(-1);
     if (input.parentRunId !== (latest?.id ?? null)) throw new RuntimeFault('history_conflict');
     if (latest && latest.status !== 'completed') throw new RuntimeFault('delivery_uncertain');
@@ -815,7 +844,7 @@ export class ThreadRuntime {
     try { staged = uploadIds.length ? this.uploads!.load(uploadIds) : []; } catch (error) { throw fileFault(error); }
     const lane = this.lane(thread.id);
     return this.exclusive(lane, async () => {
-      const run = await this.launch(lane, thread, { id: input.id, threadId: input.threadId, input: input.text, parentRunId: input.parentRunId, status: 'running', events: [], ...automationFields(automation) }, images, input.images?.map(image => image?.name), staged, uploadIds, imageMetadata);
+      const run = await this.launch(lane, thread, { id: input.id, threadId: input.threadId, input: input.text, parentRunId: input.parentRunId, status: 'running', events: [], ...automationFields(automation), ...(extra.decision ? { decision: extra.decision } : {}) }, images, input.images?.map(image => image?.name), staged, uploadIds, imageMetadata);
       return { id: run.id, status: run.status };
     });
   }
@@ -842,7 +871,7 @@ export class ThreadRuntime {
     this.save();
     return this.state.runs.length < limit;
   }
-  private enqueue(thread: Thread, input: RunInput, images: DecodedImage[], imageMetadata: RunImage[], uploadIds: string[], author?: RunAuthor, automation?: RunAutomation) {
+  private enqueue(thread: Thread, input: RunInput, images: DecodedImage[], imageMetadata: RunImage[], uploadIds: string[], author?: RunAuthor, automation?: RunAutomation, decision?: RunDecision) {
     const latest = this.delivered(thread.id).at(-1);
     // A conversation whose last turn did not finish stays read-only; queued turns behind it are never sent.
     if (latest && latest.status !== 'completed' && latest.status !== 'running') throw new RuntimeFault('delivery_uncertain');
@@ -852,7 +881,7 @@ export class ThreadRuntime {
     try { if (uploadIds.length) this.uploads!.load(uploadIds); } catch (error) { throw fileFault(error); }
     const queuedAt = new Date().toISOString();
     const run: Run = { id: input.id, threadId: thread.id, input: input.text, ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(uploadIds.length ? { uploads: uploadIds } : {}),
-      parentRunId: input.parentRunId, status: 'queued', events: [], queuedAt, ...(author ? { author } : {}), ...automationFields(automation) };
+      parentRunId: input.parentRunId, status: 'queued', events: [], queuedAt, ...(author ? { author } : {}), ...automationFields(automation), ...(decision ? { decision } : {}) };
     this.queued.set(run.id, { images, names: input.images?.map(image => image?.name) ?? [], uploads: uploadIds });
     thread.lastActivityAt = queuedAt;
     this.state.runs.push(run); this.save(); this.changed();
@@ -889,7 +918,8 @@ export class ThreadRuntime {
    */
   private batchOf(thread: Thread, run: Run): Run[] {
     // Automation turns are always sent on their own: they run unattended, with their own reply mode and pre-approvals.
-    const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length && !r.source;
+    // So are decision outcomes: each one is a turn of its own that resumes (or stops) the work.
+    const textOnly = (r: Run) => !r.images?.length && !r.uploads?.length && !r.source && !r.decision;
     if (this.replyMode === undefined || this.memberCount() < 2 || !textOnly(run)) return [run];
     const batch = [run];
     for (const next of this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued' && r !== run)) {
@@ -945,7 +975,8 @@ export class ThreadRuntime {
     // Reply mode of this turn (sessions that can listen): a mention always gets a reply.
     const turn = [run, ...others];
     const replyMode = this.replyMode !== undefined && session.agent.listening ? run.replyModeOverride ?? this.modeOf(thread) : undefined;
-    const addressed = !!this.agentName && turn.some(r => mentionsAgent(r.input, this.agentName!));
+    // A decision's outcome is addressed to the agent: it always replies (resumes the work, or acknowledges the stop).
+    const addressed = !!run.decision || (!!this.agentName && turn.some(r => mentionsAgent(r.input, this.agentName!)));
     Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt, ...(replyMode ? { replyMode } : {}), ...(others.length ? { batch: turn.map(r => r.id) } : {}) });
     // The other messages of a combined turn are sent with it: they follow its state, and its events are the turn's.
     for (const other of others) Object.assign(other, { status: 'running', startedAt, parentRunId: run.id, batchOf: run.id });
@@ -1022,10 +1053,13 @@ export class ThreadRuntime {
         ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
         ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
       // Automation turns are unattended: nothing prompts anyone (see UnattendedPolicy), and they carry their run ID to show their source in history.
+      // What the agent should know about decisions: this turn brings one's outcome, or one is still pending in this conversation.
+      const reminder = run.decision ? decisionOutcomeNote(run.decision.outcome) : this.decisions?.pendingNote(run.threadId);
+      const decision = { ...(reminder ? { reminder } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via } } : {};
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...shared, ...unattended }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared, ...unattended });
+        ? { prompt: content, abortSignal: control.signal, ...shared, ...unattended, ...decision }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared, ...unattended, ...decision });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
@@ -1165,6 +1199,11 @@ export class ThreadRuntime {
     const thread = this.state.threads.find(t => t.id === id && t.owner === owner);
     return thread ? this.summary(thread) : undefined;
   }
+  /** A thread's Letta conversation ID. */
+  conversationOf(owner: string, threadId: string) {
+    this.authorize(owner);
+    return this.state.threads.find(t => t.id === threadId && t.owner === owner)?.conversationId;
+  }
   /** The thread's Letta conversation ID (for tools that schedule work in it). */
   threadOfConversation(owner: string, conversationId: string) {
     this.authorize(owner);
@@ -1179,6 +1218,7 @@ export class ThreadRuntime {
   private closing = false;
   async close() {
     this.closing = true;
+    this.decisions?.close();
     if (this.typingTimer) { clearTimeout(this.typingTimer); this.typingTimer = undefined; }
     for (const lane of this.lanes.values()) lane.active?.control.abort();
     if (this.saveTimer) { try { this.save(); } catch { /* best effort */ } }

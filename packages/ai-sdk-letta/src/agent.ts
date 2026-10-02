@@ -9,6 +9,7 @@ import type { AttachmentStore } from './resources.js';
 import { REPLY_MODES, STAY_SILENT_TOOL, turnNote, type ReplyMode, type TurnSpeaker } from './listening.js';
 import type { TurnActor } from './credentials.js';
 import type { UnattendedPolicy } from './tools.js';
+import { REQUEST_DECISION_TOOL } from './decisions.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -118,14 +119,29 @@ export type LettaCallOptions = {
    * runs, and the agent is told to end the turn. See `UnattendedPolicy`.
    */
   unattended?: UnattendedPolicy;
+  /**
+   * Extra context from the application for this turn only, sent as a short
+   * `<system-reminder>` before the message (display history never shows it).
+   * The server uses it to tell the agent about a pending decision, or that a
+   * message is a decision's outcome. Up to 2,000 characters; markup is removed.
+   */
+  reminder?: string;
 };
 /**
  * The note an unattended turn starts with (display history never shows it).
  * `source` names what started it, for example `n8n`.
  */
-export function unattendedNote(source?: string): string {
+export function unattendedNote(source?: string, options: { decisions?: boolean } = {}): string {
   const from = source ? source.replace(/[\p{Cc}\p{Cf}<>]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
-  return `<system-reminder>\nThis turn was started by an automation${from ? ` (${from})` : ''}, not by a person in the chat, and nobody is watching it live. Do the task and reply with the result; the reply is read later. Nobody can answer questions or approve actions now. If you cannot do the task without an answer, call ask_user anyway: the run then stops and reports that it needed a person. If a tool says approval is required, stop and say which action needs approval.\n</system-reminder>\n`;
+  const ask = options.decisions
+    ? 'If the task needs a choice that is the people\'s to make, call request_decision: the work then waits for their decision in the app and resumes afterwards. If you need some other answer, call ask_user anyway: the run then stops and reports that it needed a person.'
+    : 'If you cannot do the task without an answer, call ask_user anyway: the run then stops and reports that it needed a person.';
+  return `<system-reminder>\nThis turn was started by an automation${from ? ` (${from})` : ''}, not by a person in the chat, and nobody is watching it live. Do the task and reply with the result; the reply is read later. Nobody can answer questions or approve actions now. ${ask} If a tool says approval is required, stop and say which action needs approval.\n</system-reminder>\n`;
+}
+/** The note of {@link LettaCallOptions.reminder}: one `<system-reminder>`, markup and controls removed, at most 2,000 characters. */
+export function reminderNote(text: string): string {
+  const clean = text.replace(/[<>]/g, '').replace(/\r\n?/g, '\n').replace(/[\p{Cf}]|[^\P{Cc}\n]/gu, '').trim().slice(0, 2000);
+  return clean ? `<system-reminder>\n${clean}\n</system-reminder>\n` : '';
 }
 /** Letta-specific result metadata of a turn (`providerMetadata.letta`). `listened`: the agent chose not to reply; `reason` is its private note. */
 export type LettaTurnMetadata = { listened?: boolean; reason?: string };
@@ -391,9 +407,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
     if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
+    if (options.reminder !== undefined && typeof options.reminder !== 'string') throw new Error('Invalid reminder');
     if (options.unattended !== undefined && (!options.unattended || typeof options.unattended !== 'object' || !Array.isArray(options.unattended.preApproved) || options.unattended.preApproved.some(name => typeof name !== 'string'))) throw new Error('Invalid unattended policy');
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
     if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
@@ -421,7 +438,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) throw new Error('Invalid speaker');
     const speakers = options.speakers ?? (options.speaker ? [options.speaker] : []);
     // Without a reply mode or several speakers, exactly the note shared runtimes always sent.
-    const preface = (options.unattended ? unattendedNote(options.unattended.source) : '')
+    const preface = (options.unattended ? unattendedNote(options.unattended.source, { decisions: Object.hasOwn(this.tools, REQUEST_DECISION_TOOL) }) : '')
+      + (options.reminder ? reminderNote(options.reminder) : '')
       + (options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '');
     const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
@@ -442,6 +460,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       const silentCalls = new Map<string, string | undefined>();
       let listened: { reason?: string } | undefined;
       let wrote = false;
+      let requestedDecision = false;
       const tokens = usage();
       let textId = 0;
       let textOpen = false;
@@ -494,6 +513,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             }
             const toolName = calls.get(event.toolCallId);
             if (!toolName) throw new Error('Unmatched tool result');
+            // A turn that requested a decision paused the work: it is never a silent "listened" turn.
+            if (toolName === REQUEST_DECISION_TOOL && !event.isError) requestedDecision = true;
             let result: JSONValue = event.content;
             try { result = JSON.parse(event.content); } catch { /* SDK text output */ }
             emit({ type: 'tool-result', toolCallId: event.toolCallId, toolName, result: result ?? 'null', isError: event.isError });
@@ -506,7 +527,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             endText(); endReasoning(); completed = true;
             // A turn that wrote a reply is a reply, even if the agent also called stay_silent.
             // A turn that may be silent and ended without a word (for example, after only using a tool) was listened to as well.
-            if (!listened && silence && !wrote) listened = {};
+            if (!listened && silence && !wrote && !requestedDecision) listened = {};
+            if (requestedDecision) listened = undefined;
             const letta: LettaTurnMetadata = listened && !wrote ? { listened: true, ...listened } : {};
             emit({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: tokens, ...(letta.listened ? { providerMetadata: { letta } } : {}) });
             return;

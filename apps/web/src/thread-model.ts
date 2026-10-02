@@ -6,7 +6,9 @@ export type ThreadSummary = { id: string; title: string; state: string; archived
   /** Team servers: who started it, the run in progress, and how many messages wait. */
   createdBy?: { id: string; login: string; name: string; avatar?: string }; running?: string; queued?: number;
   /** Team servers: the conversation's reply mode override, the mode in effect now, how many people share the agent, and who is typing. */
-  replyMode?: import('ai-sdk-letta/listening').ReplyModeOverride; replyModeInEffect?: import('ai-sdk-letta/listening').ReplyMode; members?: number; typing?: { id: string; name: string }[] };
+  replyMode?: import('ai-sdk-letta/listening').ReplyModeOverride; replyModeInEffect?: import('ai-sdk-letta/listening').ReplyMode; members?: number; typing?: { id: string; name: string }[];
+  /** A decision the agent asked for waits in this conversation (its ID). */
+  pendingDecision?: string };
 export const DEFAULT_TITLE = 'New conversation';
 export const TITLE_LIMIT = 120;
 const hidden = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;

@@ -9,6 +9,7 @@ import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
 import type { Listened, MessageAuthor as Author, MessageSource } from './messages.js';
 import { sourceLabel } from './automations-model.js';
+import { DecisionLine, OutcomeMessage } from './decisions.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -56,6 +57,9 @@ export function Message() {
   const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
   const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text.trim()));
   const listened = useAuiState(s => (s.message.metadata.custom as { listened?: Listened } | undefined)?.listened);
+  const outcome = useAuiState(s => !!(s.message.metadata.custom as { decision?: unknown } | undefined)?.decision);
+  // A decision's outcome reached the agent here: one compact line, not a message bubble.
+  if (role === 'user' && outcome) return <MessagePrimitive.Root className="msg decision-outcome-msg" data-role={role}><OutcomeMessage/></MessagePrimitive.Root>;
   if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} time={time}/></MessagePrimitive.Root>;
   return <MessagePrimitive.Root className="msg" data-role={role}>
     <MessageAuthor role={role}/>
@@ -96,7 +100,7 @@ function UserBubble() {
 }
 
 /** Questions stay ungrouped so they read as part of the conversation. */
-const groupTools = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [] });
+const groupTools = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [] });
 
 function AssistantParts() {
   return <MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
@@ -152,6 +156,7 @@ function phaseOf(result: unknown, isError?: boolean): ToolPhase { return result 
 
 function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'ask_user') return <QuestionLine {...props}/>;
+  if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
   return <ToolLine {...props}/>;
 }
 

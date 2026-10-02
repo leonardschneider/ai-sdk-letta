@@ -11,6 +11,7 @@ import { listNavigationEntries, type NavigationSource } from './navigation.js';
 import { ToolInteractions } from './interactions.js';
 import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge, type UnattendedPolicy } from './tools.js';
 import { SCHEDULER_CONTEXT, schedulingEnabled, type TaskScheduler } from './scheduling.js';
+import { DECISIONS_CONTEXT, decisionsEnabled, type DecisionDesk } from './decisions.js';
 import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
@@ -69,6 +70,11 @@ export interface OpenAgentOptions {
    * `scheduler_unavailable`.
    */
   scheduler?: TaskScheduler;
+  /**
+   * Where `request_decision` records decisions (the server passes one). Without
+   * it the decision tools answer `decisions_unavailable`.
+   */
+  decisions?: DecisionDesk;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -173,7 +179,7 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -301,6 +307,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         let turnUnattended: UnattendedPolicy | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
+        // The running turn requested a decision: the rest of its tool calls are refused (the work is paused).
+        let turnPaused = false;
         // Resources: every file of the agent in one git-backed folder, one folder
         // per conversation. The current conversation is bound here (never from
         // tool arguments); tools may read other conversations' folders too.
@@ -321,8 +329,12 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}),
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
         const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
+        const desk = options.decisions && decisionsEnabled(definition) ? options.decisions : undefined;
+        // A requested decision pauses the work: the turn must end with a reply (never a silent "listened"), and no further tools run.
+        const requested = () => { turnPaused = true; turnSilence = false; };
         const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
-          ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
+          ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
+          ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;
@@ -336,6 +348,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           unattended: () => turnUnattended,
+          paused: () => turnPaused,
           context: toolContext,
           sandbox: () => shell?.session,
         });
@@ -374,8 +387,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         agent = new LettaAgent<TOOLS>({
           id: definition.id, tools: definition.tools, memoryTools: INTERNAL_MEMORY_TOOLS, lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; } } };
+            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
