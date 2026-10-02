@@ -700,8 +700,9 @@ body[data-resizing] iframe { pointer-events: none; }
   .adf-view { padding: 4px 12px 24px; }
   .adf-source { padding: 8px 12px; }
   .modal.members, .modal.automations { max-height: 92dvh; }
-  .token-row { flex-wrap: wrap; }
-  .token-row .member-text { flex-basis: calc(100% - 90px); }
+  .token-row { gap: 8px; }
+  .token-row .btn.ghost { padding: 5px 8px; }
+  .token-row .member-login { white-space: normal; }
   .member-add .btn { flex: 1; justify-content: center; }
   .queue-list { max-height: 96px; }
   .preview-markdown { padding: 14px 16px 20px; }
