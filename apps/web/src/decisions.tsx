@@ -76,7 +76,7 @@ export function DecisionBell({ decisions, showAgent, me, onOpen }: { decisions: 
               <span className="bell-item-body">
                 <span className="bell-item-question">{decision.question}</span>
                 <span className="bell-item-where">{showAgent ? `${decision.agent.name} · ` : ''}{decision.thread.title}</span>
-                <span className="bell-item-meta">Asked by {askedBy(decision, me)} · {ago(decision.createdAt)}</span>
+                <span className="bell-item-meta">{askedBy(decision, me)} · {ago(decision.createdAt)}</span>
               </span>
               <ChevronRight size={14} className="bell-item-chev" aria-hidden="true"/>
             </button>
@@ -163,7 +163,7 @@ export function DecisionCard({ decision }: { decision: DecisionView }) {
     finally { setBusy(false); }
   };
   return <section className="card decision-card" id={`decision-${decision.id}`} aria-label={`Decision needed: ${decision.question}`} aria-busy={busy || undefined}>
-    <header className="card-head"><Signpost size={16} aria-hidden="true"/><span>Decision needed</span><span className="decision-asked">Asked by {askedBy(decision)} · {ago(decision.createdAt)}</span></header>
+    <header className="card-head"><Signpost size={16} aria-hidden="true"/><span>Decision needed</span><span className="decision-asked">{askedBy(decision)} · {ago(decision.createdAt)}</span></header>
     <h2 className="card-title">{decision.question}</h2>
     {decision.context && <p className="card-details decision-context">{decision.context}</p>}
     <div className="options" role="radiogroup" aria-label="Options">
@@ -218,22 +218,25 @@ export function OutcomeMessage() {
  * its card is out of view: one line that brings you to it.
  */
 export function PendingDecisionBar({ decision }: { decision?: DecisionView }) {
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(true);
+  const id = decision?.id;
   useEffect(() => {
-    setHidden(false);
-    if (!decision) return;
-    let observer: IntersectionObserver | undefined;
-    const attach = () => {
-      const card = document.getElementById(`decision-${decision.id}`);
-      if (!card) return false;
-      observer = new IntersectionObserver(([entry]) => setHidden(!!entry?.isIntersecting), { threshold: 0.25 });
-      observer.observe(card);
-      return true;
+    if (!id) return;
+    // The card's node is replaced when history reloads: look it up each time instead of observing one node.
+    const check = () => {
+      const card = document.getElementById(`decision-${id}`);
+      const viewport = card?.closest('.viewport') ?? document.querySelector('.viewport');
+      if (!card || !viewport) { setHidden(false); return; }
+      const a = card.getBoundingClientRect(), b = viewport.getBoundingClientRect();
+      const visible = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      setHidden(visible >= Math.min(120, a.height * 0.25));
     };
-    // The card may render after this bar (history loads first): look again shortly.
-    const timer = attach() ? undefined : setInterval(() => { if (attach()) clearInterval(timer); }, 400);
-    return () => { observer?.disconnect(); if (timer) clearInterval(timer); };
-  }, [decision]);
+    check();
+    const timer = setInterval(check, 700);
+    document.addEventListener('scroll', check, true);
+    window.addEventListener('resize', check);
+    return () => { clearInterval(timer); document.removeEventListener('scroll', check, true); window.removeEventListener('resize', check); };
+  }, [id]);
   if (!decision || hidden) return null;
   const show = () => {
     const card = document.getElementById(`decision-${decision.id}`);

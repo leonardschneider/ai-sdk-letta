@@ -1,6 +1,6 @@
 import type { IDataObject, IExecuteFunctions, IHttpRequestMethods, INodeExecutionData, INodeType, INodeTypeDescription } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
-import { ongoing, runFailure, type AutomationDecision, type AutomationRun } from './run';
+import { asksDecision, ongoing, runFailure, type AutomationDecision, type AutomationRun } from './run';
 
 /** Longest single request the node makes while waiting (the server answers sooner when the run ends). */
 const POLL_SECONDS = 50;
@@ -222,8 +222,10 @@ export class AiSdkLetta implements INodeType {
 		 */
 		const throughDecisions = async (run: AutomationRun & IDataObject, until: number) => {
 			let current = run;
-			for (let hops = 0; current.status === 'decision_pending' && current.decision && hops < 20; hops++) {
-				const decision = await decisionUntil(current.decision.id, until);
+			// A run that asked for a decision leads on, also when someone decided before we looked (its status is then completed).
+			for (let hops = 0; asksDecision(current) && hops < 20; hops++) {
+				const decision = await decisionUntil(current.decision!.id, until);
+				if (decision.status === 'cancelled') break;
 				if (decision.status === 'pending' || !decision.resume?.runId) return { run: { ...current, decision } as AutomationRun & IDataObject, waiting: decision };
 				current = await waitUntil(await request('GET', `/v1/automation/runs/${encodeURIComponent(decision.resume.runId)}`), until);
 				current = { ...current, decided: decision } as AutomationRun & IDataObject;
@@ -252,7 +254,7 @@ export class AiSdkLetta implements INodeType {
 					if (operation === 'run') {
 						const until = Date.now() + (this.getNodeParameter('waitSeconds', itemIndex) as number) * 1000;
 						run = await waitUntil(run, until);
-						if (run.status === 'decision_pending' && (options as { waitDecisions?: boolean }).waitDecisions) {
+						if (asksDecision(run) && (options as { waitDecisions?: boolean }).waitDecisions) {
 							const through = await throughDecisions(run, until);
 							run = through.run;
 							if (through.waiting) throw new NodeOperationError(this.getNode(), `Nobody has decided “${through.waiting.question}” yet (timeout). The decision stays open; wait for it later with "Wait for Decision" and ID ${through.waiting.id}.`, { itemIndex, description: 'timeout' });
@@ -271,7 +273,7 @@ export class AiSdkLetta implements INodeType {
 					if (decision.status === 'pending') throw new NodeOperationError(this.getNode(), `Nobody has decided “${decision.question}” yet (timeout). The decision stays open.`, { itemIndex, description: 'timeout' });
 					if (!this.getNodeParameter('followRun', itemIndex, true) || !decision.resume?.runId) { output.push({ json: decision, pairedItem: { item: itemIndex } }); continue; }
 					const resumed = await waitUntil(await request('GET', `/v1/automation/runs/${encodeURIComponent(decision.resume.runId)}`), until);
-					const through = resumed.status === 'decision_pending' ? await throughDecisions(resumed, until) : { run: resumed, waiting: undefined };
+					const through = asksDecision(resumed) ? await throughDecisions(resumed, until) : { run: resumed, waiting: undefined };
 					run = { ...through.run, decided: decision } as AutomationRun & IDataObject;
 					if (through.waiting) throw new NodeOperationError(this.getNode(), `The resumed work asked another decision, “${through.waiting.question}”, and nobody has decided it yet (timeout).`, { itemIndex, description: 'timeout' });
 					if (ongoing(run)) throw new NodeOperationError(this.getNode(), `The resumed run is still ${run.status} (timeout). Get it later with its ID ${run.id}.`, { itemIndex, description: 'timeout' });

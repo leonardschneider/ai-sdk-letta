@@ -51,8 +51,12 @@ export async function turnStep(api: TurnApi, input: TurnInput): Promise<TurnResu
     return { status: reply.status === 429 || reply.status >= 500 ? 'FAILED' : 'FAILED_WITH_TERMINAL_ERROR', reasonForIncompletion: code, outputData: {} };
   }
   if (run.status === 'queued' || run.status === 'running') return { status: 'IN_PROGRESS', callbackAfterSeconds: 1, outputData: { runId: run.id, status: run.status } };
-  const asked = (reply.body as { decision?: { id?: string } }).decision;
-  if (run.status === 'decision_pending' && asked?.id) return { status: 'IN_PROGRESS', callbackAfterSeconds: DECISION_CALLBACK_SECONDS, outputData: { runId: run.id, decisionId: asked.id, status: 'decision_pending', decision: asked } };
+  // A run that asked for a decision leads on: while it is pending, and also when someone decided before this step looked (its status is then completed).
+  const asked = (reply.body as { decision?: { id?: string; status?: string } }).decision;
+  if (asked?.id && asked.status !== 'cancelled' && (run.status === 'decision_pending' || run.status === 'completed')) {
+    if (asked.status === 'pending') return { status: 'IN_PROGRESS', callbackAfterSeconds: DECISION_CALLBACK_SECONDS, outputData: { runId: run.id, decisionId: asked.id, status: 'decision_pending', decision: asked } };
+    return turnStep(api, { workflowId: input.workflowId, text: input.text, ...(input.title ? { title: input.title } : {}), runId: run.id, decisionId: asked.id });
+  }
   if (run.status === 'completed') return { status: 'COMPLETED', outputData: reply.body };
   const code = run.error?.code ?? run.status ?? 'failed';
   return { status: 'FAILED_WITH_TERMINAL_ERROR', reasonForIncompletion: `${code}: ${run.error?.message ?? ''}`.trim(), outputData: reply.body };

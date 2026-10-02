@@ -39,9 +39,11 @@ test('settled decisions read as one line: who decided what, or why it closed', (
 });
 
 test('who asked: a person, or the automation that started the work', () => {
-  assert.equal(askedBy(base), 'Olivia Owner');
-  assert.equal(askedBy(base, { id: 'u-o', name: 'Olivia Owner' }), 'you');
-  assert.equal(askedBy({ requestedBy: { name: 'Weekly report', via: 'n8n', automation: 'Weekly report' } }), 'via n8n · Weekly report');
+  assert.equal(askedBy(base), 'Asked by Olivia Owner');
+  assert.equal(askedBy(base, { id: 'u-o', name: 'Olivia Owner' }), 'Asked by you');
+  assert.equal(askedBy({ requestedBy: { name: 'You' } }), 'Asked by you', 'single-user app');
+  assert.equal(askedBy({ requestedBy: { name: 'Weekly report', via: 'n8n', automation: 'Weekly report' } }), 'From n8n · Weekly report');
+  assert.equal(askedBy({ requestedBy: { name: 'Script', via: 'api', automation: 'Script' } }), 'From the API · Script');
 });
 
 test('a late decider is told who was faster', () => {

@@ -53,7 +53,9 @@
           "inputParameters": {
             "uri": "${workflow.input.serverUrl}/v1/automation/runs/${start.output.response.body.id}?wait=110",
             "method": "GET",
-            "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+            "headers": {
+              "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
+            },
             "accept": "application/json",
             "connectionTimeOut": 5000,
             "readTimeOut": 125000
@@ -65,10 +67,11 @@
       "name": "route_first_run",
       "taskReferenceName": "first",
       "type": "SWITCH",
-      "evaluatorType": "value-param",
-      "expression": "status",
+      "evaluatorType": "javascript",
+      "expression": "(function(){ var d = $.decision; if (d && d.id && d.status !== 'cancelled' && ($.status === 'decision_pending' || $.status === 'completed')) return 'decision'; return $.status; })();",
       "inputParameters": {
-        "status": "${check_ref.output.response.body.status}"
+        "status": "${check_ref.output.response.body.status}",
+        "decision": "${check_ref.output.response.body.decision}"
       },
       "decisionCases": {
         "completed": [
@@ -86,13 +89,15 @@
             }
           }
         ],
-        "decision_pending": [
+        "decision": [
           {
             "name": "wait_for_decision",
             "taskReferenceName": "decide",
             "type": "DO_WHILE",
             "description": "Until someone decided in the app (each request held up to 110 s; about 3 days at most).",
-            "inputParameters": { "keepLastN": 2 },
+            "inputParameters": {
+              "keepLastN": 2
+            },
             "loopCondition": "(function(){ var s = $.decision_ref && $.decision_ref.response ? $.decision_ref.response.body.status : 'pending'; return s === 'pending' && $.decide.iteration < 2300; })();",
             "loopOver": [
               {
@@ -102,7 +107,9 @@
                 "inputParameters": {
                   "uri": "${workflow.input.serverUrl}/v1/automation/decisions/${check_ref.output.response.body.decision.id}?wait=110",
                   "method": "GET",
-                  "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+                  "headers": {
+                    "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
+                  },
                   "accept": "application/json",
                   "connectionTimeOut": 5000,
                   "readTimeOut": 125000
@@ -115,7 +122,9 @@
             "taskReferenceName": "resumed",
             "type": "DO_WHILE",
             "description": "The run that resumed (or stopped) the work, until it ended.",
-            "inputParameters": { "keepLastN": 2 },
+            "inputParameters": {
+              "keepLastN": 2
+            },
             "loopCondition": "(function(){ var s = $.resumed_ref && $.resumed_ref.response ? $.resumed_ref.response.body.status : 'queued'; return (s === 'queued' || s === 'running') && $.resumed.iteration < 15; })();",
             "loopOver": [
               {
@@ -125,7 +134,9 @@
                 "inputParameters": {
                   "uri": "${workflow.input.serverUrl}/v1/automation/runs/${decision_ref.output.response.body.resume.runId}?wait=110",
                   "method": "GET",
-                  "headers": { "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}" },
+                  "headers": {
+                    "Authorization": "Bearer ${workflow.secrets.AI_SDK_LETTA_TOKEN}"
+                  },
                   "accept": "application/json",
                   "connectionTimeOut": 5000,
                   "readTimeOut": 125000
@@ -164,7 +175,8 @@
             }
           }
         }
-      ]
+      ],
+      "description": "A run that asked for a decision goes on through it, also when someone decided before the poll looked (the run's own status is then completed)."
     }
   ]
 }

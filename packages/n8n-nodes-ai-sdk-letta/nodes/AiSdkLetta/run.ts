@@ -45,3 +45,11 @@ export function runFailure(run: AutomationRun): { code: string; message: string;
 
 /** Is the run still going (queued or running)? */
 export const ongoing = (run: Pick<AutomationRun, 'status'>) => run.status === 'queued' || run.status === 'running';
+
+/**
+ * Does the run lead on to another run through a decision it asked for? True
+ * while the decision is pending (`decision_pending`), and also once someone
+ * decided: the run's own status is then `completed`, and the work went on in
+ * `decision.resume.runId`. False for a withdrawn or replaced decision.
+ */
+export const asksDecision = (run: Pick<AutomationRun, 'status' | 'decision'>) => !!run.decision && run.decision.status !== 'cancelled' && (run.status === 'decision_pending' || run.status === 'completed');

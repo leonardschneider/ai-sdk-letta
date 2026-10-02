@@ -610,6 +610,8 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       const data = await response.json().catch(() => ({})) as DecisionView & { error?: string; decision?: DecisionView };
       const settled = response.ok ? data : data.decision;
       if (settled) setThreadDecisions(map => new Map(map).set(settled.id, settled));
+      // Someone else decided first: their outcome turn is on its way; show it.
+      if (!response.ok && data.decision) void refreshView().catch(() => {});
       if (!response.ok) throw new Error(decideError(data.error ?? `http_${response.status}`, data.decision, team?.user.id));
       // The work resumes in a new turn of this conversation: show it as it starts.
       void refreshView().catch(() => {});

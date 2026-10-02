@@ -58,11 +58,12 @@ export function outcomeSummary(outcome: Pick<DecisionOutcome, 'outcome' | 'by' |
   const who = personName(outcome.by, me);
   return outcome.outcome === 'stopped' ? `${capital(who)} stopped this work` : `Decided by ${who}: ${outcome.choice?.label ?? 'an option'}`;
 }
-/** Who asked, for the card and the bell: "Olivia", "via n8n · Weekly report". */
+/** Who asked, for the card and the bell: "Asked by Olivia", "Asked by you", "From n8n · Weekly report". */
 export function askedBy(decision: Pick<DecisionView, 'requestedBy'>, me?: { id: string; name: string }): string {
   const { name, via, automation } = decision.requestedBy;
-  if (via) return `via ${via === 'conductor' ? 'Conductor' : via === 'n8n' ? 'n8n' : 'API'}${automation ? ` · ${automation}` : ''}`;
-  return me && name === me.name ? 'you' : name;
+  if (via) return `From ${via === 'conductor' ? 'Conductor' : via === 'n8n' ? 'n8n' : 'the API'}${automation ? ` · ${automation}` : ''}`;
+  // The single-user app's person is recorded as "You".
+  return `Asked by ${(me && name === me.name) || (!me && name === 'You') ? 'you' : name}`;
 }
 /** The bell's label: "Decisions", "1 decision waiting", "3 decisions waiting". */
 export function bellLabel(count: number): string {

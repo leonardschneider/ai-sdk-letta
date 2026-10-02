@@ -135,3 +135,19 @@ test('Wait for Decision: returns the resumed run, the decision alone, a stopped 
 	const description = new AiSdkLetta().description;
 	assert.ok(description.properties.find(p => p.name === 'operation')!.options!.some(o => (o as { value: string }).value === 'decision'));
 });
+
+test('a decision made before the node looked: the run reads completed with a decided decision, and the node still follows the resumed run', async () => {
+	const decided = { id: 'd-1', status: 'decided', question: 'Which cuisine?', options: [], conversation: { id: 'thread-1' }, decidedBy: { name: 'Leonard' }, choice: { id: 'thai', label: 'Thai' }, resume: { runId: 'run-2', state: 'delivered' } };
+	const { self, requests } = context({ operation: 'run', text: 'Lunch', conversation: 'new', title: '', idempotencyKey: 'k', waitSeconds: 600, options: { waitDecisions: true } }, [
+		() => run({ status: 'queued' }),
+		() => run({ status: 'completed', text: 'Which cuisine?', decision: decided as never }),
+		() => decided,
+		() => run({ id: 'run-2', status: 'completed', text: 'Thai at noon.', resumes: { decisionId: 'd-1', outcome: 'decided' } }),
+	]);
+	const [items] = await new AiSdkLetta().execute.call(self as never);
+	assert.equal(items![0]!.json.id, 'run-2'); assert.equal(items![0]!.json.text, 'Thai at noon.');
+	assert.equal(requests.length, 4);
+	// Without the option, the first run is returned as it is.
+	const plain = context({ operation: 'run', text: 'Lunch', conversation: 'new', title: '', idempotencyKey: 'k', waitSeconds: 600, options: {} }, [() => run({ status: 'completed', text: 'Which cuisine?', decision: decided as never })]);
+	assert.equal((await new AiSdkLetta().execute.call(plain.self as never))[0]![0]!.json.id, 'run-1');
+});
