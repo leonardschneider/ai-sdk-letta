@@ -1,12 +1,26 @@
 import { AttachmentError, fileMessage, type FileInfo } from './attachments.js';
-/** Same-origin JSON client. The CSRF token lives in memory only; the session is an HttpOnly cookie. */
+/** Same-origin JSON client. The CSRF token lives in memory only; the session is an HttpOnly cookie (single-user) or Tailscale (team). */
 let csrf = '';
 export function setCsrf(value: string) { csrf = value; }
+/**
+ * Where the agent's API lives: `/api` for the single-user app, and
+ * `/api/agents/<id>` for the agent selected in a team server.
+ */
+let base = '/api';
+export function setAgentBase(agentId: string | undefined) { base = agentId ? `/api/agents/${encodeURIComponent(agentId)}` : '/api'; }
+/** The URL of an agent API path (`/v1/...`), for links and fetches outside {@link api}. */
+export const apiPath = (path: string) => `${base}${path}`;
+/** JSON call to a server path outside the agent (`/api/session`, members). */
+export async function serverApi<T>(path: string, body?: unknown, method = 'POST'): Promise<T> { return request<T>(`/api${path}`, body, method); }
 export class ApiError extends Error {
   constructor(readonly code: string, readonly status: number) { super(code); }
 }
 export async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
-  const response = await fetch(`/api${path}`, { credentials: 'same-origin', ...(body !== undefined ? { method, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) } : {}) });
+  // '/session' is the server's, not the agent's.
+  return request<T>(path === '/session' ? '/api/session' : apiPath(path), body, method);
+}
+async function request<T>(url: string, body?: unknown, method = 'POST'): Promise<T> {
+  const response = await fetch(url, { credentials: 'same-origin', ...(body !== undefined ? { method, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) } : {}) });
   let data: { error?: string } | undefined;
   try { data = await response.json(); } catch { data = undefined; }
   if (!response.ok) throw new ApiError(data?.error ?? `http_${response.status}`, response.status);
@@ -18,6 +32,7 @@ export function metadataError(error: unknown): string {
   const code = errorCode(error);
   if (code === 'runtime_busy') return 'Stop or finish the current reply first. Nothing was changed.';
   if (['session_required', 'invalid_csrf', 'csrf_required'].includes(code)) return 'The local server restarted. Refresh the page; nothing was changed.';
+  if (code === 'not_found') return 'You no longer have access to this agent, or the conversation is gone. Nothing was changed.';
   if (code === 'invalid_input') return 'Titles need 1–120 visible characters. Nothing was changed.';
   return 'Couldn’t save that change. Nothing was changed.';
 }
@@ -29,7 +44,7 @@ export function metadataError(error: unknown): string {
 export async function uploadFile(file: File, signal?: AbortSignal): Promise<FileInfo> {
   let response: Response;
   try {
-    response = await fetch('/api/v1/uploads', { method: 'POST', credentials: 'same-origin', signal, body: file,
+    response = await fetch(apiPath('/v1/uploads'), { method: 'POST', credentials: 'same-origin', signal, body: file,
       headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf, 'X-File-Name': encodeURIComponent(file.name || 'file') } });
   } catch { throw new AttachmentError('Couldn’t upload that file. Check that the local server is running.'); }
   let data: { error?: string } & Partial<FileInfo> = {};
@@ -42,7 +57,7 @@ export async function uploadFile(file: File, signal?: AbortSignal): Promise<File
 export async function uploadResource(folder: string, file: File): Promise<{ path: string }> {
   let response: Response;
   try {
-    response = await fetch(`/api/v1/resources/upload?folder=${encodeURIComponent(folder)}`, { method: 'POST', credentials: 'same-origin', body: file,
+    response = await fetch(apiPath(`/v1/resources/upload?folder=${encodeURIComponent(folder)}`), { method: 'POST', credentials: 'same-origin', body: file,
       headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf, 'X-File-Name': encodeURIComponent(file.name || 'file') } });
   } catch { throw new ApiError('network', 0); }
   let data: { error?: string; path?: string } = {};
@@ -50,3 +65,16 @@ export async function uploadResource(folder: string, file: File): Promise<{ path
   if (!response.ok) throw new ApiError(data.error ?? (response.status === 413 ? 'payload_too_large' : `http_${response.status}`), response.status);
   return data as { path: string };
 }
+
+/** A person as the team server shows them. */
+export type Person = { id?: string; login: string; name: string; avatar?: string };
+/** An agent as the browser knows it (team servers add the viewer's role). */
+export type AgentInfo = { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member' };
+/** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */
+export type Session =
+  | { mode?: undefined; csrf: string; agent: AgentInfo; versions?: import('./versions.js').Versions }
+  | { mode: 'team'; csrf?: string; user: Person; agents: AgentInfo[]; versions?: import('./versions.js').Versions };
+/** A member of an agent (`GET /api/agents/<id>/members`). */
+export type Member = Person & { id: string; role: 'admin' | 'member'; pending: boolean; you?: boolean };
+
+export { uuid } from './uuid.js';

@@ -101,10 +101,16 @@ function imagePart(item: Row, budget: { left: number }): UIMessage['parts'][numb
   return { type: 'text', text: IMAGE_PLACEHOLDER };
 }
 
-/** Display-only message time from the backend record, when it is a valid date. */
-function timestamp(row: Row): { metadata?: { createdAt: string } } {
+/**
+ * Display-only metadata from the backend record: its time, when it is a valid
+ * date, and for user messages the OTID the turn was sent with (see
+ * `LettaCallOptions`), so an application can match the turn to its own records.
+ */
+function timestamp(row: Row, user = false): { metadata?: { createdAt?: string; otid?: string } } {
   const time = typeof row.date === 'string' ? Date.parse(row.date) : NaN;
-  return Number.isFinite(time) ? { metadata: { createdAt: new Date(time).toISOString() } } : {};
+  const otid = user && typeof row.otid === 'string' && /^[A-Za-z0-9._:-]{1,100}$/.test(row.otid) ? row.otid : undefined;
+  if (!Number.isFinite(time) && !otid) return {};
+  return { metadata: { ...(Number.isFinite(time) ? { createdAt: new Date(time).toISOString() } : {}), ...(otid ? { otid } : {}) } };
 }
 
 /** Display projection only. Never reconstruct the model's context from this.
@@ -136,7 +142,7 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
       const role = row.message_type === 'user_message' ? 'user' : 'assistant';
       const text = textContent(row.content, role === 'user');
       const attached = role === 'user' ? images.get(message.id) ?? [] : [];
-      if (text || attached.length) projected.push({ id: `history-${message.id}`, role, parts: [...(text ? [{ type: 'text' as const, text }] : []), ...attached], ...timestamp(row) });
+      if (text || attached.length) projected.push({ id: `history-${message.id}`, role, parts: [...(text ? [{ type: 'text' as const, text }] : []), ...attached], ...timestamp(row, role === 'user') });
     } else if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
       const call = record(row.tool_call);
       const id = call?.tool_call_id;

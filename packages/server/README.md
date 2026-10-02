@@ -14,6 +14,16 @@ npm install @ai-sdk-letta/server ai-sdk-letta ai
   (session cookie, CSRF, Origin and Host checks, strict CSP).
 - `startApiServer(definition, options)`: the same routes behind a 256-bit
   bearer token and owner header, for server-to-server use.
+- `startTeamServer(definitions, assetsDir, { owners, origins, port })`:
+  several agents for a team behind `tailscale serve`. Identity from
+  Tailscale's headers (trusted on loopback only), per-agent members and
+  admins (`TeamDirectory`, `<state>/team/team.json`), conversations in
+  parallel, a visible queue per conversation, and authors on every turn.
+  Agent routes live under `/api/agents/<id>/...` and answer 404 to
+  non-members; members are managed at `/api/agents/<id>/members` (admins
+  only for changes); answering or stopping a turn needs its author or an
+  admin (`not_your_turn`, 403). `GET /v1/changes?since=N` long-polls for
+  changes made by others. `ThreadRuntime` takes `{ queue, parallel }` for this.
 
 Routes (under `/api` for the GUI): `GET /v1/capabilities`, `GET|POST /v1/threads`,
 `PATCH /v1/threads/:id`, `GET /v1/threads/:id/history`, `GET /v1/threads/:id/view`,

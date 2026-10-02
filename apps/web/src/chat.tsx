@@ -6,12 +6,20 @@ import { COMMAND_TOOLS, answerLine, commandOutput, commandStatus, describeArgume
 import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
+import { Avatar } from './team.js';
+import type { MessageAuthor as Author } from './messages.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
 /* ------------------------------------------------------------------ */
 
-export type InteractionState = { request?: InteractionRequest; outcome?: string; sent?: InteractionResponse; approvalTools: ReadonlySet<string>; answer(value: InteractionResponse): Promise<void> };
+/**
+ * `waitingFor` (team servers): the request belongs to someone else's turn and
+ * you are not an admin, so you see it but cannot answer; it names who can.
+ */
+export type InteractionState = { request?: InteractionRequest; outcome?: string; sent?: InteractionResponse; approvalTools: ReadonlySet<string>; answer(value: InteractionResponse): Promise<void>; waitingFor?: string };
+/** The signed-in person's user ID on a team server (their own messages say "You"). */
+export const AuthorContext = createContext<string | undefined>(undefined);
 export const InteractionContext = createContext<InteractionState>({ approvalTools: new Set(), answer: async () => {} });
 /** Outcomes that mean the answer was delivered; the dock then collapses into the inline line. */
 export const deliveredOutcome = (outcome?: string) => !!outcome && outcome.startsWith('Response received');
@@ -28,11 +36,16 @@ function formatTime(value: string) {
   return date.toDateString() === today.toDateString() ? timeFormat.format(date) : fullFormat.format(date);
 }
 
-/**
- * Author slot. Single-user today, so nothing is rendered; a multi-user build can
- * return a name from message metadata here without restructuring the layout.
- */
-function MessageAuthor(_: { role: string }) { return null; }
+/** Who wrote a user turn, on a team server: avatar and name above the bubble ("You" for your own). Nothing in the single-user app. */
+function MessageAuthor({ role }: { role: string }) {
+  const author = useAuiState(s => (s.message.metadata.custom as { author?: Author } | undefined)?.author);
+  const me = useContext(AuthorContext);
+  if (role !== 'user' || !author) return null;
+  const mine = author.id === me;
+  return <div className="msg-author" data-mine={mine || undefined} title={author.login}>
+    <span className="msg-author-name">{mine ? 'You' : author.name}</span><Avatar person={author} size={20}/>
+  </div>;
+}
 
 export function Message() {
   const role = useAuiState(s => s.message.role);
@@ -179,7 +192,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
   const denied = phase === 'error' && ['user_denied', 'approval_cancelled'].includes(failureReason(result) ?? '');
   const decided = pendingApproval && active.sent?.id === active.request?.id ? active.sent : undefined;
   const label = pendingApproval
-    ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : `Waiting for your permission: ${friendlyName(toolName)}`
+    ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : active.waitingFor ? `Waiting for ${active.waitingFor} to allow: ${friendlyName(toolName)}` : `Waiting for your permission: ${friendlyName(toolName)}`
     : toolLabel(toolName, phase, result, args);
   const shell = COMMAND_TOOLS.has(toolName) && typeof args.command === 'string';
   const summary = phase === 'done' && !shell ? toolSummary(toolName, result, args) : { fields: [] };
@@ -192,7 +205,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
       {phase === 'done' && summary.metrics && <span className="line-meta">{metricsLine(summary.metrics)}</span>}
       {status && <span className="line-meta">{status}</span>}</>}>
     <div data-tool-call-id={toolCallId} className="tool-detail">
-      {phase === 'running' && <p className="muted">{decided ? 'Your decision was sent. Waiting for the agent…' : pendingApproval ? 'Waiting for you to allow or deny this below.' : shell ? 'Running in the sandbox…' : 'Working on it…'}</p>}
+      {phase === 'running' && <p className="muted">{decided ? 'Your decision was sent. Waiting for the agent…' : pendingApproval ? active.waitingFor ? `Only ${active.waitingFor} or an admin can allow or deny this.` : 'Waiting for you to allow or deny this below.' : shell ? 'Running in the sandbox…' : 'Working on it…'}</p>}
       {phase === 'error' && <p className="muted">{failureText(result)}</p>}
       {shell && <CommandDetail toolName={toolName} args={args} result={result} phase={phase}/>}
       {summary.metrics && <dl className="metrics">{summary.metrics.map(m => <div key={m.label}><dt>{m.label}</dt><dd>{m.value}</dd></div>)}</dl>}
@@ -232,7 +245,7 @@ function QuestionLine({ toolCallId, toolName, argsText, result, isError }: ToolP
     return <div className="line question-line" data-tone="pending" data-tool-call-id={toolCallId} data-conversation-part="question-pending">
       <span className="line-summary static"><MessageCircleQuestion size={14} className="line-icon" aria-hidden="true"/>
         <span className="line-label">{sent ? 'Answer sent · waiting for the agent…' : `Asked: ${question}`}</span>
-        {mine && !sent && !active.outcome && <span className="line-meta">Answer below</span>}
+        {mine && !sent && !active.outcome && <span className="line-meta">{active.waitingFor ? `Waiting for ${active.waitingFor}` : 'Answer below'}</span>}
       </span>
     </div>;
   }
@@ -258,9 +271,17 @@ function QuestionLine({ toolCallId, toolName, argsText, result, isError }: ToolP
 const editable = (el: Element | null) => !!el && (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['checkbox', 'radio', 'button'].includes(el.type)) || (el as HTMLElement).isContentEditable);
 
 export function InteractionDock({ onDismiss }: { onDismiss(): void }) {
-  const { request, outcome, answer } = useContext(InteractionContext);
+  const { request, outcome, answer, waitingFor } = useContext(InteractionContext);
   if (!request) return null;
   if (deliveredOutcome(outcome)) return null;
+  // Someone else's turn: say who can answer, without controls.
+  if (waitingFor && !outcome) return <div className="dock" data-kind={request.kind}>
+    <section className="card waiting-card" aria-label={request.kind === 'approval' ? 'Permission requested' : 'Question asked'}>
+      <header className="card-head">{request.kind === 'approval' ? <ShieldAlert size={16} aria-hidden="true"/> : <MessageCircleQuestion size={16} aria-hidden="true"/>}<span>{request.kind === 'approval' ? 'Permission requested' : 'Question asked'}</span></header>
+      <h2 className="card-title">{request.kind === 'approval' ? <>Wants to run {friendlyName(request.tool)}</> : request.title}</h2>
+      <p className="card-details">Waiting for {waitingFor} to {request.kind === 'approval' ? 'allow or deny it' : 'answer'}. Only they, or an admin of this agent, can.</p>
+    </section>
+  </div>;
   return <div className="dock" data-kind={request.kind}>
     {request.kind === 'approval'
       ? <ApprovalCard key={request.id} request={request} outcome={outcome} answer={answer} onDismiss={onDismiss}/>

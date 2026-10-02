@@ -4,6 +4,7 @@
  * exported for tests; the adapter and canvas code only run in the browser.
  */
 import type { Attachment, AttachmentAdapter, CompleteAttachment, PendingAttachment } from '@assistant-ui/react';
+import { uuid } from './uuid.js';
 
 /** Mirrors `IMAGE_LIMITS` in ai-sdk-letta (a test keeps them equal). */
 export const IMAGE_LIMITS = { maxImageBytes: 5 * 1024 * 1024, maxImages: 4, maxTotalBytes: 10 * 1024 * 1024 } as const;
@@ -215,7 +216,7 @@ export class FileAttachmentAdapter implements AttachmentAdapter {
     this.reserved++;
     try {
       const info = await this.upload(file);
-      const id = crypto.randomUUID();
+      const id = uuid();
       this.uploads.set(id, info);
       return { id, type: 'document', name: info.name, contentType: info.mediaType, file, status: { type: 'requires-action', reason: 'composer-send' } };
     } finally { this.reserved--; }
@@ -254,7 +255,7 @@ export class ImageAttachmentAdapter implements AttachmentAdapter {
       const prepared = await prepareImage(file);
       const total = this.current().reduce((sum, attachment) => sum + attachmentBytes(attachment), 0) + prepared.size;
       if (total > IMAGE_LIMITS.maxTotalBytes) throw new AttachmentError(messages.totalTooLarge);
-      return { id: crypto.randomUUID(), type: 'image', name: prepared.name, contentType: prepared.type, file: prepared, status: { type: 'requires-action', reason: 'composer-send' } };
+      return { id: uuid(), type: 'image', name: prepared.name, contentType: prepared.type, file: prepared, status: { type: 'requires-action', reason: 'composer-send' } };
     } finally { this.reserved--; }
   }
 

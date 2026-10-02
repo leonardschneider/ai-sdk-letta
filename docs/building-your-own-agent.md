@@ -422,6 +422,52 @@ closeOnSignals(server);
 `startApiServer(agent, { port })` serves the same routes for
 server-to-server use, behind a bearer token stored in the state directory.
 
+**For a team (Tailscale).** `startTeamServer` serves several agents to the
+people in your tailnet, behind `tailscale serve`. Tailscale tells the app who
+each person is; each agent has its own members (owners are admins of all and
+add the others from the app), and members share everything inside an agent.
+Conversations run at the same time, and messages sent to a busy conversation
+wait in a visible queue. See "Sharing with your team" in the README for the
+Tailscale steps.
+
+```ts
+// src/team.ts
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { closeOnSignals, startTeamServer } from '@ai-sdk-letta/server';
+import { agent } from './agent.js';
+
+const assets = join(dirname(createRequire(import.meta.url).resolve('@ai-sdk-letta/web/package.json')), 'dist');
+const server = await startTeamServer([agent], assets, {
+  port: 4400,
+  owners: ['you@example.com'], // your Tailscale login
+  origins: ['https://your-machine.your-tailnet.ts.net'], // what `tailscale serve --bg 4400` publishes
+});
+closeOnSignals(server);
+```
+
+Several conversations of one agent can also be open in your own code with
+`openAgentHost`: one identity lock, one Letta session per conversation, turns
+in different conversations at the same time. `speaker` tells the agent who
+wrote a turn, and `otid` tags the turn so you can find it in history later
+(its user message carries `metadata.otid`).
+
+```ts
+// src/host.ts
+import { openAgentHost } from 'ai-sdk-letta';
+import { agent } from './agent.js';
+
+const host = await openAgentHost(agent);
+try {
+  const [a, b] = await Promise.all([host.open({ newTitle: 'Menu' }), host.open({ newTitle: 'Shopping' })]);
+  const [menu, list] = await Promise.all([
+    a.agent.generate({ prompt: 'Plan a vegetarian dinner.', speaker: { name: 'Alex', login: 'alex@example.com' }, otid: 'turn-menu-1' }),
+    b.agent.generate({ prompt: 'List what to buy for pancakes.' }),
+  ]);
+  console.log(menu.text, list.text);
+} finally { await host.close(); }
+```
+
 **From code.** `createLettaAgent` opens the agent (creating it on first use)
 and returns the `LettaAgent` plus `close()`. Options: `stateDirectory`,
 `conversationId` (`'default'` or a Letta conversation ID), `newTitle` (create

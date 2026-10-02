@@ -3,9 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { createLettaAgent, filesEnabled, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type LettaRuntime } from 'ai-sdk-letta';
+import { createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime } from 'ai-sdk-letta';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
-import { guiApp, tokenApiApp } from './http.js';
+import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
+import { TeamDirectory } from './team.js';
 
 /** Default GUI port (the token API uses the next one). */
 export const DEFAULT_PORT = 4400;
@@ -39,6 +40,26 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
+  };
+}
+
+/**
+ * A host that keeps several conversations of one agent open at once (each its
+ * own Letta session), for a shared runtime. The agent itself is opened on first use.
+ */
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
+  let agent: Promise<AgentHost<TOOLS>> | undefined;
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true }).catch(error => { agent = undefined; throw error; });
+  return {
+    parallel: true,
+    ...(filesEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
+    open: async options => {
+      const host = await opened();
+      const conversation = await host.open(options);
+      const presentation = conversation.agent.presentation!;
+      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), close: () => conversation.close() };
+    },
+    close: async () => { const current = agent; agent = undefined; await (await current?.catch(() => undefined))?.close(); },
   };
 }
 
@@ -119,6 +140,79 @@ export async function startApiServer<TOOLS extends ToolSet>(definition: AgentDef
     log(`${definition.name} API: ${url} (bearer token required)\nDefinition: ${definition.id} · owner: ${owner} · token file: ${tokenPath}`);
     return { url, port: bound, tokenPath, owner, close: stop };
   } catch (error) { unlock(); throw error; }
+}
+
+/** Options of {@link startTeamServer}. */
+export interface TeamServeOptions extends ServeOptions {
+  /**
+   * Tailscale logins of the server's owners (for example
+   * `alice@example.com`). They are admins of every hosted agent and add
+   * everyone else. At least one is required.
+   */
+  owners: readonly string[];
+  /**
+   * The origins `tailscale serve` publishes the app under, for example
+   * `https://machine.tailnet.ts.net`. Requests for other hosts are refused.
+   */
+  origins: readonly string[];
+}
+
+/** What the browser may know about a definition. */
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ui: { latex: definition.ui?.latex ?? true } });
+
+/**
+ * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.
+ *
+ * Who is who comes from Tailscale (see `teamApp`); each agent has its own
+ * members, and everything inside an agent (conversations, resources, memory)
+ * is shared by them. Conversations run turns at the same time; turns of one
+ * conversation wait in a visible queue. Each agent keeps its own runtime
+ * state (`<state>/server/<id>/team/`); people and memberships live in
+ * `<state>/team/team.json`.
+ *
+ * No agent session is opened until someone opens a conversation.
+ */
+export async function startTeamServer(definitions: readonly AgentDefinition<ToolSet>[], assets: string, options: TeamServeOptions): Promise<RunningServer> {
+  const log = options.log ?? console.log;
+  if (!definitions.length) throw new Error('At least one agent definition is required');
+  if (new Set(definitions.map(d => d.id)).size !== definitions.length) throw new Error('Agent definition IDs must be unique');
+  if (!options.owners.length) throw new Error('At least one owner (a Tailscale login) is required');
+  const stateDirectory = resolveStateDirectory(options.stateDirectory);
+  if (!existsSync(join(assets, 'index.html'))) throw new Error(`Web assets not found in ${assets}; build @ai-sdk-letta/web first`);
+  const teamDirectory = join(stateDirectory, 'team');
+  const unlocks: (() => void)[] = [];
+  const unlockAll = () => { for (const unlock of unlocks.splice(0).reverse()) { try { unlock(); } catch { /* already gone */ } } };
+  const runtimes: ThreadRuntime[] = [];
+  try {
+    unlocks.push(serviceLock(teamDirectory));
+    const directory = new TeamDirectory(join(teamDirectory, 'team.json'), options.owners);
+    directory.bootstrap(definitions.map(d => d.id));
+    const agents = new Map<string, TeamAgent>();
+    for (const definition of definitions) {
+      const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
+      unlocks.push(serviceLock(folder));
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true });
+      runtimes.push(runtime);
+      agents.set(definition.id, { info: agentInfo(definition), runtime });
+    }
+    const port = options.port ?? DEFAULT_PORT;
+    const server = teamApp({ port, assets, agents, directory, origins: options.origins }).listen(port, '127.0.0.1');
+    const bound = await listen(server, port);
+    const url = `http://127.0.0.1:${bound}`;
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => {
+      const keepAlive = setInterval(() => {}, 1000);
+      server.close(); server.closeAllConnections?.();
+      try { await Promise.all(runtimes.map(runtime => runtime.close())); unlockAll(); log('Team server stopped cleanly.'); }
+      catch (error) { log('Team server shutdown incomplete; inspect the recorded locks before restarting.'); throw error; }
+      finally { clearInterval(keepAlive); }
+    })();
+    log(`Team server: ${url} (behind tailscale serve: ${options.origins.join(', ') || 'no origin configured'})\nAgents: ${definitions.map(d => `${d.name} (${d.id})`).join(', ')} · owners: ${options.owners.join(', ')} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+    return { url, port: bound, close };
+  } catch (error) {
+    await Promise.allSettled(runtimes.map(runtime => runtime.close()));
+    unlockAll(); throw error;
+  }
 }
 
 /** Close `server` on SIGINT/SIGTERM and set a non-zero exit code if shutdown fails. */

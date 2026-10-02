@@ -33,6 +33,17 @@ export function knownTime(message: Pick<UIMessage, 'metadata'>): string | undefi
 export function withTime(message: ThreadMessageLike, time: string | undefined): ThreadMessageLike {
   return time ? { ...message, createdAt: new Date(time), metadata: { ...message.metadata, custom: { ...message.metadata?.custom, time } } } : message;
 }
+/** Who wrote a user turn (team servers), shown above the bubble. */
+export type MessageAuthor = { id: string; login: string; name: string; avatar?: string };
+/** The author recorded by the server on a history message, when it is well formed. */
+export function knownAuthor(message: Pick<UIMessage, 'metadata'>): MessageAuthor | undefined {
+  const value = (message.metadata as { author?: Partial<MessageAuthor> } | undefined)?.author;
+  return value && typeof value.id === 'string' && typeof value.login === 'string' && typeof value.name === 'string'
+    ? { id: value.id, login: value.login, name: value.name, ...(typeof value.avatar === 'string' && value.avatar.startsWith('https://') ? { avatar: value.avatar } : {}) } : undefined;
+}
+export function withAuthor(message: ThreadMessageLike, author: MessageAuthor | undefined): ThreadMessageLike {
+  return author ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, author } } } : message;
+}
 
 /** A user bubble's content: images first (as the composer shows them), then file chips, then the text. */
 export function userContent(text: string, images: readonly string[] = [], files: readonly FileChip[] = []): Part[] {
@@ -48,7 +59,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     const result = text.match(/<result>([\s\S]*?)<\/result>/)?.[1];
     if (id && result) { try { completions.set(id, JSON.parse(result)); } catch { /* Unstructured notifications stay hidden. */ } }
   }
-  const converted = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && !message.parts.some(p => p.type === 'text' && /^\s*<(task-notification|system-reminder)>/.test(p.text))).map(message => withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
+  const converted = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && !message.parts.some(p => p.type === 'text' && /^\s*<(task-notification|system-reminder)>/.test(p.text))).map(message => withAuthor(withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
     if (part.type === 'text') {
       if (message.role !== 'user') return [{ type: 'text', text: part.text }];
       // The attachment note becomes file chips; the rest stays text.
@@ -64,7 +75,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined));
   return mergeAssistantRuns(converted);
 }
 
