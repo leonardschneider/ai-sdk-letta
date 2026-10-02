@@ -1,6 +1,0 @@
----
-"ai-sdk-letta": minor
-"@ai-sdk-letta/server": minor
----
-
-Atlassian (Jira and Confluence Cloud) integration with each user's own API token. `atlassianTools` adds `atlassian_fetch` (save an issue or page into the conversation's folder as Markdown plus the original document), `atlassian_update` (write an edited `.md` back by block splice: unchanged blocks are kept verbatim, edits that would lose mentions, images, statuses, macros and similar are refused naming them, and stale versions are refused) and `atlassian_request` (the user's site's Jira and Confluence REST APIs only; reads run, changes ask with a readable preview). Credentials are stored per user on the server (0600) and never returned to the browser or given to the agent; tools act as the person whose message started the turn. Also new: `adfToMarkdown`, `markdownToAdf`, `spliceMarkdown` and `validateAdf`; tools can attach a per-call preparation (`withPreparation`) that answers early or requires approval with a preview; turns accept an `actor`; and the server serves `/api/integrations/atlassian` (connect, test, disconnect) and an Atlassian media proxy for previews. The browser app gets a Connect Atlassian dialog, approval cards that show the changed blocks, and `.adf.json` previews with Atlassian's renderer.
