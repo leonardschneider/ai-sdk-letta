@@ -9,7 +9,8 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, observedParts, userContent, withAuthor, withoutListened, withTime, type FileChip } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
+import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar } from './sidebar.js';
@@ -34,7 +35,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; startedAt?: string; batch?: BatchMember[] }; status: string | null; queue?: QueuedTurn[] };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[] }; status: string | null; queue?: QueuedTurn[] };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -94,6 +95,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const [queue, setQueue] = useState<QueuedTurn[]>([]);
   const [liveAuthor, setLiveAuthor] = useState<Author>();
   const [membersOpen, setMembersOpen] = useState(false);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
+  // Automations (n8n, Conductor, scripts) start turns too: the app follows changes it did not make, also when one person uses it.
+  const follow = !!team || !!agent.automations;
+  const mayManageAutomations = !!agent.automations && (!team || agent.role === 'admin');
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(!unreachable);
   const [current, setCurrent] = useState<Current>(newDraft);
@@ -139,7 +144,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = []) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id); setLiveAuthor(author);
     const events: RuntimeEvent[] = [];
@@ -148,7 +153,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     let members = [...batch];
     // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
     const render = () => setMessages([...base,
-      withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author),
+      withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
       markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
@@ -204,8 +209,8 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         setRunning(false);
         if (ended) { liveRun.current = undefined; setLiveThread(undefined); setLiveAuthor(undefined); }
         void refreshThreads().catch(() => {});
-        // Team mode: show the finished turn from history, and the next queued one if it started.
-        if (team && ended) void refreshView().catch(() => {});
+        // Team mode (and automations): show the finished turn from history, and the next queued one if it started.
+        if (follow && ended) void refreshView().catch(() => {});
       }
     }
   }
@@ -218,16 +223,21 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const viewing = useRef(false);
   async function refreshView() {
     const target = currentRef.current;
-    if (!team || target.draft || operation.current || viewing.current) return;
+    if (!follow || target.draft || operation.current || viewing.current) return;
     viewing.current = true;
     try {
-      const view = await api<View>(`/v1/threads/${target.id}/view`);
+      // A single-user server reads one conversation at a time: wait briefly if another read holds it (never an error to show).
+      let view: View | undefined;
+      for (let attempt = 0; !view; attempt++) {
+        try { view = await api<View>(`/v1/threads/${target.id}/view`); }
+        catch (e) { if (errorCode(e) !== 'runtime_busy' || attempt >= 5) throw e; await new Promise(r => setTimeout(r, 300 * (attempt + 1))); }
+      }
       if (currentRef.current.id !== target.id) return;
       setQueue(view.queue ?? []);
       if (view.live && liveRun.current === view.live.id) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch); return; }
+      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source); return; }
       if (liveRun.current) return;
       setMessages(base);
       setBlocked(!!view.status && !['running', 'completed'].includes(view.status) ? blockedNotice : '');
@@ -253,10 +263,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       const failed = !!view.status && !['running', 'completed'].includes(view.status);
       setBlocked(failed ? blockedNotice : '');
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
-      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch);
+      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source);
     } catch (e) {
       setCurrent(previous);
-      toast(errorCode(e) === 'runtime_busy' ? 'Another reply is still running. Try again when it finishes.' : errorCode(e) === 'not_found' && team ? 'That conversation isn’t available in this agent.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
+      toast(errorCode(e) === 'runtime_busy' ? 'The agent is replying in another conversation. Try again when it finishes.' : errorCode(e) === 'not_found' && team ? 'That conversation isn’t available in this agent.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });
       if (!previous.draft && previous.id !== id) { operation.current = false; setLoading(false); return void select(previous.id); }
     } finally { operation.current = false; setLoading(false); focusComposer(); }
   }
@@ -288,10 +298,11 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connecting]);
 
-  // Team mode: follow what others do (new conversations, turns, the queue) with a long poll.
-  const summaryKey = useRef('');
+  // Team mode, and automations: follow what others do (new conversations, turns, the queue) with a long poll.
+  // The last seen state of every conversation: the open one is refreshed only when it changed (never for another's turn).
+  const seen = useRef(new Map<string, string>());
   useEffect(() => {
-    if (!team || connecting) return;
+    if (!follow || connecting) return;
     const control = new AbortController();
     void (async () => {
       let since = -1;
@@ -303,14 +314,16 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           if (version === since) continue;
           const first = since === -1;
           since = version;
-          if (first) continue;
           const list = await api<ThreadSummary[]>('/v1/threads');
           if (control.signal.aborted) return;
+          const keyOf = (t: ThreadSummary) => `${t.running ?? ''}|${t.queued ?? 0}|${t.lastActivityAt ?? ''}|${t.title}`;
+          const previous = seen.current;
+          seen.current = new Map(list.map(t => [t.id, keyOf(t)]));
+          if (first) continue;
           setThreads(list);
           // Refresh the open conversation only when it changed (its turns, queue or title).
           const open = list.find(t => t.id === currentRef.current.id);
-          const key = open ? `${open.id}|${open.running ?? ''}|${open.queued ?? 0}|${open.lastActivityAt ?? ''}` : '';
-          if (key !== summaryKey.current) { summaryKey.current = key; await refreshView().catch(() => {}); }
+          if (open && previous.get(open.id) !== keyOf(open)) await refreshView().catch(() => {});
         } catch { if (control.signal.aborted) return; await new Promise(resolve => setTimeout(resolve, 3000)); }
       }
     })();
@@ -468,10 +481,14 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       catch (e) {
         const code = errorCode(e);
         const rejected = imageRejection(code) ?? (code in fileMessages && code !== 'payload_too_large' ? fileMessage(code) : undefined);
-        if (rejected || code === 'queue_full') {
+        if (rejected || code === 'queue_full' || code === 'runtime_busy' || code === 'history_conflict') {
           // Validated and refused before delivery: safe to hand the draft back.
           if (queueing) setQueue(list => list.filter(item => item.id !== id)); else { setMessages(base); setRunning(false); }
-          toast(rejected ?? 'This conversation already has 10 messages waiting. Try again when some have been sent.', { tone: 'error' });
+          // Busy or behind: an automation is replying (here or in another conversation), or just did.
+          toast(rejected ?? (code === 'runtime_busy' ? 'The agent is replying in another conversation. Your message is back in the box; send it when that finishes.'
+            : code === 'history_conflict' ? 'New messages arrived in this conversation. Your message is back in the box; check them, then send it.'
+            : 'This conversation already has 10 messages waiting. Try again when some have been sent.'), { tone: 'error' });
+          if (code === 'history_conflict') { operation.current = false; void refreshView().catch(() => {}); }
           throw new MessageNotSentError();
         }
         if (queueing) setQueue(list => list.filter(item => item.id !== id)); else setRunning(false);
@@ -575,7 +592,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : {})}
-            footer={<>{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
+            footer={<>{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
@@ -660,6 +677,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
+        {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
       </div>
     </AssistantRuntimeProvider>

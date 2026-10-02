@@ -3,10 +3,12 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { CredentialStore, atlassianEnabled, createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime } from 'ai-sdk-letta';
+import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, type AgentDefinition, type AgentHost, type LettaRuntime, type TaskScheduler } from 'ai-sdk-letta';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
-import { TeamDirectory } from './team.js';
+import { TeamDirectory, authorOf } from './team.js';
+import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
+import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
 
 /** Default GUI port (the token API uses the next one). */
 export const DEFAULT_PORT = 4400;
@@ -21,23 +23,44 @@ export interface ServeOptions {
   log?: (line: string) => void;
   /** Tests only: the `fetch` used to reach Atlassian for the integration routes. */
   integrations?: { fetch?: typeof fetch };
+  /**
+   * Serve the automation API (n8n, Conductor, scripts) on its own loopback
+   * port, with per-trigger tokens managed in the app (Automations). Off unless set.
+   */
+  automation?: AutomationOptions;
+}
+
+/** The orchestrator `schedule_task` uses. `callbackUrl`: this server's automation API as the orchestrator reaches it (for example `http://host.docker.internal:4402` from Docker). */
+export type SchedulerOptions =
+  | { kind: 'n8n'; url: string; apiKey: string; callbackUrl: string; fetch?: typeof fetch }
+  | { kind: 'conductor'; url: string; callbackUrl: string; headers?: Record<string, string>; fetch?: typeof fetch };
+/** Options of the automation API (see {@link ServeOptions.automation}). */
+export interface AutomationOptions {
+  /** Port of the automation API. `0` picks a free port. */
+  port: number;
+  /** Address to bind; see `AutomationListenOptions.host`. @default '127.0.0.1' */
+  host?: string;
+  /** Agent self-scheduling: where `schedule_task` creates its one-off jobs. Without it, the tool answers that scheduling is not set up. */
+  scheduler?: SchedulerOptions;
 }
 
 /** A running server. */
 export interface RunningServer {
   url: string;
   port: number;
+  /** The automation API, when enabled. */
+  automation?: { url: string; port: number };
   /** Stop accepting requests, close the agent, then release locks. Idempotent. */
   close(): Promise<void>;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages };
@@ -50,11 +73,11 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  * A host that keeps several conversations of one agent open at once (each its
  * own Letta session), for a shared runtime. The agent itself is opened on first use.
  */
-function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string): RuntimeHost {
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null }).catch(error => { agent = undefined; throw error; });
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
@@ -85,12 +108,13 @@ async function listen(server: Server, port: number) {
   return address.port || port;
 }
 
-function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string) {
+function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string, extra?: { server?: Server; service?: AutomationService }) {
   let closing: Promise<void> | undefined;
   return () => closing ??= (async () => {
     // SDK shutdown can await unref'ed resources; keep Node alive until locks release.
     const keepAlive = setInterval(() => {}, 1000);
     server.close(); server.closeAllConnections?.();
+    extra?.service?.close(); extra?.server?.close(); extra?.server?.closeAllConnections?.();
     try { await runtime.close(); unlock(); log(`${label} stopped cleanly.`); }
     catch (error) { log(`${label} shutdown incomplete; inspect the recorded locks before restarting.`); throw error; }
     finally { clearInterval(keepAlive); }
@@ -112,13 +136,23 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
   try {
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
-    const runtime = new ThreadRuntime(host(definition, stateDirectory), join(directory, 'state.json'), owner);
+    const scheduling = automationScheduling(options.automation, [definition]);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id)), join(directory, 'state.json'), owner);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
-    const server = guiApp(runtime, owner, port, assets, agentInfo(definition), credentials, options.integrations).listen(port, '127.0.0.1');
-    const bound = await listen(server, port);
-    const url = `http://127.0.0.1:${bound}`;
-    log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
-    return { url, port: bound, close: lifecycle(server, runtime, unlock, log, 'GUI') };
+    let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
+    if (options.automation) {
+      const service = new AutomationService({ agents: [automationAgent(definition, runtime, owner, stateDirectory, false)], ...scheduling.service, log });
+      scheduling.bind(service);
+      const listening = await listenAutomation(service, options.automation);
+      automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
+    }
+    try {
+      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined).listen(port, '127.0.0.1');
+      const bound = await listen(server, port);
+      const url = `http://127.0.0.1:${bound}`;
+      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+      return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', automation) };
+    } catch (error) { automation?.service.close(); automation?.server.close(); throw error; }
   } catch (error) { unlock(); throw error; }
 }
 
@@ -189,36 +223,52 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
   const unlocks: (() => void)[] = [];
   const unlockAll = () => { for (const unlock of unlocks.splice(0).reverse()) { try { unlock(); } catch { /* already gone */ } } };
   const runtimes: ThreadRuntime[] = [];
+  let automationServer: Server | undefined;
+  let automationService: AutomationService | undefined;
   try {
     unlocks.push(serviceLock(teamDirectory));
     const directory = new TeamDirectory(join(teamDirectory, 'team.json'), options.owners);
     directory.bootstrap(definitions.map(d => d.id));
     const agents = new Map<string, TeamAgent>();
+    const scheduling = automationScheduling(options.automation, definitions);
+    const automationAgents: AutomationAgent[] = [];
     for (const definition of definitions) {
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id)), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length });
       runtimes.push(runtime);
-      agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto' }, runtime });
+      agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });
+      automationAgents.push(automationAgent(definition, runtime, 'team', stateDirectory, true));
+    }
+    let automation: { service: AutomationService; endpoint: AutomationEndpoint; url: string; port: number } | undefined;
+    if (options.automation) {
+      // A token acts for a member of the agent; once they are no longer a member, it stops working.
+      const service = automationService = new AutomationService({ agents: automationAgents, members: (agentId, userId) => { const user = directory.user(userId); return user && directory.role(agentId, userId) ? authorOf(user) : undefined; }, ...scheduling.service, log });
+      scheduling.bind(service);
+      const listening = await listenAutomation(service, options.automation);
+      automationServer = listening.server;
+      automation = { service, url: listening.url, port: listening.port, endpoint: endpointOf(listening.url, options.automation) };
     }
     const port = options.port ?? DEFAULT_PORT;
     const credentials = definitions.some(atlassianEnabled) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
-    const server = teamApp({ port, assets, agents, directory, origins: options.origins, ...(credentials ? { credentials } : {}), ...(options.integrations ? { integrationOptions: options.integrations } : {}) }).listen(port, '127.0.0.1');
+    const server = teamApp({ port, assets, agents, directory, origins: options.origins, ...(credentials ? { credentials } : {}), ...(options.integrations ? { integrationOptions: options.integrations } : {}), ...(automation ? { automation: { service: automation.service, endpoint: automation.endpoint } } : {}) }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
     let closing: Promise<void> | undefined;
     const close = () => closing ??= (async () => {
       const keepAlive = setInterval(() => {}, 1000);
       server.close(); server.closeAllConnections?.();
+      automationService?.close(); automationServer?.close(); automationServer?.closeAllConnections?.();
       try { await Promise.all(runtimes.map(runtime => runtime.close())); unlockAll(); log('Team server stopped cleanly.'); }
       catch (error) { log('Team server shutdown incomplete; inspect the recorded locks before restarting.'); throw error; }
       finally { clearInterval(keepAlive); }
     })();
-    log(`Team server: ${url} (behind tailscale serve: ${options.origins.join(', ') || 'no origin configured'})\nAgents: ${definitions.map(d => `${d.name} (${d.id})`).join(', ')} · owners: ${options.owners.join(', ')} · state: ${stateDirectory}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
-    return { url, port: bound, close };
+    log(`Team server: ${url} (behind tailscale serve: ${options.origins.join(', ') || 'no origin configured'})\nAgents: ${definitions.map(d => `${d.name} (${d.id})`).join(', ')} · owners: ${options.owners.join(', ')} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+    return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), close };
   } catch (error) {
+    automationService?.close(); automationServer?.close();
     await Promise.allSettled(runtimes.map(runtime => runtime.close()));
     unlockAll(); throw error;
   }
@@ -229,4 +279,90 @@ export function closeOnSignals(server: Pick<RunningServer, 'close'>): void {
   const stop = () => { server.close().catch(() => { process.exitCode = 1; }); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+}
+
+/* ------------------------------------------------------------------ */
+/* Automation                                                          */
+/* ------------------------------------------------------------------ */
+
+/** Where an agent's automation records live: `<state>/server/<id>/automation.json`. */
+export const automationFile = (stateDirectory: string, definitionId: string) => join(statePaths(stateDirectory).server(definitionId), 'automation.json');
+
+/**
+ * Tools whose approvals an automation token may give in advance: tools with
+ * permission `'ask'`, and allowed tools that ask for some calls (such as
+ * `atlassian_request` for changes). Never `ask_user`.
+ */
+export function preApprovableTools(definition: AgentDefinition): string[] {
+  return Object.keys(definition.tools).filter(name => name !== ASK_USER_TOOL && (definition.permissions[name] === 'ask'
+    || (definition.permissions[name] === 'allow' && typeof (definition.tools[name] as { [PREPARE_CALL]?: unknown })[PREPARE_CALL] === 'function' && name !== 'schedule_task')));
+}
+
+function automationAgent(definition: AgentDefinition, runtime: ThreadRuntime, owner: string, stateDirectory: string, team: boolean): AutomationAgent {
+  return { id: definition.id, name: definition.name, runtime, owner, store: new AutomationStore(automationFile(stateDirectory, definition.id)), preApprovable: preApprovableTools(definition), replyModes: team };
+}
+function endpointOf(url: string, options: AutomationOptions): AutomationEndpoint {
+  const port = new URL(url).port;
+  const host = options.host ?? '127.0.0.1';
+  return { url, ...(host === '127.0.0.1' || host === 'localhost' ? { docker: `http://host.docker.internal:${port}` } : {}), ...(options.scheduler ? { scheduler: options.scheduler.kind } : {}) };
+}
+/** The orchestrator of `schedule_task`, created once; the service is bound after the runtimes exist. */
+function automationScheduling(options: AutomationOptions | undefined, definitions: readonly AgentDefinition<ToolSet>[]) {
+  let service: AutomationService | undefined;
+  const config = options?.scheduler;
+  const orchestrator: Orchestrator | undefined = !config ? undefined : config.kind === 'n8n'
+    ? n8nOrchestrator({ url: config.url, apiKey: config.apiKey, ...(config.fetch ? { fetch: config.fetch } : {}) })
+    : conductorOrchestrator({ url: config.url, ...(config.headers ? { headers: config.headers } : {}), ...(config.fetch ? { fetch: config.fetch } : {}) });
+  if (config) new URL(config.callbackUrl);
+  return {
+    service: orchestrator && config ? { scheduler: { orchestrator, callbackUrl: config.callbackUrl } } : {},
+    bind(value: AutomationService) { service = value; },
+    /** The `schedule_task` backend of an agent that has the tool (and only when an orchestrator is configured). */
+    schedulerFor(id: string): TaskScheduler | undefined {
+      const definition = definitions.find(d => d.id === id);
+      if (!orchestrator || !definition || !schedulingEnabled(definition)) return undefined;
+      return { schedule: (request, turn) => { const scheduler = service?.schedulerFor(id); if (!scheduler) throw new Error('scheduler_unavailable'); return scheduler.schedule(request, turn); } };
+    },
+  };
+}
+
+/** Options of {@link createAutomationToken}. */
+export interface CreateAutomationTokenOptions {
+  stateDirectory?: string;
+  /** Shown in the app ("via n8n") and in the conversations its turns start. */
+  name: string;
+  via?: AutomationVia;
+  /** Tools whose `'ask'` calls run without asking in this token's turns. */
+  preApproved?: string[];
+  /** Team servers: the Tailscale login of the member the token acts for (they must belong to the agent). Single-user: omit (the local user). */
+  actor?: string;
+  /** Team servers: reply mode of its turns. @default 'always' */
+  replyMode?: 'always' | 'when-addressed' | 'agent-decides';
+}
+/**
+ * Create an automation token from the command line (the server owner), also
+ * while the server runs. Returns the secret once; only its hash is stored.
+ */
+export function createAutomationToken(definition: AgentDefinition, options: CreateAutomationTokenOptions): { id: string; secret: string; token: ReturnType<typeof tokenSummary> } {
+  const stateDirectory = resolveStateDirectory(options.stateDirectory);
+  let actor = { id: LOCAL_USER_ID, name: 'You' } as { id: string; name: string; login?: string };
+  if (options.actor) {
+    const team = join(stateDirectory, 'team', 'team.json');
+    if (!existsSync(team)) throw new Error('No team server state: --actor applies to team servers only');
+    const directory = new TeamDirectory(team);
+    const user = directory.userByLogin(options.actor.trim().toLowerCase());
+    if (!user || !directory.role(definition.id, user.id)) throw new Error(`${options.actor} is not a member of ${definition.id}`);
+    actor = { id: user.id, name: user.name, login: user.login };
+  }
+  const { token, secret } = createToken(new AutomationStore(automationFile(stateDirectory, definition.id)), { name: options.name, via: options.via ?? 'api', preApproved: options.preApproved ?? [], ...(options.replyMode ? { replyMode: options.replyMode } : {}) },
+    { actor, createdBy: actor, preApprovable: preApprovableTools(definition) });
+  return { id: token.id, secret, token: tokenSummary(token) };
+}
+/** Revoke an automation token from the command line. */
+export function revokeAutomationToken(definition: AgentDefinition, id: string, options: { stateDirectory?: string } = {}): boolean {
+  return revokeToken(new AutomationStore(automationFile(resolveStateDirectory(options.stateDirectory), definition.id)), id);
+}
+/** List an agent's automation tokens (never their secrets). */
+export function listAutomationTokens(definition: AgentDefinition, options: { stateDirectory?: string } = {}) {
+  return new AutomationStore(automationFile(resolveStateDirectory(options.stateDirectory), definition.id)).read().tokens.map(tokenSummary);
 }

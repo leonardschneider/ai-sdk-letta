@@ -64,7 +64,9 @@ flowchart LR
 | [`@ai-sdk-letta/provider`](packages/provider) | AI SDK `LanguageModel` for Letta agents; a port of Letta's provider | **MIT** (Letta) | yes |
 | [`@ai-sdk-letta/tui`](apps/tui) | Terminal UI (patched `@ai-sdk/tui`) with `/resume`, `/search`, approvals and questions | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
 | [`@ai-sdk-letta/web`](apps/web) | assistant-ui browser app served by the server package | Apache-2.0 | not yet ([why](#not-on-npm-yet)) |
+| [`n8n-nodes-ai-sdk-letta`](packages/n8n-nodes-ai-sdk-letta) | n8n community node: run a turn, wait for the reply, branch on `approval_required` | **MIT** (n8n's rule for community nodes) | not yet |
 | [`examples/basic`](examples/basic) | A minimal agent with one custom tool, in the terminal and the browser | Apache-2.0 | no |
+| [`examples/orchestration`](examples/orchestration) | Conductor OSS workflow definitions, a Conductor worker, schedules | Apache-2.0 | no |
 
 ### Provider or Agent?
 
@@ -697,6 +699,15 @@ and Confluence pages (`.adf.json`) as Atlassian draws them (see
 are served under a policy that allows no script, no network and no access to
 the app (`default-src 'none'; sandbox`); HTML is shown only inside it.
 
+**Automations.** With the automation API on (`--automation-port`), the foot
+of the sidebar shows **Automations** to the agent's admins: tokens (name, what
+uses it, the person it acts for, pre-approved tools, last use and how the last
+run ended), **New token** (shown once, with a Copy button) and **Revoke**, and
+the tasks the agent scheduled (cancel the ones that have not run). Turns that
+automations start appear in their conversations as you watch, with a small
+"via n8n", "via Conductor", "via API" or "scheduled · n8n" badge above the
+message; a tool that needed approval reads "Needed approval: …".
+
 **Atlassian.** With the Atlassian tools, the foot of the sidebar shows
 **Connect Atlassian** (or your connected site): a dialog for site, email and
 API token, with Test connection, Replace token and Disconnect. Approval cards
@@ -814,6 +825,124 @@ definitions you start the server with (creating agents from the app may come
 later). At most 4 replies run at once per agent (more wait in their
 conversation's queue), and a conversation queues up to 10 messages.
 
+## Automations (n8n, Conductor)
+
+Workflows and schedules run in an orchestrator, [n8n](https://n8n.io) or
+[Conductor OSS](https://conductor-oss.org); ai-sdk-letta keeps no timer of
+its own. The server serves an **automation API** on a separate loopback port
+that orchestrators and scripts call with per-workflow tokens. Turns started
+that way are ordinary turns of the conversation (shown in the app with a small
+"via n8n" badge), and they are **unattended**: they never wait for a person.
+
+```sh
+npm run gui -- --automation-port 4402         # automation API on 127.0.0.1:4402
+npm run tokens -- create --name "Nightly report" --via n8n   # or: Automations in the app
+```
+
+From code: `startGuiServer(agent, assets, { automation: { port: 4402 } })`
+(also `startTeamServer`). The step-by-step version, with code, is in
+[the guide](docs/building-your-own-agent.md#9a-run-it-from-n8n-or-conductor).
+
+**Tokens.** One per workflow. Agent admins create and revoke them in the app
+(**Automations**, at the foot of the sidebar; the token is shown once), and
+the server owner can from the command line (`npm run tokens -- create|list|revoke`,
+`createAutomationToken`), also while the server runs. Each token is bound to
+one agent and to the person it acts for: the local user in the single-user
+app; on a team server, the admin who created it (a token created from the
+command line can name any member with `--actor`). Its turns use that person's
+accounts (Atlassian) and carry their name, like their own messages. When that
+person stops being a member, the token stops working. Only a SHA-256 hash and
+the last four characters are stored (`<state>/server/<id>/automation.json`,
+0600); tokens are never logged.
+
+**The API.** `Authorization: Bearer <token>`, JSON:
+
+| Request | What it does |
+| --- | --- |
+| `POST /v1/automation/runs` `{ text, idempotencyKey, title? \| threadId? , newConversation?, replyMode? }` | Start a turn: in the newest conversation with that `title` (default: the token's name), a new one, or a known one. `?wait=<s>` waits up to 120 s for it to end. The same `idempotencyKey` (or `Idempotency-Key` header) returns the same run, so retries never start a second turn. |
+| `GET /v1/automation/runs/<id>?wait=<s>` | The run: `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `text` (the reply), `tools` (name and outcome), `files` (created or changed in the resources), `conversation`, `error` |
+| `POST /v1/automation/runs/<id>/cancel` | Stop it, or withdraw it while it waits |
+| `GET /v1/automation/files?path=` | Download a file of the agent's resources |
+| `GET /v1/automation/whoami` | The token's agent, name and user (n8n's credential test) |
+
+Runs respect the conversation's order: in the single-user app they wait while
+another reply runs; on a team server they join the conversation's queue but
+are always sent on their own (never combined with people's messages), with
+reply mode *always* unless the token or the request says otherwise.
+
+**Unattended means no prompts.** A tool that needs approval fails the run with
+`error.code: "approval_required"` and `error.tool`; `ask_user` fails it with
+`"question_required"`. The tool never runs, the agent is told to stop and
+says in one sentence what it needed, and the turn ends cleanly, so the
+conversation stays usable in the app and for the next run. A token can
+pre-approve tools whose permission is `'ask'` (or that ask for some calls,
+like `atlassian_request`); `'deny'` stays denied, questions are never
+pre-approved, and a call that uses someone else's account still needs that
+person.
+
+**n8n.** The community node in [`packages/n8n-nodes-ai-sdk-letta`](packages/n8n-nodes-ai-sdk-letta)
+(not on npm yet; its README shows how to install the built package): an
+*ai-sdk-letta API* credential (server URL, token) and an *ai-sdk-letta* node
+with Run Turn and Wait, Start Turn, Get Run and Cancel Run. A run that needed
+approval fails the node with `approval_required: …`; with **On Error →
+Continue (using error output)** it goes to the error output instead, with
+`error.code`, `error.tool` and the conversation, for an IF branch. Example:
+[`examples/nightly-report.workflow.json`](packages/n8n-nodes-ai-sdk-letta/examples/nightly-report.workflow.json)
+(schedule trigger → run turn → reply, or branch on `approval_required`).
+
+**Conductor OSS.** [`examples/orchestration`](examples/orchestration):
+`ai_sdk_letta_run_turn` (Conductor's own `HTTP` and `DO_WHILE` tasks, no
+worker; Conductor OSS 3.32 has no `HTTP_POLL` task) and
+`ai_sdk_letta_run_turn_worker` with a small worker on Conductor's JavaScript
+SDK that waits for long turns without holding a thread. The token is a
+Conductor secret (`CONDUCTOR_SECRET_AI_SDK_LETTA_TOKEN` in the Conductor
+server's environment, used as `${workflow.secrets.AI_SDK_LETTA_TOKEN}`), so it
+never appears in workflow inputs. A turn that needed a person fails the
+workflow with `approval_required: …` or `question_required: …`. Schedules use
+Conductor's scheduler (`conductor/weekday-report.schedule.json`).
+
+**The agent schedules tasks.** With `schedulingTools` in the definition
+(`schedule_task`, permission `'ask'` by default) and a scheduler configured
+(`automation: { port, scheduler: { kind: 'n8n', url, apiKey, callbackUrl } }`,
+or `{ kind: 'conductor', url, callbackUrl }`), the agent can run a prompt
+once, later ("in 2 hours", or an ISO time with a time zone; at least a minute
+and at most a year ahead), in the current conversation or a new one. The
+approval card shows when and what. The orchestrator gets a one-off job that
+calls the server back with a single-use token (n8n: a workflow with a cron for
+that minute plus a Header Auth credential holding the token, through n8n's
+public API with an API key; Conductor: a schedule of its scheduler bounded to
+that minute, starting a small registered workflow, `ai_sdk_letta_fire_task`).
+When it fires, the prompt runs once as an unattended turn of the person who
+asked, with nothing pre-approved; the orchestrator's execution shows the
+outcome, and the job is removed afterwards. Admins see and cancel tasks under
+Automations. With `npm run gui`: `SCHEDULING=1` adds the tool to the example
+agent, and `N8N_URL` + `N8N_API_KEY` or `CONDUCTOR_URL` choose the
+orchestrator.
+
+**Where it listens.** On 127.0.0.1 only, by default. **n8n or Conductor in
+Docker on the same machine** reach it as `http://host.docker.internal:<port>`:
+Docker Desktop on macOS and Windows forwards that name to the host's
+loopback, so nothing is opened to the network (verified with Docker Desktop
+29 on macOS). On Linux, bind the Docker bridge address instead
+(`automation: { host: '172.17.0.1' }`) and run the container with
+`--add-host=host.docker.internal:host-gateway`. The API refuses to listen on
+all interfaces (`0.0.0.0`, `::`). **From another machine,** publish it to
+your tailnet only, with its own HTTPS port, and never with Funnel:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:4402   # https://machine.tailnet.ts.net:8443
+tailscale serve --https=8443 off                          # stop
+```
+
+The token is what authenticates there (tailnet identity is not used for this
+API), so keep it in the orchestrator's secret store.
+
+**Limits.** Per token: 10 new runs a minute, 240 requests a minute, 2 runs
+queued or running at once (429 with `Retry-After` beyond that); 30 failed
+sign-ins from one address in 5 minutes block it for a while. 50 tokens and 50
+pending scheduled tasks per agent. A run waits at most 10 minutes for a busy
+single-user agent before it is given up (`start_timeout`).
+
 ## Security model
 
 - **Tools fail closed.** A tool without a permission entry, or with `deny`, is
@@ -881,6 +1010,17 @@ conversation's queue), and a conversation queues up to 10 messages.
   admin of that agent (403 otherwise); only admins change members.
 - **The token API** needs a 256-bit bearer token (stored 0600) plus an owner
   header, and rejects browser origins.
+- **The automation API** listens on its own port, on loopback (or a Docker
+  bridge address you choose; never all interfaces). Each token is random (256
+  bits), stored only as a SHA-256 hash, compared in constant time, never
+  logged, bound to one agent and one person, rate- and concurrency-limited,
+  and revocable at once. Requests with an `Origin`, cross-site fetch metadata
+  or Tailscale Funnel headers are refused, and the browser app's session and
+  CSRF checks are unchanged: the app's routes never accept these tokens, and
+  managing tokens there needs an admin, the exact origin and the CSRF token.
+  Automation turns never prompt anyone (approvals fail with
+  `approval_required`), and pre-approval is per token and per tool. Tokens
+  for scheduled tasks are single-use and fire only their own task.
 - **Audit.** Tool activity is logged as metadata only (tool, status, duration,
   hashed call ID) in private files under the state directory.
 
@@ -908,6 +1048,8 @@ State lives in one directory, resolved in this order:
   attachments/<letta agent ID>/.migrated/
                            files of 0.3 kept aside after they were moved into resources/
   credentials/atlassian/   each person's Atlassian site, email and API token (0600; one file per person)
+  server/<id>/automation.json
+                           automation tokens (hashes only), idempotency keys of recent runs, scheduled tasks (0600)
 ```
 
 **Files** stay in the agent's resources, including after a conversation is
@@ -993,6 +1135,17 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   matched, show as placeholders. Jira has no optimistic locking: a change
   made in the instant between the final check and the write can still be
   overwritten.
+- **Automations.** Runs are unattended by design: a workflow that needs a
+  person's approval fails (`approval_required`) instead of waiting; deciding
+  later (a person answers, the workflow resumes) is not built yet. The n8n node
+  is not on npm yet. Scheduled tasks run once (no recurring schedules from the
+  agent; use the orchestrator for those) and on whole minutes in UTC. On n8n,
+  the fire token sits in an n8n credential (encrypted by n8n); on Conductor
+  OSS, which keeps secrets only in its environment, it sits in the schedule's
+  workflow input (masked in the UI, single-use, and removed with the schedule
+  once it fired). Idempotency keys are remembered for the last 1,000 runs per
+  agent. Single-user servers keep the newest 200 runs (older ones are
+  forgotten: their messages stay, without author or source badges).
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
   limit; the HTTP runtime closes prompts earlier (four minutes by default,

@@ -1,0 +1,17 @@
+{
+  "name": "ai_sdk_letta_weekday_report",
+  "description": "Every weekday at 07:00 UTC: ask the agent for the daily report.",
+  "cronExpression": "0 0 7 * * MON-FRI",
+  "zoneId": "UTC",
+  "runCatchupScheduleInstances": false,
+  "paused": false,
+  "startWorkflowRequest": {
+    "name": "ai_sdk_letta_run_turn",
+    "version": 1,
+    "input": {
+      "serverUrl": "http://host.docker.internal:4402",
+      "text": "Write today's short status report: what changed since yesterday, and what needs attention.",
+      "title": "Daily report"
+    }
+  }
+}

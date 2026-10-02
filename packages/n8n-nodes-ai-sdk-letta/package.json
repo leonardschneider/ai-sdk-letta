@@ -1,0 +1,50 @@
+{
+  "name": "n8n-nodes-ai-sdk-letta",
+  "version": "0.1.0",
+  "private": true,
+  "description": "n8n community node for ai-sdk-letta agents: run a turn, wait for the reply, cancel. Talks to the automation API of @ai-sdk-letta/server.",
+  "license": "MIT",
+  "type": "commonjs",
+  "author": "Leonard Schneider",
+  "homepage": "https://github.com/leonardschneider/ai-sdk-letta/tree/main/packages/n8n-nodes-ai-sdk-letta#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardschneider/ai-sdk-letta.git",
+    "directory": "packages/n8n-nodes-ai-sdk-letta"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "letta",
+    "ai-sdk",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && mkdir -p dist/icons dist/nodes/AiSdkLetta && cp icons/*.svg dist/icons/ && cp nodes/AiSdkLetta/*.svg nodes/AiSdkLetta/*.json dist/nodes/AiSdkLetta/",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "strict": true,
+    "credentials": [
+      "dist/credentials/AiSdkLettaApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/AiSdkLetta/AiSdkLetta.node.js"
+    ]
+  },
+  "devDependencies": {
+    "n8n-workflow": "2.10.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

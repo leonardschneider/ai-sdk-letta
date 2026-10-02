@@ -2,6 +2,8 @@ import { AttachmentError, fileMessage, type FileInfo } from './attachments.js';
 /** Same-origin JSON client. The CSRF token lives in memory only; the session is an HttpOnly cookie (single-user) or Tailscale (team). */
 let csrf = '';
 export function setCsrf(value: string) { csrf = value; }
+/** The CSRF header for a same-origin fetch outside {@link api}. */
+export function setCsrfHeader(): Record<string, string> { return { 'X-CSRF-Token': csrf }; }
 /**
  * Where the agent's API lives: `/api` for the single-user app, and
  * `/api/agents/<id>` for the agent selected in a team server.
@@ -74,6 +76,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   resources?: boolean;
   /** Integrations whose accounts each person connects (`'atlassian'`). */
   integrations?: string[];
+  /** The server serves the automation API (admins manage its tokens). */
+  automations?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

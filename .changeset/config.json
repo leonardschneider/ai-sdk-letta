@@ -2,10 +2,20 @@
   "$schema": "https://unpkg.com/@changesets/config@4.0.1/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [["ai-sdk-letta", "@ai-sdk-letta/server"]],
+  "fixed": [
+    [
+      "ai-sdk-letta",
+      "@ai-sdk-letta/server"
+    ]
+  ],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@ai-sdk-letta/tui", "@ai-sdk-letta/web", "@ai-sdk-letta/example-*"]
+  "ignore": [
+    "@ai-sdk-letta/tui",
+    "@ai-sdk-letta/web",
+    "@ai-sdk-letta/example-*",
+    "n8n-nodes-ai-sdk-letta"
+  ]
 }

@@ -659,6 +659,29 @@ body[data-resizing] iframe { pointer-events: none; }
 .adf-media-placeholder { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-2); font-size: 13px; background: var(--bg); }
 
 /* ---------- Mobile: drawer ---------- */
+/* Automations: tokens for orchestrators, and tasks the agent scheduled. */
+.modal.automations { width: 600px; padding: 18px 20px 14px; max-height: min(760px, 100%); overflow-y: auto; }
+.automations-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 2px 0 6px; }
+.automations-heading { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 13.5px; font-weight: 650; color: var(--text-2); }
+.token-list + .automations-heading { margin: 16px 0 6px; }
+.token-list { list-style: none; margin: 0 -6px; padding: 0; }
+.token-row { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 10px; }
+.token-row:hover { background: var(--hover); }
+.token-row[data-inactive] .member-name { color: var(--text-3); text-decoration: line-through; }
+.token-icon { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.token-warning { color: var(--danger); }
+.schedule-prompt { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.token-form .member-role { width: 100%; }
+.token-tools { border: 0; padding: 0; margin: 0; display: grid; gap: 6px; }
+.token-tools legend { padding: 0; margin-bottom: 4px; }
+.token-tool { display: flex; align-items: center; gap: 8px; font-weight: 500; color: var(--text); font-size: 14px; }
+.token-tool .mono { margin-left: auto; }
+.token-secret { display: flex; gap: 8px; margin-bottom: 8px; }
+.token-secret .member-input { flex: 1; min-width: 0; font-size: 13px; }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.danger:hover:not(:disabled) { filter: brightness(1.08); background: var(--danger); }
+/* The small "via n8n" label on a message an automation started. */
+.via-badge { font-size: 11px; font-weight: 600; color: var(--text-2); background: var(--hover); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; line-height: 17px; white-space: nowrap; }
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 320px); z-index: 50; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-pop); visibility: hidden; }
   .layout[data-drawer] .sidebar { transform: none; visibility: visible; }
@@ -673,10 +696,13 @@ body[data-resizing] iframe { pointer-events: none; }
   .topbar .resources-btn, .topbar .latex-btn { margin-left: 0; }
   .modal-scrim { padding: 0; place-items: stretch; }
   .modal.preview { width: 100%; height: 100%; border-radius: 0; border: 0; }
-  .modal.confirm, .modal.move, .modal.members, .modal.integration { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .modal.confirm, .modal.move, .modal.members, .modal.integration, .modal.automations { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   .adf-view { padding: 4px 12px 24px; }
   .adf-source { padding: 8px 12px; }
-  .modal.members { max-height: 92dvh; }
+  .modal.members, .modal.automations { max-height: 92dvh; }
+  .token-row { gap: 8px; }
+  .token-row .btn.ghost { padding: 5px 8px; }
+  .token-row .member-login { white-space: normal; }
   .member-add .btn { flex: 1; justify-content: center; }
   .queue-list { max-height: 96px; }
   .preview-markdown { padding: 14px 16px 20px; }

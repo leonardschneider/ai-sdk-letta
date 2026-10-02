@@ -16,7 +16,8 @@ const published = [
 const examples = readdirSync(join(root, 'examples'), { withFileTypes: true })
   .filter(entry => entry.isDirectory() && existsSync(join(root, 'examples', entry.name, 'package.json')))
   .map(entry => `examples/${entry.name}`);
-const privateWorkspaces = ['apps/tui', 'apps/web', ...examples];
+// The n8n community node stays private until publishing it is decided.
+const privateWorkspaces = ['apps/tui', 'apps/web', 'packages/n8n-nodes-ai-sdk-letta', ...examples];
 const forbidden = [
   [/(^|\/)test(s)?\//, 'test directory'],
   [/\.test\.[cm]?[jt]sx?$/, 'test file'],

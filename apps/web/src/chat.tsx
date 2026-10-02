@@ -7,7 +7,8 @@ import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
-import type { Listened, MessageAuthor as Author } from './messages.js';
+import type { Listened, MessageAuthor as Author, MessageSource } from './messages.js';
+import { sourceLabel } from './automations-model.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -39,11 +40,14 @@ function formatTime(value: string) {
 /** Who wrote a user turn, on a team server: avatar and name above the bubble ("You" for your own). Nothing in the single-user app. */
 function MessageAuthor({ role }: { role: string }) {
   const author = useAuiState(s => (s.message.metadata.custom as { author?: Author } | undefined)?.author);
+  const source = useAuiState(s => (s.message.metadata.custom as { source?: MessageSource } | undefined)?.source);
   const me = useContext(AuthorContext);
-  if (role !== 'user' || !author) return null;
-  const mine = author.id === me;
-  return <div className="msg-author" data-mine={mine || undefined} title={author.login}>
-    <span className="msg-author-name">{mine ? 'You' : author.name}</span><Avatar person={author} size={20}/>
+  if (role !== 'user' || (!author && !source)) return null;
+  const mine = !!author && author.id === me;
+  // A turn an automation started: a small "via n8n" badge (named after the automation), next to the person it acts for.
+  const badge = source ? <span className="via-badge" title={source.kind === 'schedule' ? 'A task the agent scheduled, run by the orchestrator' : `Started by the automation “${source.name}”`}>{sourceLabel(source)}</span> : null;
+  return <div className="msg-author" data-mine={mine || undefined} title={author?.login}>
+    {badge}{author && <><span className="msg-author-name">{mine ? 'You' : author.name}</span><Avatar person={author} size={20}/></>}
   </div>;
 }
 

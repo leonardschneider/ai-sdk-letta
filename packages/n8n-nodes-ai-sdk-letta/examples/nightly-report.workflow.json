@@ -1,0 +1,93 @@
+{
+  "name": "ai-sdk-letta: nightly report",
+  "nodes": [
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f01",
+      "name": "Every weekday at 7:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": { "rule": { "interval": [{ "field": "cronExpression", "expression": "0 7 * * 1-5" }] } }
+    },
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f02",
+      "name": "Ask the agent",
+      "type": "n8n-nodes-ai-sdk-letta.aiSdkLetta",
+      "typeVersion": 1,
+      "position": [240, 0],
+      "onError": "continueErrorOutput",
+      "credentials": { "aiSdkLettaApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "ai-sdk-letta API" } },
+      "parameters": {
+        "operation": "run",
+        "text": "Write today's short status report: what changed since yesterday, and what needs attention.",
+        "conversation": "title",
+        "title": "Daily report",
+        "idempotencyKey": "={{ $execution.id }}-{{ $runIndex }}-{{ $itemIndex }}",
+        "waitSeconds": 600,
+        "options": {}
+      }
+    },
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f03",
+      "name": "Reply",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [520, -100],
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "a1", "name": "report", "value": "={{ $json.text }}", "type": "string" },
+          { "id": "a2", "name": "conversation", "value": "={{ $json.conversation.id }}", "type": "string" }
+        ] },
+        "options": {}
+      }
+    },
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f04",
+      "name": "Needs approval?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [520, 120],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [{ "id": "c1", "leftValue": "={{ $json.error.code }}", "rightValue": "approval_required", "operator": { "type": "string", "operation": "equals" } }],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f05",
+      "name": "Ask a person",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [800, 40],
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "b1", "name": "notice", "value": "=The agent needs approval for {{ $json.error.tool }}. Open conversation {{ $json.error.conversationId }} in the app and do it there.", "type": "string" }
+        ] },
+        "options": {}
+      }
+    },
+    {
+      "id": "7d1c0d64-6a1e-4f0e-9a51-0e2a3c5b6f06",
+      "name": "Fail the workflow",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [800, 220],
+      "parameters": { "errorMessage": "={{ $json.error.message }}" }
+    }
+  ],
+  "connections": {
+    "Every weekday at 7:00": { "main": [[{ "node": "Ask the agent", "type": "main", "index": 0 }]] },
+    "Ask the agent": { "main": [
+      [{ "node": "Reply", "type": "main", "index": 0 }],
+      [{ "node": "Needs approval?", "type": "main", "index": 0 }]
+    ] },
+    "Needs approval?": { "main": [
+      [{ "node": "Ask a person", "type": "main", "index": 0 }],
+      [{ "node": "Fail the workflow", "type": "main", "index": 0 }]
+    ] }
+  },
+  "settings": { "executionOrder": "v1", "timezone": "UTC" }
+}

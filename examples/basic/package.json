@@ -8,7 +8,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "tui": "node --conditions=ai-sdk-letta-source --import tsx src/tui.ts",
-    "gui": "npm run build --workspace @ai-sdk-letta/web && node --conditions=ai-sdk-letta-source --import tsx src/gui.ts"
+    "gui": "npm run build --workspace @ai-sdk-letta/web && node --conditions=ai-sdk-letta-source --import tsx src/gui.ts",
+    "tokens": "node --conditions=ai-sdk-letta-source --import tsx src/tokens.ts"
   },
   "dependencies": {
     "@ai-sdk-letta/server": "*",
