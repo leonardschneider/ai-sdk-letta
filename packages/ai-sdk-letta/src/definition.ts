@@ -5,6 +5,29 @@ import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 
+/** Per-agent settings of the `web_search` tool. */
+export interface WebSearchSettings {
+  /**
+   * How long a person has to review a web search result before it expires
+   * (the agent is then told "Web research expired" and gets none of it; the
+   * conversation stays usable). Also bounded by the Letta harness, which
+   * ends any application tool call 5 minutes after it starts: the search
+   * itself counts, so a review never lasts beyond about 4 min 50 s after the
+   * search began. @default 280000 (the maximum)
+   */
+  reviewTimeoutMs: number;
+}
+/** Bounds of {@link WebSearchSettings.reviewTimeoutMs}. */
+export const WEB_SEARCH_REVIEW_LIMITS = Object.freeze({
+  minTimeoutMs: 10_000,
+  /** The Letta harness ends an application tool call after 300 s (it refuses longer timeouts); 20 s are kept for the search and the reply. */
+  maxTimeoutMs: 280_000,
+  defaultTimeoutMs: 280_000,
+  /** Longest a review may last after the search started (the harness ends the call at 300 s). */
+  callBudgetMs: 290_000,
+});
+export const DEFAULT_WEB_SEARCH: Readonly<WebSearchSettings> = Object.freeze({ reviewTimeoutMs: WEB_SEARCH_REVIEW_LIMITS.defaultTimeoutMs });
+
 /** How a single application tool call is authorized. */
 export type ToolPermission = 'allow' | 'ask' | 'deny';
 
@@ -74,6 +97,8 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
    * but may only listen. Each conversation can override it. @default 'auto'
    */
   replyMode?: ReplyModeSetting;
+  /** Settings of the `web_search` tool, e.g. `{ reviewTimeoutMs: 120_000 }`. @default { reviewTimeoutMs: 280000 } */
+  webSearch?: Partial<WebSearchSettings>;
 }
 
 /** A validated, immutable agent definition. */
@@ -89,6 +114,7 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly sandbox?: ResolvedSandboxConfig;
   readonly ui: Readonly<AgentUiSettings>;
   readonly replyMode: ReplyModeSetting;
+  readonly webSearch: Readonly<WebSearchSettings>;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -143,10 +169,24 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const ui = resolveUi(input.ui);
   const replyMode = input.replyMode ?? 'auto';
   if (!REPLY_MODE_SETTINGS.includes(replyMode)) throw new Error(`replyMode must be one of: ${REPLY_MODE_SETTINGS.join(', ')}`);
+  const webSearch = resolveWebSearch(input.webSearch);
   return Object.freeze({
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch,
   });
+}
+
+function resolveWebSearch(input: unknown): Readonly<WebSearchSettings> {
+  if (input === undefined) return DEFAULT_WEB_SEARCH;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('webSearch must be an object such as { reviewTimeoutMs: 120000 }');
+  const unknown = Object.keys(input).filter(key => key !== 'reviewTimeoutMs');
+  if (unknown.length) throw new Error(`Unknown webSearch setting(s): ${unknown.join(', ')}. Supported: reviewTimeoutMs.`);
+  const { reviewTimeoutMs = DEFAULT_WEB_SEARCH.reviewTimeoutMs } = input as { reviewTimeoutMs?: unknown };
+  const { minTimeoutMs, maxTimeoutMs } = WEB_SEARCH_REVIEW_LIMITS;
+  if (typeof reviewTimeoutMs !== 'number' || !Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs < minTimeoutMs || reviewTimeoutMs > maxTimeoutMs) {
+    throw new Error(`webSearch.reviewTimeoutMs must be ${minTimeoutMs}–${maxTimeoutMs} ms: the Letta harness ends an application tool call (the search and its review) after 5 minutes`);
+  }
+  return Object.freeze({ reviewTimeoutMs });
 }
 
 function resolveUi(input: unknown): Readonly<AgentUiSettings> {

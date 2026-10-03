@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { researchFromPreview, researchOutcome } from '../src/web-research-model.js';
+import { expiryLabel, researchFromPreview, researchOutcome } from '../src/web-research-model.js';
 
 const data = { query: 'release 4.2', purpose: 'When did it ship?', summary: 'It shipped.', dropped: 2, pagesRead: 3,
   claims: [{ text: 'Shipped on 1 October.', sources: [1, 9] }],
@@ -27,4 +27,11 @@ test('a finished web_search shows one line: approved (reviewed or not), dismisse
   assert.equal(researchOutcome({ query: 'q' }, { results: 0, query: 'q', message: 'm' }).label, 'Web research found nothing relevant: q');
   const failed = researchOutcome({ query: 'q' }, { error: 'search_unavailable', message: 'm' });
   assert.equal(failed.state, 'failed'); assert.equal('detail' in failed && failed.detail, 'The search engine couldn’t be reached');
+});
+
+test('an expired review shows "Web research expired", and the card says when it expires', () => {
+  const expired = researchOutcome({ query: 'q' }, { error: 'review_expired', message: 'Web research expired: …' });
+  assert.equal(expired.state, 'expired'); assert.equal(expired.label, 'Web research expired: q');
+  assert.equal(expiryLabel('2026-10-02T16:52:00Z', () => '4:52 PM'), 'Expires at 4:52 PM if nobody reviews it.');
+  assert.equal(expiryLabel(undefined), undefined);
 });

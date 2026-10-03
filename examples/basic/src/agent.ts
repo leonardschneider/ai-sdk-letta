@@ -70,6 +70,8 @@ const decisions = process.env.DECISIONS === '1';
  * agent sees it. See "Web search" in the README.
  */
 const webSearch = process.env.WEB_SEARCH === '1';
+/** How long you have to review a web search result (WEB_SEARCH_REVIEW_MS, 10000–280000; default 280000, the most the Letta harness allows). */
+const webSearchReviewMs = process.env.WEB_SEARCH_REVIEW_MS ? Number(process.env.WEB_SEARCH_REVIEW_MS) : undefined;
 
 /**
  * The example agent. `id` is your stable logical identity: the first run
@@ -97,5 +99,6 @@ export const agent = defineAgent({
   // Fail-closed: every tool is listed. Try 'ask' to require approval per call.
   permissions: { text_stats: process.env.TEXT_STATS_PERMISSION === 'ask' ? 'ask' : 'allow', ask_user: 'allow', ...FILE_TOOL_PERMISSIONS, ...SANDBOX_TOOL_PERMISSIONS, ...(atlassian ? ATLASSIAN_TOOL_PERMISSIONS : {}), ...(scheduling ? SCHEDULING_TOOL_PERMISSIONS : {}), ...(decisions ? DECISION_TOOL_PERMISSIONS : {}), ...(webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}) },
   ...(sandbox ? { sandbox } : {}),
+  ...(webSearchReviewMs !== undefined ? { webSearch: { reviewTimeoutMs: webSearchReviewMs } } : {}),
   dreaming: { trigger: 'step-count', stepCount: 25 },
 });

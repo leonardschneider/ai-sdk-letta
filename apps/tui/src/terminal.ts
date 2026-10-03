@@ -36,7 +36,7 @@ export function withFileLabels(messages: UIMessage[]): UIMessage[] {
  */
 export function withPreviews(interactions: ToolInteractions): Pick<ToolInteractions, 'connect'> {
   return { connect: handler => interactions.connect((request, signal) => handler(request.kind === 'approval' && request.preview?.kind === 'web-research'
-    ? { ...request, title: 'Review web research (the agent sees it only if you approve: y approve · n reject)', details: request.preview.text }
+    ? { ...request, title: `Review web research (the agent sees it only if you approve: y approve · n reject)${request.expiresAt ? ` · expires at ${new Date(request.expiresAt).toLocaleTimeString()}` : ''}`, details: request.preview.text }
     : request, signal)) };
 }
 

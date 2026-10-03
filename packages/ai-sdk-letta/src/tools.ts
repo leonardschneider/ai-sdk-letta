@@ -31,6 +31,14 @@ export type PreparedCall = {
    * (`allowNote`, up to 1000 characters; passed on as `note`).
    */
   denied?: { message: string; allowNote?: boolean };
+  /**
+   * The approval expires at `at` (epoch ms): the prompt is withdrawn, the
+   * call does not run, and the agent is told `message` (code
+   * `review_expired`), so the turn ends normally. The request carries
+   * `expiresAt`, and hosts give it that long instead of their shared
+   * human-wait budget.
+   */
+  expires?: { at: number; message: string };
 };
 /** Key of a tool's {@link PrepareCall}. */
 export const PREPARE_CALL: unique symbol = Symbol.for('ai-sdk-letta.prepareCall');
@@ -296,7 +304,18 @@ export function createToolBridge(options: ToolBridgeOptions) {
         signal.throwIfAborted();
         if (!options.interactions) return denied(name, id, 'interaction_unavailable');
         if (asks) {
-          const answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}), ...(prepared.denied?.allowNote ? { allowNote: true } : {}) }, signal);
+          // A prompt with an expiry is withdrawn at that time; the call then ends as expired, not as a failure.
+          const expiry = prepared.expires ? AbortSignal.timeout(Math.max(1, prepared.expires.at - Date.now())) : undefined;
+          let answer: Awaited<ReturnType<ToolInteractions['request']>>;
+          try {
+            answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}), ...(prepared.denied?.allowNote ? { allowNote: true } : {}), ...(prepared.expires ? { expiresAt: new Date(prepared.expires.at).toISOString() } : {}) }, expiry ? AbortSignal.any([signal, expiry]) : signal);
+          } catch (error) {
+            if (expiry?.aborted && !signal.aborted) {
+              emit(name, id, 'denied', Date.now(), 'review_expired');
+              return { content: [{ type: 'text', text: JSON.stringify({ error: 'review_expired', message: prepared.expires!.message }) }], isError: true };
+            }
+            throw error;
+          }
           signal.throwIfAborted();
           if (answer.approved !== true) {
             if (answer.cancelled || !prepared.denied) return denied(name, id, answer.cancelled ? 'approval_cancelled' : 'user_denied');

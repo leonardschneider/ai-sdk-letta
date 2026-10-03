@@ -187,6 +187,7 @@ const reasonText: Record<string, string> = {
   approval_required: 'Not run: this turn was started by an automation and nobody could approve it. Pre-approve the tool for that automation, or do it here.',
   question_required: 'Not asked: this turn was started by an automation and nobody could answer.',
   unattended_stopped: 'Not run: the automation’s turn had already stopped for approval.',
+  review_expired: 'Nobody reviewed this in time, so it expired and the agent got none of it.',
   decision_pending: 'Not run: the agent had asked for a decision, so the work paused until someone decides.',
 };
 export function failureText(result: unknown): string {

@@ -25,7 +25,7 @@ export type InteractionState = { request?: InteractionRequest; outcome?: string;
 export const AuthorContext = createContext<string | undefined>(undefined);
 export const InteractionContext = createContext<InteractionState>({ approvalTools: new Set(), answer: async () => {} });
 /** Outcomes that mean the answer was delivered; the dock then collapses into the inline line. */
-export const deliveredOutcome = (outcome?: string) => !!outcome && outcome.startsWith('Response received');
+export const deliveredOutcome = (outcome?: string) => !!outcome && (outcome.startsWith('Response received') || outcome.startsWith('This review expired'));
 
 /* ------------------------------------------------------------------ */
 /* Messages                                                            */

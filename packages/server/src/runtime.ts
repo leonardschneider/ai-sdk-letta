@@ -149,7 +149,9 @@ export class RuntimeFault extends Error {
 }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 /** Only app-defined, fixed failure codes (e.g. user_denied) are surfaced; never free-form error text. */
-const failureReasons = new Set(['approval_required', 'question_required', 'unattended_stopped', 'user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
+/** Time a self-expiring prompt (see `InteractionRequest.expiresAt`) is given beyond its expiry, for the tool to withdraw it. */
+const EXPIRY_MARGIN_MS = 15_000;
+const failureReasons = new Set(['review_expired', 'approval_required', 'question_required', 'unattended_stopped', 'user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
 /** HTTP status for a refused file. */
 const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : ['conversation_files_full', 'files_too_many', 'file_exists', 'resources_full'].includes(code) ? 409 : code === 'resources_busy' ? 503 : 400;
 /** A FileInputError as a fixed-code RuntimeFault; anything else unchanged. */
@@ -1012,22 +1014,31 @@ export class ThreadRuntime {
     let timer = setTimeout(expire, remaining);
     // Human reading time does not consume inference time, but the whole turn
     // remains bounded even if the browser is abandoned or prompts repeat.
-    const hardTimer = setTimeout(expire, this.deadlineMs + this.humanWaitMs);
+    let hardDeadline = Date.now() + this.deadlineMs + this.humanWaitMs;
+    let hardTimer = setTimeout(expire, this.deadlineMs + this.humanWaitMs);
     let disconnect = () => {};
     try {
       disconnect = session.agent.interactions.connect((request, signal) => new Promise((resolve, reject) => {
         clearTimeout(timer);
         remaining = Math.max(1, remaining - (Date.now() - resumedAt));
         const waitingAt = Date.now();
-        timer = setTimeout(expire, Math.max(1, remainingWait));
+        // A prompt that expires on its own (a web search review) waits until then, plus a margin for the tool to
+        // withdraw it, instead of the shared human-wait budget; the turn's hard limit moves with it.
+        const expiresAt = request.expiresAt ? Date.parse(request.expiresAt) : NaN;
+        const ownExpiry = Number.isFinite(expiresAt) && expiresAt > waitingAt;
+        const wait = ownExpiry ? expiresAt - waitingAt + EXPIRY_MARGIN_MS : remainingWait;
+        timer = setTimeout(expire, Math.max(1, wait));
+        if (ownExpiry && waitingAt + wait + remaining > hardDeadline) {
+          clearTimeout(hardTimer); hardDeadline = waitingAt + wait + remaining; hardTimer = setTimeout(expire, hardDeadline - waitingAt);
+        }
         const resume = () => {
-          clearTimeout(timer); remainingWait -= Date.now() - waitingAt;
+          clearTimeout(timer); if (!ownExpiry) remainingWait -= Date.now() - waitingAt;
           resumedAt = Date.now(); timer = setTimeout(expire, remaining);
         };
         const abort = () => {
           if (lane.pending?.request.id === request.id) {
             lane.pending = undefined;
-            this.emit(run, 'interaction_ended', { id: request.id, code: timedOut ? 'timed_out' : 'cancelled' });
+            this.emit(run, 'interaction_ended', { id: request.id, code: timedOut ? 'timed_out' : ownExpiry && Date.now() >= expiresAt - 1000 ? 'expired' : 'cancelled' });
             resume();
           }
           reject(new RuntimeFault('interaction_cancelled'));

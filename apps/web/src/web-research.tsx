@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronRight, ExternalLink, Globe, LoaderCircle, ShieldCheck, ShieldX, CircleAlert } from 'lucide-react';
+import { ChevronRight, Clock, ExternalLink, Globe, LoaderCircle, ShieldCheck, ShieldX, CircleAlert } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { researchFromPreview, researchOutcome, type Research, type ResearchSource } from './web-research-model.js';
+import { expiryLabel, researchFromPreview, researchOutcome, type Research, type ResearchSource } from './web-research-model.js';
 
 /* The web_search review card (in the dock) and its line where the search was made. */
 
@@ -68,7 +68,7 @@ export function WebResearchCard({ request, outcome, answer, onDismiss }: CardPro
     <h2 className="card-title">“{research.query}”</h2>
     <p className="card-details">The agent sees this only if you approve it, labelled as untrusted web content.{research.purpose ? <> It searched to: {research.purpose}</> : null}</p>
     <div className="web-review-scroll"><ResearchBody research={research}/></div>
-    <p className="web-meta">{research.sources.length} source{research.sources.length === 1 ? '' : 's'}{research.pagesRead !== undefined ? ` · ${research.pagesRead} page${research.pagesRead === 1 ? '' : 's'} read` : ''}{research.dropped ? ` · ${research.dropped} dropped as irrelevant` : ''}</p>
+    <p className="web-meta">{research.sources.length} source{research.sources.length === 1 ? '' : 's'}{research.pagesRead !== undefined ? ` · ${research.pagesRead} page${research.pagesRead === 1 ? '' : 's'} read` : ''}{research.dropped ? ` · ${research.dropped} dropped as irrelevant` : ''}{expiryLabel(request.expiresAt) ? <> · {expiryLabel(request.expiresAt)}</> : null}</p>
     {noting && <textarea ref={field} className="other-field" aria-label="Note for the agent" placeholder="Why you reject it (the agent sees this note, not the research)…" maxLength={1000} rows={2} value={note} disabled={locked}
       onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); reject(); } }}/>}
     <div className="card-actions">
@@ -113,9 +113,9 @@ export function WebResearchLine({ toolCallId, argsText, result, pending, decided
     </div>;
   }
   const outcome = researchOutcome(args, result);
-  const Icon = outcome.state === 'approved' ? ShieldCheck : outcome.state === 'dismissed' ? ShieldX : outcome.state === 'failed' || outcome.state === 'needed-approval' ? CircleAlert : Globe;
+  const Icon = outcome.state === 'approved' ? ShieldCheck : outcome.state === 'dismissed' ? ShieldX : outcome.state === 'expired' ? Clock : outcome.state === 'failed' || outcome.state === 'needed-approval' ? CircleAlert : Globe;
   const id = `web-${toolCallId}`;
-  return <div className="line web-line" data-tone={outcome.state === 'approved' ? 'answered' : outcome.state === 'dismissed' ? 'denied' : outcome.state === 'failed' || outcome.state === 'needed-approval' ? 'error' : 'done'} data-open={open || undefined} data-tool-call-id={toolCallId} data-conversation-part="web-research">
+  return <div className="line web-line" data-tone={outcome.state === 'approved' ? 'answered' : outcome.state === 'dismissed' || outcome.state === 'expired' ? 'denied' : outcome.state === 'failed' || outcome.state === 'needed-approval' ? 'error' : 'done'} data-open={open || undefined} data-tool-call-id={toolCallId} data-conversation-part="web-research">
     <button type="button" className="line-summary" aria-expanded={open} aria-controls={id} onClick={() => setOpen(o => !o)}>
       <Icon size={14} className="line-icon" aria-hidden="true"/><span className="line-label">{outcome.label}</span>
       {outcome.state === 'approved' && <span className="line-meta">{outcome.research.sources.length} source{outcome.research.sources.length === 1 ? '' : 's'}</span>}

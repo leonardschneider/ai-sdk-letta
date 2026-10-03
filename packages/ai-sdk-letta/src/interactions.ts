@@ -26,6 +26,12 @@ export type InteractionRequest = {
   onBehalfOf?: string;
   /** For approvals: whoever denies may add a note for the agent (`InteractionResponse.text`, up to 1000 characters). */
   allowNote?: boolean;
+  /**
+   * For approvals that expire (ISO time): the tool withdraws the prompt then
+   * and the call ends as expired. Hosts let it wait until then rather than
+   * applying their own human-wait budget.
+   */
+  expiresAt?: string;
   options?: Question['options'];
   allowFreeText?: boolean;
   multiSelect?: boolean;

@@ -14,8 +14,8 @@ export {
   type ImageInputErrorCode, type ImageMediaType, type ImageLimits, type DecodedImage,
 } from './images.js';
 export {
-  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, INTERNAL_MEMORY_TOOLS,
-  type AgentDefinition, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
+  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
+  type AgentDefinition, type WebSearchSettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
 export { openLettaAgent, createLettaAgent, openAgentHost, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget } from './runtime.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
@@ -58,7 +58,7 @@ export {
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
 export {
   webSearchTool, webSearchTools, webSearchEnabled, createWebResearcher, searxngSearch, validateResearch, deliverResearch, researchPreview, summaryPrompt, parseSummaryText,
-  WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_PERMISSIONS, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_RESEARCH_PREVIEW, WEB_SUMMARY_SCHEMA, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_DISMISSED,
+  WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_PERMISSIONS, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_RESEARCH_PREVIEW, WEB_SUMMARY_SCHEMA, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_DISMISSED, WEB_SEARCH_EXPIRED,
   type WebSearchInput, type WebSearchOutput, type WebResearch, type WebClaim, type WebSource, type WebSearchResult, type WebSourceInput, type WebSummaryRequest, type WebSummarizer,
   type WebSearchEngine, type WebResearcher, type WebResearcherOptions, type WebSearchContext,
 } from './web-search.js';

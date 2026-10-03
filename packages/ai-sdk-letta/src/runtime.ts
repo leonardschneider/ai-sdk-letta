@@ -346,7 +346,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
           ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
           ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
-          ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
+          ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, reviewTimeoutMs: definition.webSearch.reviewTimeoutMs, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;

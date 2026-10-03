@@ -1,6 +1,6 @@
 import { jsonSchema, tool, type Tool } from 'ai';
 import { Ajv } from 'ajv';
-import type { ToolPermission } from './definition.js';
+import { WEB_SEARCH_REVIEW_LIMITS, type ToolPermission } from './definition.js';
 import type { TurnActor } from './credentials.js';
 import type { ApprovalPreview } from './interactions.js';
 import { withPreparation, PREPARED_CONTEXT, REVIEWED_CONTEXT, type PreparedCall } from './tools.js';
@@ -90,7 +90,7 @@ export interface WebResearcher {
   research(request: { query: string; purpose?: string }, options: { signal: AbortSignal; actor?: TurnActor }): Promise<WebResearch | { query: string; purpose?: string; empty: true; searchedAt: string }>;
 }
 /** What the runtime binds for a turn. */
-export type WebSearchContext = { researcher: WebResearcher; actor?: TurnActor };
+export type WebSearchContext = { researcher: WebResearcher; actor?: TurnActor; /** How long a person has to review a result (the definition's `webSearch.reviewTimeoutMs`). */ reviewTimeoutMs?: number };
 
 /** Arguments of `web_search`. */
 export type WebSearchInput = { query: string; purpose?: string };
@@ -315,6 +315,9 @@ const FAILURES: Record<string, string> = {
 };
 const failure = (code: string): WebSearchOutput => ({ error: code, message: FAILURES[code] ?? FAILURES.search_failed! });
 
+/** What the agent is told when nobody reviews a result in time. */
+export const WEB_SEARCH_EXPIRED = 'Web research expired: nobody reviewed this result in time, so none of it reaches you. Tell the user in one short sentence that the web search expired before it was reviewed, and continue without it. Do not search again unless they ask.';
+
 /** What the agent is told when the person rejects a result. */
 export const WEB_SEARCH_DISMISSED = 'The person reviewing this web research dismissed it: none of it reaches you. Do not search for the same thing again unless they ask; continue without it.';
 
@@ -370,6 +373,7 @@ export const webSearchTool: Tool<WebSearchInput, WebSearchOutput> = withPreparat
     return deliverResearch(prepared.research, reviewed);
   },
 }), async (input, { abortSignal, context }): Promise<PreparedCall> => {
+  const started = Date.now();
   const { query, purpose } = input as WebSearchInput;
   const cleanQuery = visible(query, WEB_SEARCH_LIMITS.maxQueryCharacters);
   const cleanPurpose = purpose === undefined ? undefined : visible(purpose, WEB_SEARCH_LIMITS.maxPurposeCharacters) || undefined;
@@ -382,7 +386,10 @@ export const webSearchTool: Tool<WebSearchInput, WebSearchOutput> = withPreparat
   // Nothing found: nothing from the web to review.
   if ('empty' in result) return { output: { results: 0, query: cleanQuery, message: 'The search found nothing. Try a different query once, or answer without web results.' } };
   if (!result.sources.length) return { output: { results: 0, query: cleanQuery, message: 'The search found no relevant sources. Try a different query once, or answer without web results.' } };
-  return { approval: 'required', preview: researchPreview(result), state: { research: result } satisfies PreparedSearch, denied: { message: WEB_SEARCH_DISMISSED, allowNote: true } };
+  // The review expires after the agent's review time, and always before the harness ends the call (5 minutes after it started).
+  const review = search.reviewTimeoutMs ?? WEB_SEARCH_REVIEW_LIMITS.defaultTimeoutMs;
+  const at = Math.min(Date.now() + review, started + WEB_SEARCH_REVIEW_LIMITS.callBudgetMs);
+  return { approval: 'required', preview: researchPreview(result), state: { research: result } satisfies PreparedSearch, denied: { message: WEB_SEARCH_DISMISSED, allowNote: true }, expires: { at, message: WEB_SEARCH_EXPIRED } };
 });
 
 /** The web search tool, to spread into a definition's tools. */

@@ -47,11 +47,17 @@ export function researchFromPreview(preview: { kind?: string; data?: Record<stri
     dropped: typeof data.dropped === 'number' && data.dropped >= 0 ? Math.floor(data.dropped) : 0, ...(typeof data.pagesRead === 'number' ? { pagesRead: data.pagesRead } : {}) };
 }
 
+/** "Expires at 4:52 PM" for a review card, or undefined. */
+export function expiryLabel(expiresAt: string | undefined, format = (date: Date) => date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })): string | undefined {
+  const time = expiresAt ? Date.parse(expiresAt) : NaN;
+  return Number.isFinite(time) ? `Expires at ${format(new Date(time))} if nobody reviews it.` : undefined;
+}
+
 /** What a finished `web_search` call shows where it was made. */
 export type ResearchOutcome =
   | { state: 'approved'; label: string; research: Research; reviewed: boolean }
   | { state: 'dismissed'; label: string; note?: string }
-  | { state: 'empty' | 'failed' | 'needed-approval' | 'cancelled'; label: string; detail?: string };
+  | { state: 'empty' | 'failed' | 'needed-approval' | 'cancelled' | 'expired'; label: string; detail?: string };
 
 const FAILED: Record<string, string> = {
   web_search_unavailable: 'Web search isn’t set up on this server',
@@ -76,6 +82,7 @@ export function researchOutcome(args: Record<string, unknown>, result: unknown):
     return { state: 'approved', label: `${reviewed ? 'Web research approved' : 'Web research (pre-approved, not reviewed)'}: ${research.query}`, research, reviewed };
   }
   if (value.error === 'user_denied') return { state: 'dismissed', label: `Web research dismissed: ${query}`, ...(str(value.note, 1000) ? { note: str(value.note, 1000) } : {}) };
+  if (value.error === 'review_expired') return { state: 'expired', label: `Web research expired: ${query}`, detail: 'Nobody reviewed the result in time, so the agent got none of it.' };
   if (value.error === 'approval_required') return { state: 'needed-approval', label: `Web research needed review: ${query}`, detail: 'Started by an automation, so nobody could review the result. Nothing was searched. Pre-approve web search for that automation to let it search unreviewed.' };
   if (value.error === 'approval_cancelled' || value.error === 'tool_cancelled' || value.error === 'unattended_stopped') return { state: 'cancelled', label: `Web research cancelled: ${query}` };
   if (value.results === 0) return { state: 'empty', label: `Web research found nothing relevant: ${query}` };

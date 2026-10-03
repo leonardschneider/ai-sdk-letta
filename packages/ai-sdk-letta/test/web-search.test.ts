@@ -6,7 +6,7 @@ import { tool, jsonSchema } from 'ai';
 import {
   ToolInteractions, createToolBridge, createWebResearcher, defineAgent, isBlockedAddress, checkPageUrl, readPage, readableText, PageError, PAGE_LIMITS,
   searxngSearch, validateResearch, parseSummaryText, summaryPrompt, summarizerSessionOptions, webSearchTools, webSearchEnabled, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS,
-  WEB_SEARCH_TOOL_PERMISSIONS, WEB_SUMMARIZER_INSTRUCTIONS, type InteractionRequest, type UnattendedPolicy, type WebSummarizer, type WebSummaryRequest, type ToolActivity,
+  WEB_SEARCH_TOOL_PERMISSIONS, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_REVIEW_LIMITS, DEFAULT_WEB_SEARCH, type InteractionRequest, type UnattendedPolicy, type WebSummarizer, type WebSummaryRequest, type ToolActivity,
 } from '../src/index.js';
 
 /* ------------------------------------------------------------------ */
@@ -236,7 +236,7 @@ const fakeSummarizer = (calls: WebSummaryRequest[]): WebSummarizer => async requ
 };
 
 /** The main agent's bridge, with web_search and two dangerous tools that must never run during a search. */
-function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | undefined; answer?: (request: InteractionRequest) => object; summarize?: WebSummarizer } = {}) {
+function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | undefined; answer?: (request: InteractionRequest, signal: AbortSignal) => object | Promise<object>; summarize?: WebSummarizer; reviewTimeoutMs?: number } = {}) {
   const ran: string[] = [];
   const calls: WebSummaryRequest[] = [];
   const researcher = createWebResearcher({ search: web.origin, summarize: options.summarize ?? fakeSummarizer(calls), pages: { unsafeAllowOrigins: [web.origin] } });
@@ -246,10 +246,10 @@ function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | un
     permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS, atlassian_update: 'ask', run_command: 'allow' } });
   const interactions = new ToolInteractions();
   const requests: InteractionRequest[] = [];
-  interactions.connect(async request => { requests.push(request); return { id: request.id, ...(options.answer?.(request) ?? { approved: true }) }; });
+  interactions.connect(async (request, signal) => { requests.push(request); return { id: request.id, ...((await options.answer?.(request, signal)) ?? { approved: true }) }; });
   const events: ToolActivity[] = [];
   const bridge = createToolBridge({ tools: definition.tools, permissions: definition.permissions, interactions, timeoutMs: 30_000, persist: e => events.push(e),
-    context: () => ({ [WEB_SEARCH_CONTEXT]: { researcher } }), ...(options.unattended ? { unattended: options.unattended } : {}) });
+    context: () => ({ [WEB_SEARCH_CONTEXT]: { researcher, ...(options.reviewTimeoutMs ? { reviewTimeoutMs: options.reviewTimeoutMs } : {}) } }), ...(options.unattended ? { unattended: options.unattended } : {}) });
   return { bridge, ran, calls, requests, events, definition };
 }
 const output = (result: { content: { type: string; text?: string }[] }) => JSON.parse(result.content[0]!.text!);
@@ -370,5 +370,40 @@ test('failures are fixed codes the agent can act on; an empty or irrelevant sear
     assert.equal(none.results, 0); assert.equal(irrelevant.requests.length, 0);
     const slow = createWebResearcher({ search: web.origin, summarize: (_request, signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))), pages: { unsafeAllowOrigins: [web.origin] }, limits: { timeoutMs: 300 } });
     await assert.rejects(slow.research({ query: 'release' }, { signal: new AbortController().signal }), /search_timeout/);
+  } finally { await web.close(); }
+});
+
+test('webSearch.reviewTimeoutMs: validated per agent, defaults to the harness maximum', () => {
+  const base = { id: 'x', name: 'x', model: 'a/b', instructions: 'x', tools: webSearchTools, permissions: WEB_SEARCH_TOOL_PERMISSIONS };
+  assert.deepEqual(defineAgent(base).webSearch, { reviewTimeoutMs: 280_000 });
+  assert.equal(DEFAULT_WEB_SEARCH.reviewTimeoutMs, WEB_SEARCH_REVIEW_LIMITS.maxTimeoutMs);
+  assert.equal(defineAgent({ ...base, webSearch: { reviewTimeoutMs: 60_000 } }).webSearch.reviewTimeoutMs, 60_000);
+  for (const bad of [900_000, 300_001, 5000, 1.5e4 + 0.5, '60000', null]) {
+    assert.throws(() => defineAgent({ ...base, webSearch: { reviewTimeoutMs: bad as number } }), /reviewTimeoutMs must be 10000–280000/, String(bad));
+  }
+  assert.throws(() => defineAgent({ ...base, webSearch: { timeout: 1 } as never }), /Unknown webSearch setting/);
+});
+
+test('a review nobody answers expires: the prompt is withdrawn, the agent is told "Web research expired" and gets none of the result', async () => {
+  const web = await loopbackWeb();
+  try {
+    let withdrawn = false;
+    const main = mainAgent(web, { reviewTimeoutMs: 300, answer: (_request, signal) => new Promise(resolve => signal.addEventListener('abort', () => { withdrawn = true; resolve({ approved: true }); })) });
+    const started = Date.now();
+    const result = await main.bridge.execute('web_search', 'expire-1', { query: 'release 4.2' });
+    const told = output(result);
+    assert.equal(result.isError, true);
+    assert.equal(told.error, 'review_expired');
+    assert.match(told.message, /^Web research expired/);
+    assert.doesNotMatch(JSON.stringify(told), /4\.2 shipped|127\.0\.0\.1/);
+    assert.ok(withdrawn, 'the review prompt was withdrawn');
+    assert.ok(Date.now() - started < 5000);
+    // The review request says when it expires (the app shows it, and hosts wait until then).
+    const expiresAt = Date.parse(main.requests[0]!.expiresAt!);
+    assert.ok(expiresAt > started && expiresAt <= started + WEB_SEARCH_REVIEW_LIMITS.callBudgetMs);
+    assert.equal(main.events.at(-1)?.code, 'review_expired');
+    // Answered in time, the same review still delivers.
+    const quick = mainAgent(web, { reviewTimeoutMs: 5000 });
+    assert.equal(output(await quick.bridge.execute('web_search', 'expire-2', { query: 'release 4.2' })).untrusted, true);
   } finally { await web.close(); }
 });

@@ -37,6 +37,16 @@ function fixture(deadlineMs?: number, humanWaitMs?: number) {
             await new Promise(resolve => setTimeout(resolve, 5));
             yield { type: 'tool_result', toolCallId: 'tool-1', content: 'External tool ask_user is still running. Its completion will arrive as a task notification.', uuid: '2' } as SDKMessage;
           }
+          if (input.startsWith('expiring ')) {
+            // A prompt that expires on its own after N ms (as web_search's review does): the tool withdraws it, then the turn ends normally.
+            const ms = Number(input.split(' ')[1]);
+            yield { type: 'tool_call', toolCallId: 'tool-1', toolName: 'text_stats', toolInput: { text: 'hello' }, uuid: '1' } as SDKMessage;
+            const expiry = AbortSignal.timeout(ms);
+            const response = await interactions.request({ toolCallId: 'tool-1', tool: 'text_stats', kind: 'approval', title: 'Review', expiresAt: new Date(Date.now() + ms).toISOString() }, AbortSignal.any([signal, expiry]))
+              .catch(() => ({ id: '', expired: true } as InteractionResponse & { expired?: boolean }));
+            answers.push(response);
+            yield { type: 'tool_result', toolCallId: 'tool-1', content: JSON.stringify((response as { expired?: boolean }).expired ? { error: 'review_expired' } : { approved: response.approved }), uuid: '2' } as SDKMessage;
+          }
           if (input === 'approve' || input === 'question' || input === 'wait') {
             yield { type: 'tool_call', toolCallId: 'tool-1', toolName: 'text_stats', toolInput: { text: 'hello' }, uuid: '1' } as SDKMessage;
             const response = await interactions.request(input === 'question'
@@ -249,4 +259,27 @@ test('reconnect display keeps fixed denial reasons and the run start time', () =
   ] });
   assert.deepEqual(user.metadata, { createdAt: '2026-09-29T09:00:00.000Z' });
   assert.deepEqual(assistant.parts.map(p => p.type === 'dynamic-tool' && p.state === 'output-error' ? p.errorText : null), ['{"error":"user_denied"}', 'tool_failed']);
+});
+
+test('a prompt that expires on its own waits past the shared human-wait budget, can be answered, and its expiry ends the turn cleanly', async () => {
+  // Shared budget 50 ms; the prompt expires after 400 ms (plus the margin the runtime adds).
+  const f = fixture(2000, 50);
+  try {
+    const thread = randomUUID(); await f.runtime.create('owner', thread, 'Expiring');
+    const answered = start(thread, 'expiring 400'); await f.runtime.start('owner', answered);
+    await until(() => f.runtime.events('owner', answered.id, 0).events.some(e => e.type === 'interaction'));
+    await new Promise(resolve => setTimeout(resolve, 200)); // longer than the shared budget
+    assert.equal(f.runtime.events('owner', answered.id, 0).status, 'running');
+    const request = f.runtime.events('owner', answered.id, 0).events.find(e => e.type === 'interaction')!.data as InteractionRequest;
+    f.runtime.answer('owner', answered.id, { id: request.id, approved: true });
+    await until(() => f.runtime.events('owner', answered.id, 0).status === 'completed');
+    // Nobody answers: the prompt expires, the turn completes and the conversation takes the next message.
+    const expired = start(thread, 'expiring 150', answered.id); await f.runtime.start('owner', expired);
+    for (let i = 0; i < 100 && f.runtime.events('owner', expired.id, 0).status === 'running'; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    const { status, events } = f.runtime.events('owner', expired.id, 0);
+    assert.equal(status, 'completed');
+    assert.equal(events.find(e => e.type === 'interaction_ended')?.data.code, 'expired');
+    const next = start(thread, 'one', expired.id); await f.runtime.start('owner', next);
+    await until(() => f.runtime.events('owner', next.id, 0).status === 'completed');
+  } finally { await f.cleanup(); }
 });
