@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
+import { ConversationForkHydrationError, LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
 import { jsonSchema, tool, type Tool, type ToolSet, type UIMessage } from 'ai';
 import { LettaAgent } from './agent.js';
 import { creationOptions, dreamingCommand, INTERNAL_MEMORY_TOOLS, type AgentDefinition } from './definition.js';
@@ -21,6 +21,8 @@ import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './c
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
 import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
+import { MemoryJournal } from './memory-journal.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -45,7 +47,12 @@ export type ConversationChoice = { conversationId: string } | { newTitle: string
 export interface OpenAgentOptions {
   /** State root; see {@link resolveStateDirectory}. */
   stateDirectory?: string;
-  /** Open this conversation (`'default'` or a Letta conversation ID). */
+  /**
+   * Open this conversation (a Letta conversation ID; `'default'` only for an
+   * agent's existing default conversation). Without it (and without
+   * `newTitle`), the last selected one, or a new named conversation when
+   * there is none yet: new conversations never use the agent's default one.
+   */
   conversationId?: string;
   /** Create and open a new conversation with this title. */
   newTitle?: string;
@@ -95,6 +102,8 @@ export interface LettaRuntime<TOOLS extends ToolSet = ToolSet> {
   navigation: NavigationSource;
   /** The agent's resources (all conversations' files, git-backed), when it has file tools or a sandbox. */
   resources?: ResourceStore;
+  /** Rewind support for the open conversation (see {@link ConversationRewind}). */
+  rewind: ConversationRewind;
   /** Close the session and SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
@@ -156,6 +165,40 @@ export async function openResources(paths: ReturnType<typeof statePaths>, agentI
 /** A conversation to open on an {@link AgentHost}: an existing one, or a new one with this title. */
 export type ConversationTarget = { conversationId: string } | { newTitle: string };
 
+/** One backend history record, as a rewind reads it (see {@link ConversationRewind.records}). */
+export interface HistoryRecord {
+  id: string;
+  type: string;
+  /** User messages: the OTID the turn was sent with. */
+  otid?: string;
+  date?: string;
+  /** User and assistant messages: the visible text (system reminders removed). */
+  text?: string;
+  /** Tool calls: the tool and its arguments (as sent by the model). */
+  tool?: { name: string; arguments: unknown };
+}
+/**
+ * What a rewind needs from an open conversation (see the server's
+ * `ThreadRuntime.rewind`): its backend history, a fork of it, and the
+ * agent's memory journal.
+ */
+export interface ConversationRewind {
+  /** Backend history records, oldest first (at most `HISTORY_LIMIT`). */
+  records(): Promise<{ records: HistoryRecord[]; truncated: boolean }>;
+  /**
+   * A new conversation with this one's history up to and including
+   * `messageId` (`null`: no history; a new empty conversation with the same
+   * title). `onCreated` gets its ID as soon as it is known. Only named
+   * conversations are forked: the agent's `default` conversation (used by
+   * earlier versions) is refused with `rewind_legacy_conversation`.
+   */
+  fork(messageId: string | null, onCreated?: (conversationId: string) => void): Promise<string>;
+  /** Archive a conversation of this agent (kept for audit, hidden from lists). `'default'` cannot be archived: `false`. */
+  archive(conversationId: string): Promise<boolean>;
+  /** The agent's memory journal (which turn changed which memory). */
+  readonly memory: MemoryJournal;
+}
+
 /** One open conversation of an {@link AgentHost}: its own Letta session, tools, interactions and sandbox. */
 export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   agent: LettaAgent<TOOLS>;
@@ -163,6 +206,8 @@ export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   title: string;
   /** Reload the display history from the backend (nothing is sent; projected like `presentation.initialMessages`). */
   history(): Promise<UIMessage[]>;
+  /** Rewind support (fork, history records, memory journal). */
+  rewind: ConversationRewind;
   /** Close this conversation's session (the host and other conversations stay open). Idempotent. */
   close(): Promise<void>;
 }
@@ -374,6 +419,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           sandbox: () => shell?.session,
         });
         let memoryRoot: string | undefined;
+        const turnIds = new WeakMap<object, string>();
         session = sessionClient.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
         const ready = await session.ready();
         if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
@@ -398,6 +444,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         if (reflection?.trigger !== definition.dreaming.trigger || reflection.step_count !== definition.dreaming.stepCount) throw new Error('Persistent dreaming configuration differs from the definition; inspect agent settings before continuing');
         assertIdle(status);
         memoryRoot = status.memoryDirectory;
+        const journal = MemoryJournal.open(paths.memory, identity.agentId, memoryRoot, definition.name);
         selectConversation(conversationId);
         const sandboxLine = shell ? `\nSandbox: ${typeof shell.config.provider === 'string' ? shell.config.provider : 'custom'} · no network${definition.permissions.run_command_online === 'ask' ? ' (network commands ask first)' : ''}${shell.hasProject ? ` · project ${shell.config.project!.path}` : ''}` : '';
         const dreamingLine = definition.dreaming.trigger === 'off' ? 'Dreaming: off' : `Dreaming: ${reflection.trigger}${reflection.trigger === 'step-count' ? ` ${reflection.step_count}` : ''} configured (not evidence a dream ran)`;
@@ -416,10 +463,55 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
           // Whatever the agent changed in the resources during the turn becomes one commit.
           // Folder renames of this conversation wait while a turn runs, then apply after that commit.
-          ...(store ? { beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId) } : {}),
+          // Memory: what the turn changed is committed and recorded with its ID (see MemoryJournal), so a rewind can undo it.
+          beforeTurn: turn => { const id = turn.otid ?? `turn-${randomUUID()}`; turnIds.set(turn, id); store?.beginTurn(conversationId, turn.otid); journal.beginTurn(id, conversationId); },
+          afterTurn: async turn => { const id = turnIds.get(turn); turnIds.delete(turn); await Promise.all([store?.endTurn(conversationId, turn.otid), id ? journal.endTurn(id, conversationId) : undefined]); },
         });
+        const rewind: ConversationRewind = {
+          memory: journal,
+          records: async () => {
+            const loaded = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
+            return { records: loaded.messages.map(historyRecord), truncated: loaded.truncated };
+          },
+          fork: async (messageId, onCreated) => {
+            // Conversations made before named-only conversations (the agent's default one) are never forked: rewind refuses them.
+            if (conversationId === 'default') throw new Error('rewind_legacy_conversation');
+            const manager = managementClient(REQUEST_TIMEOUT_MS);
+            let forked: string;
+            try {
+              if (messageId === null) {
+                const created = await manager.conversations.create({ agentId: identity.agentId, summary: sanitizeText(conversationTitle) });
+                if (created.agent_id !== identity.agentId) throw new Error('Created conversation belongs to a different agent');
+                forked = created.id;
+                onCreated?.(forked);
+              } else {
+                try {
+                  const made = await manager.conversations.fork(conversationId, { messageId });
+                  forked = made.id;
+                  onCreated?.(forked);
+                  if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent');
+                } catch (error) {
+                  // Made, but its state could not be read back: the ID is known, so the caller records it and can finish the rewind.
+                  if (!(error instanceof ConversationForkHydrationError)) throw error;
+                  forked = error.conversationId;
+                  onCreated?.(forked);
+                  const made = await manager.conversations.retrieve(forked);
+                  if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent');
+                }
+              }
+            } finally { await manager.close(); }
+            if (!validConversationId(forked) || forked === 'default') throw new Error('rewind_fork_failed');
+            return forked;
+          },
+          archive: async id => {
+            if (id === 'default' || !validConversationId(id)) return false;
+            const updater = managementClient(REQUEST_TIMEOUT_MS);
+            try { const updated = await updater.conversations.update(id, { archived: true }); return updated.archived === true; }
+            finally { await updater.close(); }
+          },
+        };
         const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening });
-        self = { agent, conversationId, title: conversationTitle, live, history: reload, truncated: history.truncated, startupStatus, close: shutdown };
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
       } catch (error) { await shutdown(); throw error; }
@@ -428,10 +520,33 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     return {
       definition, identity, lease, ...(resources ? { resources } : {}),
       openConversation,
-      open: async target => { const { agent, conversationId, title, history, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, close: closeConversation }; },
+      open: async target => { const { agent, conversationId, title, history, rewind, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, close: closeConversation }; },
       close,
     };
   } catch (error) { await close(); throw error; }
+}
+
+/** A backend record as a rewind reads it (see {@link HistoryRecord}). */
+function historyRecord(message: { id: string }): HistoryRecord {
+  const row = message as unknown as Record<string, unknown>;
+  const type = typeof row.message_type === 'string' ? row.message_type : 'unknown';
+  const record: HistoryRecord = { id: message.id, type };
+  if (typeof row.otid === 'string') record.otid = row.otid;
+  if (typeof row.date === 'string') record.date = row.date;
+  if (type === 'user_message' || type === 'assistant_message') {
+    const visible = projectHistory([message] as never, [], 0);
+    const text = visible[0]?.parts.filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('\n');
+    if (text) record.text = text;
+  }
+  if (type === 'tool_call_message' || type === 'approval_request_message') {
+    const call = row.tool_call as { name?: unknown; arguments?: unknown } | undefined;
+    if (call && typeof call.name === 'string') {
+      let args: unknown = call.arguments;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* as sent */ } }
+      record.tool = { name: call.name, arguments: args };
+    }
+  }
+  return record;
 }
 
 /**
@@ -449,6 +564,9 @@ async function webResearcher(definition: AgentDefinition, option: OpenAgentOptio
   if (!settings.summarize) await sweepWebSummarizers({ directory, backendDirectory }).catch(() => 0);
   return createWebResearcher({ ...settings, summarize });
 }
+
+/** Title of a conversation created when none was chosen (first launch of a new agent). */
+export const newConversationTitle = (now = new Date()) => `Conversation ${now.toISOString().slice(0, 16).replace('T', ' ')}`;
 
 /** Open an agent, or throw if no conversation was selected. */
 export async function createLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: Omit<OpenAgentOptions, 'choose'> = {}): Promise<LettaRuntime<TOOLS>> {
@@ -476,19 +594,23 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       const manager = managementClient();
       try { choice = await options.choose(identity, await listConversations(query => manager.conversations.list(query), identity.agentId)); }
       finally { await manager.close(); }
-    } else choice = options.newTitle !== undefined ? { newTitle: options.newTitle } : { conversationId: options.conversationId ?? identity.conversationId };
+    } else {
+      // Nothing selected yet (a new agent): create a named conversation, never the agent's default one.
+      const conversationId = options.conversationId ?? identity.conversationId;
+      choice = options.newTitle !== undefined ? { newTitle: options.newTitle } : conversationId ? { conversationId } : { newTitle: newConversationTitle() };
+    }
     if (choice === null) { await host.close(); return undefined; }
     const conversation = await host.openConversation(choice);
     const { live, conversationId } = conversation;
     // Navigation reads through this same mapped runtime; it never enumerates other agents.
-    let listedIds = new Set<string>(['default']);
+    let listedIds = new Set<string>(identity.namedOnly ? [] : ['default']);
     const navigation: NavigationSource = {
       agentId: identity.agentId, currentId: conversationId,
       list: async signal => {
         assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         const reader = managementClient(15_000);
         try {
-          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal);
+          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly);
           listedIds = new Set(result.entries.map(entry => entry.id));
           return result;
         } finally { await reader.close(); }
@@ -511,6 +633,6 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
-    return { agent: conversation.agent, identity, navigation, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
+    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
   } catch (error) { await host.close(); throw error; }
 }

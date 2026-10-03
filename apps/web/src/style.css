@@ -251,6 +251,36 @@ a.msg-file:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px;
 .copy-btn[data-copied] .when-idle { display: none; }
 @media (hover: none) { .msg-actions { opacity: 1; } }
 
+/* ---------- Rewind: edit an earlier message ---------- */
+.msg[data-editing] .msg-body { justify-content: flex-end; }
+.edit-btn[data-unavailable] { opacity: .45; cursor: help; }
+.edit-bubble { width: min(100%, 620px); margin-left: auto; background: var(--bg-elev); border: 1px solid var(--accent); border-radius: 16px; padding: 10px 12px 8px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.edit-input { width: 100%; border: 0; outline: none; resize: none; background: transparent; color: var(--text); font: inherit; line-height: 1.5; min-height: 44px; }
+.edit-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.edit-hint { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; color: var(--text-3); font-size: 12.5px; }
+/* While you edit, what the rewind removes fades. */
+.msg[data-editing] ~ .msg { opacity: .42; transition: opacity .15s; }
+.modal.rewind { width: 600px; padding: 18px 20px 14px; max-height: min(780px, 100%); overflow: hidden; }
+.rewind-body { overflow-y: auto; min-height: 0; margin: 0 -20px; padding: 0 20px; display: flex; flex-direction: column; gap: 14px; }
+.rewind-edit { background: var(--user-bubble); border-radius: 12px; padding: 10px 14px; }
+.rewind-label { display: block; font-size: 12px; color: var(--text-3); margin-bottom: 2px; }
+.rewind-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.rewind-section { border-top: 1px solid var(--border); padding-top: 10px; }
+.rewind-heading { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 650; margin: 0 0 6px; }
+.rewind-section[data-section="external"] .rewind-heading { color: var(--danger); }
+.rewind-section[data-section="conflicts"] .rewind-heading svg { color: #b7791f; }
+.rewind-note { margin: 0 0 6px; color: var(--text-2); font-size: 12.5px; }
+.rewind-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.rewind-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 13.5px; padding: 5px 8px; border-radius: 8px; background: var(--hover); }
+.rewind-list li[data-tone="warn"] { background: var(--warn-soft); border: 1px solid var(--warn-border); }
+.rewind-list li[data-tone="danger"] { background: var(--danger-soft); }
+.rewind-item { overflow-wrap: anywhere; min-width: 0; flex: 1 1 220px; font-family: inherit; }
+.rewind-section[data-section="files"] .rewind-item, .rewind-section[data-section="memory"] .rewind-item, .rewind-section[data-section="conflicts"] .rewind-item { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12.5px; }
+.rewind-section[data-section="turns"] .rewind-item { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rewind-detail { color: var(--text-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.rewind-none { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text-2); font-size: 13px; }
+.rewind-error { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0 0; color: var(--danger); font-size: 13.5px; }
+
 .thinking { display: inline-flex; gap: 5px; padding: 10px 2px; }
 .thinking .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite ease-in-out both; }
 .thinking .dot:nth-child(2) { animation-delay: .15s; }
@@ -696,10 +726,10 @@ body[data-resizing] iframe { pointer-events: none; }
   .topbar .resources-btn, .topbar .latex-btn { margin-left: 0; }
   .modal-scrim { padding: 0; place-items: stretch; }
   .modal.preview { width: 100%; height: 100%; border-radius: 0; border: 0; }
-  .modal.confirm, .modal.move, .modal.members, .modal.integration, .modal.automations { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .modal.confirm, .modal.move, .modal.members, .modal.integration, .modal.automations, .modal.rewind { align-self: end; width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   .adf-view { padding: 4px 12px 24px; }
   .adf-source { padding: 8px 12px; }
-  .modal.members, .modal.automations { max-height: 92dvh; }
+  .modal.members, .modal.automations, .modal.rewind { max-height: 92dvh; }
   .token-row { gap: 8px; }
   .token-row .btn.ghost { padding: 5px 8px; }
   .token-row .member-login { white-space: normal; }

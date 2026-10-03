@@ -653,6 +653,92 @@ is copied from them.
 
 Step by step: [the guide](docs/building-your-own-agent.md#7-optional-built-ins-files-shell-images-atlassian-web-search).
 
+### Rewind (edit an earlier message)
+
+In the browser app you can **edit one of your earlier messages**: the
+conversation continues from the edited message, and what came after it is
+gone from the conversation. Hover your message, choose the pencil (Edit),
+change the text and choose **Save & rewind**. Nothing changes until you
+confirm the summary of what the rewind does:
+
+- **Turns removed** from this conversation (the edited one and every later one).
+- **Resources reverted**: the files those turns created, changed or deleted,
+  brought back to how they were (a created file is deleted, a deleted one
+  restored), as a file list.
+- **Memory reverted**: the agent's MemFS files those turns changed. A fact
+  the agent memorized in a rewound turn is gone, also from other
+  conversations (memory is shared).
+- **Can't be reverted cleanly**: a file something else changed after those
+  turns, on the same lines (another conversation, you in the Resources
+  panel). It is **kept as it is now**, and the summary says who changed it;
+  review it after the rewind. Changes on other lines of the same file are
+  merged: only the rewound turns' lines are undone.
+- **Kept**: changes since then that these turns did not make alone stay:
+  your own operations in the Resources panel, other conversations' work,
+  turns of several conversations that ran at the same time (their changes
+  cannot be told apart), and dreaming (background memory work).
+- **Can't be undone**: what happened outside the app, such as commands with
+  internet access (`run_command_online`), sandbox commands (a mounted
+  project folder is not in the resources), Jira and Confluence changes,
+  scheduled tasks that already ran, and any other application tool. Declare
+  application tools that only change the resources with
+  `rewindInternalTools` (a server option) so they are not listed.
+- **Withdrawn**: decisions and web research reviews those turns asked for
+  (pending, or decided but not sent to the agent yet), and tasks they
+  scheduled (their orchestrator jobs are removed).
+
+Confirming rewinds and sends the edited message as a new turn. Attachments
+of the edited message are not sent again; attach them again if needed.
+
+**How it works.** Every turn is sent with its run ID as the Letta message's
+OTID, and what it changes is recorded under that ID: the resources'
+end-of-turn commit carries `X-Turn: <run ID>` and `X-Conversation:`
+trailers, and the agent's memory changes are committed at the end of the
+turn (the agent often leaves them uncommitted) as "Agent memory changes"
+with the same trailers, recorded in a ledger (`<state>/memory/`). A rewind:
+
+1. forks the Letta conversation just before the edited message (the fork
+   holds exactly the history before it, so the agent does not remember the
+   rewound turns), and the thread now uses the fork; the old conversation
+   is archived and kept for audit;
+2. reverts the turns' commits like `git revert` (a three-way merge per
+   file, following later moves and renames) as **one new commit** in each
+   repository (`Rewind: revert 2 files changed by later turns in Trip`,
+   `Rewind: revert memory changes of later turns`). History is never
+   rewritten: the rewound turns' commits stay, and `git log` shows both;
+3. withdraws decisions, reviews and scheduled tasks, then sends the edited
+   message.
+
+It is **crash-safe**: each step is recorded first (`rewinds` in the
+runtime's `state.json`). A rewind that had not changed anything is given
+up; one that had forked is finished when the server starts again, and the
+thread always points at a conversation (the old one until the switch, the
+fork after it). Retrying the same request (`rewindId`) returns the same
+result; reverts are found again by their `X-Rewind: <id>` trailer, so
+nothing is applied twice.
+
+**Solo conversations only.** In the single-user app every conversation is
+yours. On a team server, you can rewind a conversation only you wrote in
+(every message any person sent in it is yours; others' messages withdrawn
+before they were sent do not count): in a group conversation, Edit is
+shown unavailable and says why, and the server refuses (`rewind_not_solo`).
+You also cannot rewind while a turn runs or messages wait to be sent
+(`runtime_busy`), past a turn an automation or scheduled task started
+(`rewind_automation`), past a turn that did not finish (`delivery_uncertain`),
+to a message sent before this version (`rewind_too_old`: what its turn
+changed is not recorded), or in an older conversation that uses the agent's
+default Letta conversation (`rewind_legacy_conversation`; see
+[Named conversations](#named-conversations)). The TUI has no rewind.
+
+**API.** `GET /v1/threads/:id/rewind` lists the messages you can edit
+(`{ runIds, refusal? }`). `POST /v1/threads/:id/rewind/preview` with
+`{ runId }` returns the summary (`RewindSummary`); nothing changes.
+`POST /v1/threads/:id/rewind` with `{ rewindId, runId, text, newRunId }`
+(UUIDs; the same body again returns the same result) rewinds and sends
+`text` as run `newRunId`. From code: `ThreadRuntime.rewindPreview()` and
+`rewind()`; underneath, `ResourceStore.planRewind()`/`applyRewind()` and
+`MemoryJournal` (in `ai-sdk-letta`).
+
 ### Shell commands (sandbox)
 
 Add the built-in sandbox tools and a `sandbox` option to let the agent run
@@ -795,6 +881,10 @@ on macOS (screenshots, copied images, or image files copied in Finder) and
 short notice and dropping a file still works. The terminal does not resize
 images: files over 5 MB are refused with a notice (the browser app
 downscales automatically).
+
+On a new agent, the first launch (and Enter in the picker when there is
+nothing to resume) creates a new named conversation; see
+[Named conversations](#named-conversations).
 
 Use it from code with `runTerminal(definition, process.argv.slice(2))` from
 `@ai-sdk-letta/tui`.
@@ -1248,7 +1338,7 @@ State lives in one directory, resolved in this order:
 ```
 <state>/
   agents/                  identity mappings, locks, pending intents; the Letta session cwd
-    <id>.json              logical ID -> Letta agent ID, backend, last conversation
+    <id>.json              logical ID -> Letta agent ID, backend, last conversation (absent until the first is created)
     <id>.lock              held while a process has the agent open
     <id>.pending.json      an agent creation whose outcome is unknown
     <id>.<conv>.turn.pending.json   a turn whose delivery is unconfirmed
@@ -1262,6 +1352,8 @@ State lives in one directory, resolved in this order:
   attachments/<letta agent ID>/.migrated/
                            files of 0.3 kept aside after they were moved into resources/
   credentials/atlassian/   each person's Atlassian site, email and API token (0600; one file per person)
+  memory/<letta agent ID>.json
+                           which turn changed which memory commit (for rewinds)
   server/<id>/automation.json
                            automation tokens (hashes only), idempotency keys of recent runs, scheduled tasks (0600)
 ```
@@ -1270,6 +1362,23 @@ State lives in one directory, resolved in this order:
 archived; they are never sent anywhere except to the model through the file
 tools and the sandbox. Manage them in the GUI's Resources panel, or with git
 (see [Resources](#resources)).
+
+### Named conversations
+
+Every new conversation is its own **named Letta conversation**: a new chat
+in the browser app (single-user and team), a run of an automation or a
+scheduled task that starts a conversation, the TUI's `--new`, `n` in its
+picker, and the first launch of a new agent (`createLettaAgent` and the TUI
+without a conversation: "Conversation 2026-10-03 09:12"). The agent's
+`default` Letta conversation is never used for a new one, so a new agent's
+mapping records no conversation until the first is created, and the TUI's
+picker and `/resume` do not list `default` for it.
+
+Agents created by earlier versions recorded `default` as their last
+conversation: they keep working unchanged. The TUI still lists and resumes
+their default conversation, `conversationId: 'default'` still opens it, and
+browser threads that use it keep their history. Nothing is migrated. Those
+older conversations cannot be rewound (see [Rewind](#rewind-edit-an-earlier-message)).
 
 **Keeping an existing agent.** The mapping is what ties a logical ID to a
 Letta agent. To reuse an agent you already created with an earlier tool or
@@ -1338,7 +1447,19 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   GIF, WebP; 5 MB each, 10 MB total) and, with the file tools, 8 files
   (PDF or text, 25 MB each) per turn. No Office documents, no OCR (scanned
   PDF pages are shown to the model as images, so reading them depends on
-  the model). No history edits, regeneration or retries by design.
+  the model). No regeneration or retries by design; editing an earlier
+  message is a rewind (see [Rewind](#rewind-edit-an-earlier-message)).
+- **Rewind.** Solo conversations only, in the browser app (not the TUI).
+  It undoes resources and memory changes, not effects outside the app
+  (they are listed). Memory is shared by all conversations: a fact the
+  rewound turns memorized is forgotten everywhere. Changes several
+  conversations made at the same time, and dreaming, are kept. A file
+  someone else changed later on the same lines is kept as it is.
+  Messages sent before this version cannot be rewound, and neither can
+  older conversations that use the agent's default Letta conversation
+  (`rewind_legacy_conversation`; Edit says "This older conversation can't
+  be rewound"). Needs git 2.40 or
+  later.
 - **Resources.** The panel refreshes by polling every few seconds while it
   is open (and at once when a turn ends). It lists up to 5,000 entries and
   versions up to 20,000 files; previews show files up to 25 MB, CSV and TSV

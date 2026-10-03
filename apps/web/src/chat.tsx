@@ -11,6 +11,7 @@ import type { Listened, MessageAuthor as Author, MessageSource } from './message
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
+import { EditAction, EditBubble, RewindContext } from './rewind.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -62,17 +63,26 @@ export function Message() {
   // A decision's outcome reached the agent here: one compact line, not a message bubble.
   if (role === 'user' && outcome) return <MessagePrimitive.Root className="msg decision-outcome-msg" data-role={role}><OutcomeMessage/></MessagePrimitive.Root>;
   if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} time={time}/></MessagePrimitive.Root>;
-  return <MessagePrimitive.Root className="msg" data-role={role}>
+  const runId = useAuiState(s => (s.message.metadata.custom as { runId?: string } | undefined)?.runId);
+  const text = useAuiState(s => s.message.parts.filter(p => p.type === 'text' && p.text !== IMAGE_PLACEHOLDER).map(p => (p as { text: string }).text).join('\n'));
+  const rewind = useContext(RewindContext);
+  const editing = role === 'user' && !!runId && rewind.editing === runId;
+  // Your own message: always in the single-user app; on a team server, one you wrote.
+  const me = useContext(AuthorContext);
+  const authorId = useAuiState(s => (s.message.metadata.custom as { author?: Author } | undefined)?.author?.id);
+  const mine = role === 'user' && (me === undefined || authorId === me);
+  return <MessagePrimitive.Root className="msg" data-role={role} data-editing={editing || undefined}>
     <MessageAuthor role={role}/>
     <div className="msg-body">
       {role === 'user'
-        ? <UserBubble/>
+        ? editing ? <EditBubble runId={runId} text={text}/> : <UserBubble/>
         : <AssistantParts/>}
     </div>
-    {(hasText || time) && <ActionBarPrimitive.Root className="msg-actions" hideWhenRunning autohide="never">
+    {!editing && (hasText || time) && <ActionBarPrimitive.Root className="msg-actions" hideWhenRunning autohide="never">
       {hasText && <ActionBarPrimitive.Copy className="icon-btn small copy-btn" aria-label="Copy message" title="Copy">
         <Copy size={14} className="when-idle" aria-hidden="true"/><Check size={14} className="when-copied" aria-hidden="true"/>
       </ActionBarPrimitive.Copy>}
+      {role === 'user' && <EditAction runId={runId} mine={mine}/>}
       {time && <time dateTime={time} title={fullFormat.format(new Date(time))}>{formatTime(time)}</time>}
     </ActionBarPrimitive.Root>}
   </MessagePrimitive.Root>;

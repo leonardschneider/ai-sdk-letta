@@ -8,6 +8,7 @@ import { isAbsolute, join, posix, resolve } from 'node:path';
 import { FILE_LIMITS, FileInputError, decodeText, detectFileType, metadataOf, numberedName, prepareFile, sanitizeFileName, type FileLimits, type PreparedFile, type StoredFile } from './attachments.js';
 import { sanitizeRepository } from './sandbox.js';
 import { titleText } from './title.js';
+import { CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, TURN_TRAILER, commitInfo, commitsSince, commitsWithTrailer, planRevert, withTrailers, type CommitInfo, type FilePlan, type GitRunner } from './revert.js';
 
 /**
  * Resources: every file of an agent, in one git-backed folder.
@@ -86,6 +87,8 @@ export interface ResourceNode {
 export interface ResourceTree { children: ResourceNode[]; truncated: boolean; version: string }
 /** A file described by content (like an attachment), with its path from the root. */
 export interface ResourceFile extends StoredFile { path: string }
+/** What rewinding some turns does to the resources (see {@link ResourceStore.planRewind}). */
+export interface ResourceRewindPlan { files: FilePlan[]; kept: (CommitInfo & { kind?: 'shared' })[]; commits: CommitInfo[] }
 /** One commit in the resources history. */
 export interface ResourceCommit { commit: string; message: string; date: string }
 
@@ -318,19 +321,25 @@ export class ResourceStore {
   }
   /** Run git on this repository. Exit code 1 is accepted when `ok1` is set (for example, check-ignore with no match). */
   private git(args: string[], input?: string | Buffer, ok1 = false, extra: NodeJS.ProcessEnv = {}): Promise<Buffer> {
+    return this.gitRun(args, input, ok1, extra).then(result => result.stdout);
+  }
+  /** Run git and return its output and exit code (1 accepted when `ok1`). */
+  private gitRun(args: string[], input?: string | Buffer, ok1 = false, extra: NodeJS.ProcessEnv = {}): Promise<{ stdout: Buffer; code: number }> {
     const env = { ...this.env, ...extra };
     for (const key of Object.keys(extra)) if (extra[key] === undefined) delete env[key];
     return new Promise((done, fail) => {
       const child = execFile('git', args, { env, cwd: this.files, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 }, (error, stdout, stderr) => {
         const code = (error as { code?: unknown } | null)?.code;
         if (error && !(ok1 && code === 1)) fail(new Error(`git ${args[0]} failed: ${String(stderr).trim().slice(0, 300) || (error as Error).message}`));
-        else done(stdout);
+        else done({ stdout, code: error ? 1 : 0 });
       });
       // git may exit before reading its input (on an error); the exit code reports that, not the pipe.
       child.stdin?.on('error', () => {});
       child.stdin?.end(input ?? '');
     });
   }
+  /** {@link GitRunner} over this repository (for revert planning). */
+  private readonly runner: GitRunner = (args, options = {}) => this.gitRun(args, options.input, options.ok1, options.env ?? {});
   private async head(): Promise<string | undefined> {
     const out = (await this.git(['rev-parse', '-q', '--verify', 'HEAD^{commit}'], undefined, true)).toString().trim();
     return COMMIT.test(out) ? out : undefined;
@@ -420,10 +429,17 @@ export class ResourceStore {
     await this.init();
     return exclusive(this.directory, () => this.commitLocked(message));
   }
-  /** Commit the agent's changes at the end of a turn: "Agent changes in <folder>". */
-  commitAgentChanges(conversationId?: string): Promise<string | undefined> {
+  /**
+   * Commit the agent's changes at the end of a turn: "Agent changes in
+   * <folder>", with the trailers `X-Turn: <turn>` (the turn's OTID, when it
+   * had one) and `X-Conversation: <conversationId>`, so a rewind can find
+   * exactly the changes of the turns it undoes.
+   */
+  commitAgentChanges(conversationId?: string, turn?: string, shared?: readonly string[]): Promise<string | undefined> {
     const folder = conversationId ? this.state().folders[conversationId]?.path : undefined;
-    return this.commitAll(folder ? `Agent changes in ${folder}` : 'Agent changes');
+    // Turns of other conversations ran at the same time: what changed cannot be told apart (it is everyone's).
+    const trailers = shared?.length ? { [SHARED_TRAILER]: [...new Set([...(turn ? [turn] : []), ...shared])].join(',') } : { [TURN_TRAILER]: turn, [CONVERSATION_TRAILER]: conversationId };
+    return this.commitAll(withTrailers(folder ? `Agent changes in ${folder}` : 'Agent changes', trailers));
   }
   /** The newest commits first. */
   async log(limit = 50): Promise<ResourceCommit[]> {
@@ -438,6 +454,108 @@ export class ResourceStore {
   async changed(commit: string): Promise<string[]> {
     if (!COMMIT.test(commit)) throw invalid('Invalid commit');
     return (await this.git(['show', '--format=', '--name-only', '-z', '--no-renames', commit])).toString().split('\0').filter(Boolean);
+  }
+
+  /* ---------------- rewind ---------------- */
+
+  /**
+   * What rewinding `turns` (turn IDs, the OTIDs their changes were committed
+   * under; see {@link commitAgentChanges}) would revert: their commits undone
+   * on top of everything since (see `planRevert`). `kept`: commits made
+   * since `since` that are not the turns' (your own operations in the
+   * panel, other conversations) and touch the same files or this
+   * conversation's folder: they stay.
+   */
+  async planRewind(conversationId: string, turns: ReadonlySet<string>, since?: string): Promise<ResourceRewindPlan> {
+    await this.init();
+    return exclusive(this.directory, () => this.planRewindLocked(conversationId, turns, since));
+  }
+  private async planRewindLocked(conversationId: string, turns: ReadonlySet<string>, since?: string): Promise<ResourceRewindPlan & { changes: { path: string; entry?: { mode: string; oid: string } }[] }> {
+    const targets = (await commitsWithTrailer(this.runner, TURN_TRAILER, turns)).map(found => found.commit);
+    const index = join(this.directory, `rewind-${randomUUID()}.index`);
+    try {
+      const plan = await planRevert(this.runner, targets, index, await this.uncommitted());
+      const folder = this.folderOf(conversationId);
+      const paths = new Set(plan.files.map(file => file.path));
+      const kept: (CommitInfo & { kind?: 'shared' })[] = [];
+      for (const found of await commitsWithTrailer(this.runner, SHARED_TRAILER, turns)) {
+        const [info] = await commitInfo(this.runner, [found.commit]);
+        if (info && !kept.some(k => k.commit === found.commit)) kept.push({ ...info, kind: 'shared' });
+      }
+      if (since) {
+        const start = Date.parse(since) - 1000;
+        const targetSet = new Set(targets);
+        for (const commit of (await commitsSince(this.runner, undefined)).filter(c => Date.parse(c.date) >= start && !targetSet.has(c.commit) && !c.rewind).slice(-200)) {
+          const changed = await this.changed(commit.commit).catch(() => [] as string[]);
+          if (!kept.some(k => k.commit === commit.commit) && changed.some(path => paths.has(path) || (folder && within(path, folder)))) kept.push({ commit: commit.commit, subject: commit.subject, date: commit.date });
+        }
+      }
+      return { files: plan.files, kept, commits: plan.commits, changes: plan.changes };
+    } finally { try { unlinkSync(index); } catch { /* none */ } }
+  }
+  /**
+   * Revert what `turns` changed (see {@link planRewind}) as one new commit,
+   * "Rewind: …" with the trailer `X-Rewind: <rewindId>`. Idempotent: a
+   * rewind already applied (its commit is in the history) is not applied
+   * again. Files with conflicts are kept as they are now.
+   */
+  async applyRewind(rewindId: string, conversationId: string, turns: ReadonlySet<string>, since?: string): Promise<ResourceRewindPlan & { commit?: string; applied: boolean }> {
+    await this.init();
+    return exclusive(this.directory, async () => {
+      const done = await commitsWithTrailer(this.runner, REWIND_TRAILER, new Set([rewindId]));
+      if (done.length) return { files: [], kept: [], commits: [], commit: done[0]!.commit, applied: false };
+      const plan = await this.planRewindLocked(conversationId, turns, since);
+      if (!plan.changes.length) return { files: plan.files, kept: plan.kept, commits: plan.commits, applied: true };
+      const written: string[] = [];
+      for (const change of plan.changes) {
+        const parts = change.path.split('/');
+        if (parts.some(part => !part || part === '.' || part === '..' || part === '.git')) continue;
+        const absolute = join(this.files, ...parts);
+        // Every folder on the way is a plain folder inside the root (created if missing); links are never followed.
+        let current = this.prepare();
+        let safe = true;
+        for (const part of parts.slice(0, -1)) {
+          current = join(current, part);
+          try { const info = lstatSync(current); if (!info.isDirectory() || info.isSymbolicLink()) { safe = false; break; } }
+          catch (error) { if (!missing(error)) throw error; if (!change.entry) { safe = false; break; } mkdirSync(current, { mode: 0o700 }); }
+        }
+        if (!safe) continue;
+        let existing: Stats | undefined;
+        try { existing = lstatSync(absolute); } catch (error) { if (!missing(error)) throw error; }
+        if (existing && !existing.isFile() && !existing.isSymbolicLink()) continue;
+        if (!change.entry) { if (existing) unlinkSync(absolute); written.push(change.path); continue; }
+        const bytes = await this.git(['cat-file', 'blob', change.entry.oid]);
+        if (existing) unlinkSync(absolute);
+        writeNew(current, absolute, bytes, change.entry.mode === '100755' ? 0o700 : 0o600);
+        written.push(change.path);
+      }
+      this.described.clear();
+      const folder = this.folderOf(conversationId);
+      const count = plan.files.filter(file => file.status === 'revert').length;
+      const commit = written.length ? await this.commitLocked(withTrailers(`Rewind: revert ${count} file${count === 1 ? '' : 's'} changed by later turns${folder ? ` in ${folder}` : ''}`, { [REWIND_TRAILER]: rewindId, [CONVERSATION_TRAILER]: conversationId }), written) : undefined;
+      return { files: plan.files, kept: plan.kept, commits: plan.commits, ...(commit ? { commit } : {}), applied: true };
+    });
+  }
+  /** Paths with uncommitted changes in the work tree (being changed right now). */
+  private async uncommitted(): Promise<Set<string>> {
+    const head = await this.head();
+    const changed = head ? (await this.git(['diff', '--name-only', '-z', '--no-renames', 'HEAD'])).toString().split('\0').filter(Boolean) : [];
+    const added = (await this.git(['ls-files', '--others', '--exclude-standard', '-z'])).toString().split('\0').filter(Boolean);
+    return new Set([...changed, ...added]);
+  }
+  /**
+   * A conversation was replaced by another (a rewind forked it): its folder
+   * and attachment links now belong to `to`. Idempotent.
+   */
+  rebind(from: string, to: string) {
+    if (!CONVERSATION_ID.test(from) || !CONVERSATION_ID.test(to)) throw invalid('Invalid conversation ID');
+    const state = this.state();
+    const entry = state.folders[from];
+    if (!entry || state.folders[to]) return;
+    state.folders[to] = entry;
+    delete state.folders[from];
+    for (const attachment of state.attachments) if (attachment.conversationId === from) attachment.conversationId = to;
+    this.save(state);
   }
 
   /* ---------------- state ---------------- */
@@ -586,17 +704,38 @@ export class ResourceStore {
   /** Conversations with a turn running (their folder renames wait), and the titles to apply when they end. */
   private readonly running = new Map<string, number>();
   private readonly pendingTitles = new Map<string, string>();
-  /** A turn of `conversationId` started: renames of its folder wait until {@link endTurn}. */
-  beginTurn(conversationId: string) { this.running.set(conversationId, (this.running.get(conversationId) ?? 0) + 1); }
+  /**
+   * A turn of `conversationId` started (`turn`: its ID): renames of its
+   * folder wait until {@link endTurn}. Turns that overlap (other
+   * conversations' at the same time) share their end-of-turn commits.
+   */
+  beginTurn(conversationId: string, turn?: string) {
+    this.running.set(conversationId, (this.running.get(conversationId) ?? 0) + 1);
+    const key = turn ?? `anonymous-${randomUUID()}`;
+    const others = [...this.turns.keys()];
+    for (const other of this.turns.values()) other.add(key);
+    this.turns.set(key, new Set(others));
+    if (turn) this.turnKeys.set(`${conversationId}\0${turn}`, key);
+  }
+  /** Running turns, by ID: the other turns that overlapped each one. */
+  private readonly turns = new Map<string, Set<string>>();
+  private readonly turnKeys = new Map<string, string>();
+  /** Is any turn of any conversation running (its changes are not committed yet)? */
+  get busy(): boolean { return this.running.size > 0; }
   /** Is a turn of this conversation running? */
   turnRunning(conversationId: string) { return this.running.has(conversationId); }
   /**
    * A turn ended: commit what the agent changed ("Agent changes in <folder>"),
    * then apply a folder rename that waited for the turn.
    */
-  async endTurn(conversationId: string): Promise<void> {
-    try { await this.commitAgentChanges(conversationId); }
+  async endTurn(conversationId: string, turn?: string): Promise<void> {
+    const key = turn ? this.turnKeys.get(`${conversationId}\0${turn}`) : undefined;
+    const overlapped = key ? [...(this.turns.get(key) ?? [])].filter(id => !id.startsWith('anonymous-')) : [];
+    const anonymous = key ? [...(this.turns.get(key) ?? [])].some(id => id.startsWith('anonymous-')) : this.turns.size > 1;
+    try { await this.commitAgentChanges(conversationId, turn, overlapped.length || anonymous ? [...overlapped, ...(anonymous ? ['unknown'] : [])] : undefined); }
     finally {
+      if (key) { this.turns.delete(key); this.turnKeys.delete(`${conversationId}\0${turn}`); }
+      else { const anonymous = [...this.turns.keys()].find(id => id.startsWith('anonymous-')); if (anonymous) this.turns.delete(anonymous); }
       const left = (this.running.get(conversationId) ?? 1) - 1;
       if (left > 0) this.running.set(conversationId, left); else this.running.delete(conversationId);
       const title = left > 0 ? undefined : this.pendingTitles.get(conversationId);
@@ -1026,7 +1165,7 @@ export class AttachmentStore {
    * already there under the same name (or a numbered variant) is reused.
    * @throws {FileInputError}
    */
-  async store(files: readonly PreparedFile[]): Promise<StoredFile[]> {
+  async store(files: readonly PreparedFile[], turn?: string): Promise<StoredFile[]> {
     if (!files.length) return [];
     await this.resources.init();
     const existing = this.attached();
@@ -1037,7 +1176,7 @@ export class AttachmentStore {
     for (const p of files) {
       const reuse = same(p, [...existing, ...stored]);
       if (reuse) { stored.push(reuse); ledger.push({ name: reuse.name, path: joinResourcePath(this.path, reuse.name), sha256: reuse.sha256, bytes: reuse.bytes }); continue; }
-      const { path } = await this.resources.upload(this.path, p.name, p.bytes, `Attach ${p.name} in ${this.path}`);
+      const { path } = await this.resources.upload(this.path, p.name, p.bytes, withTrailers(`Attach ${p.name} in ${this.path}`, { [TURN_TRAILER]: turn, [CONVERSATION_TRAILER]: this.conversationId }));
       if (p.pages) this.resources.cachePages(p.sha256, p.pages);
       const file: StoredFile = { ...metadataOf(p, baseName(path)) };
       stored.push(file);
@@ -1047,9 +1186,9 @@ export class AttachmentStore {
     return stored;
   }
   /** Validate and store files (see {@link prepareFile} and {@link store}). */
-  async save(files: readonly { name: string; bytes: Uint8Array }[], options: { signal?: AbortSignal } = {}): Promise<StoredFile[]> {
+  async save(files: readonly { name: string; bytes: Uint8Array }[], options: { signal?: AbortSignal; turn?: string } = {}): Promise<StoredFile[]> {
     const prepared: PreparedFile[] = [];
-    for (const file of files) prepared.push(await prepareFile(file.name, file.bytes, { ...options, limits: this.limits }));
-    return this.store(prepared);
+    for (const file of files) prepared.push(await prepareFile(file.name, file.bytes, { signal: options.signal, limits: this.limits }));
+    return this.store(prepared, options.turn);
   }
 }

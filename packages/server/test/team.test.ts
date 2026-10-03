@@ -264,7 +264,8 @@ test('single-user runtime is unchanged: one turn at a time, no queue, no authors
     assert.deepEqual(Object.keys(f.runtime.list('team')[0]!).sort(), ['archived', 'createdAt', 'id', 'lastActivityAt', 'latex', 'state', 'title']);
     f.release(f.sent[0]!.conversationId);
     await until(() => f.runtime.events('team', first.id, 0).status === 'completed');
-    assert.equal(f.sent[0]!.otid, undefined, 'no OTID or speaker note in single-user mode');
+    // Every turn carries its run ID (rewind finds turns by it); single-user mode adds no speaker note.
+    assert.equal(f.sent[0]!.otid, first.id, 'the turn is tagged with its run ID');
     assert.equal(f.sent[0]!.text, 'hold');
   } finally { await f.cleanup(); }
 });

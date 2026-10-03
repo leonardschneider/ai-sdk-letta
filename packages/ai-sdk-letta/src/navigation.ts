@@ -12,9 +12,13 @@ export type NavigationSource = {
   page: (id: string, options: ListMessagesOptions) => Promise<ListMessagesResult>;
   validate: (id: string, signal?: AbortSignal) => Promise<void>;
 };
-/** Newest conversations of one agent (up to 200 plus `default`), excluding archived ones. */
-export async function listNavigationEntries(list: (query: { agentId: string; limit: number; order: 'desc'; orderBy: 'createdAt'; after?: string }) => Promise<LettaConversation[]>, agentId: string, signal?: AbortSignal) {
-  const entries: ConversationEntry[] = [{ id: 'default', title: 'Default conversation', date: 'activity unavailable' }];
+/**
+ * Newest conversations of one agent (up to 200), excluding archived ones.
+ * `includeDefault`: also offer the agent's `default` conversation first (for
+ * agents created by earlier versions, whose history may be there).
+ */
+export async function listNavigationEntries(list: (query: { agentId: string; limit: number; order: 'desc'; orderBy: 'createdAt'; after?: string }) => Promise<LettaConversation[]>, agentId: string, signal?: AbortSignal, includeDefault = true) {
+  const entries: ConversationEntry[] = includeDefault ? [{ id: 'default', title: 'Default conversation', date: 'activity unavailable' }] : [];
   const seen = new Set<string>(['default']);
   let after: string | undefined;
   let limited = false;

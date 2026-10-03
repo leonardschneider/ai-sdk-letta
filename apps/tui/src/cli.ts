@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
-import { sanitizeText, titleText, type ConversationChoice, type Identity } from 'ai-sdk-letta';
+import { newConversationTitle, sanitizeText, titleText, type ConversationChoice, type Identity } from 'ai-sdk-letta';
 
 /** Parsed terminal command-line options. */
 export type TerminalArgs = { list?: boolean; resume?: boolean; newTitle?: string; conversationId?: string; stateDirectory?: string };
@@ -28,14 +28,19 @@ export function parseTerminalArgs(args: string[]): TerminalArgs {
   return result;
 }
 
-/** Rows shown by `--list` and the startup picker: `default` first, then non-archived conversations. */
+/**
+ * Rows shown by `--list` and the startup picker: non-archived conversations,
+ * after the agent's `default` conversation for agents created by earlier
+ * versions (new agents only ever have named conversations).
+ */
 export function conversationRows(identity: Identity, conversations: LettaConversation[]) {
-  return [{ id: 'default', agent_id: identity.agentId, summary: 'Default conversation', last_message_at: null }, ...conversations.filter(c => c.id !== 'default' && !c.archived)]
+  const legacy = identity.namedOnly ? [] : [{ id: 'default', agent_id: identity.agentId, summary: 'Default conversation', last_message_at: null }];
+  return [...legacy, ...conversations.filter(c => c.id !== 'default' && !c.archived)]
     .map(c => ({ id: c.id, title: titleText(sanitizeText(c.summary ?? '')) || 'Untitled conversation', activity: c.last_message_at ?? (c as LettaConversation).updated_at ?? (c as LettaConversation).created_at ?? 'unavailable (default backend thread)' }));
 }
 
 export function printConversations(identity: Identity, conversations: LettaConversation[]) {
-  console.log(`${identity.name} | logical: ${identity.definitionId}\nLetta: ${identity.agentId} | last selected: ${identity.conversationId}`);
+  console.log(`${identity.name} | logical: ${identity.definitionId}\nLetta: ${identity.agentId} | last selected: ${identity.conversationId ?? 'none yet'}`);
   const rows = conversationRows(identity, conversations);
   rows.forEach((row, index) => console.log(`${index + 1}. ${row.id === identity.conversationId ? '* ' : ''}${row.title} | activity: ${row.activity} | ${row.id}`));
   return rows;
@@ -47,8 +52,10 @@ export async function pickConversation(identity: Identity, conversations: LettaC
   const input = createInterface({ input: process.stdin, output: process.stdout });
   try {
     while (true) {
-      const answer = (await input.question('Enter = resume last | number = select | n = new | q = quit: ')).trim();
-      if (!answer) return { conversationId: identity.conversationId };
+      const last = identity.conversationId;
+      const answer = (await input.question(`${last ? 'Enter = resume last' : 'Enter = new conversation'} | number = select | n = new | q = quit: `)).trim();
+      // Nothing to resume yet (a new agent): Enter starts a new named conversation.
+      if (!answer) return last ? { conversationId: last } : { newTitle: newConversationTitle() };
       if (answer === 'q') return null;
       if (answer === 'n') {
         const title = (await input.question('New conversation title: ')).trim();

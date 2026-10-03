@@ -31,7 +31,7 @@ export type DecisionRecord = {
   requestedBy: { person?: DecisionPerson; source?: { via: string; name: string; tokenId?: string } };
   createdAt: string; status: DecisionStatus;
   decidedBy?: DecisionPerson; choice?: string; comment?: string; decidedAt?: string;
-  cancelledAt?: string; cancelReason?: 'withdrawn' | 'superseded' | 'archived'; supersededBy?: string;
+  cancelledAt?: string; cancelReason?: 'withdrawn' | 'superseded' | 'archived' | 'rewound'; supersededBy?: string;
   /**
    * The turn that brings the outcome to the agent. `runIds`: every attempt,
    * the last one current (a new attempt only when the previous was never sent).
@@ -381,6 +381,28 @@ export class DecisionBoard {
     return { source: { ...asking.source }, preApproved: [...(asking.unattended?.preApproved ?? [])], ...(asking.unattended?.onBehalfOf ? { onBehalfOf: asking.unattended.onBehalfOf } : {}), ...(asking.replyModeOverride ? { replyMode: 'always' } : {}) };
   }
 
+  /**
+   * Decisions and web research reviews of a conversation that a rewind
+   * withdraws: the ones these turns asked for (`runIds`) that are pending,
+   * or decided but whose outcome was not sent to the agent yet.
+   */
+  rewindable(threadId: string, runIds: ReadonlySet<string>): DecisionRecord[] {
+    return this.state.decisions.filter(d => d.threadId === threadId && d.runId && runIds.has(d.runId)
+      && (d.status === 'pending' || ((d.status === 'decided' || d.status === 'stopped') && d.resume && (d.resume.state === 'pending' || d.resume.state === 'queued')))).map(d => structuredClone(d));
+  }
+  /** A rewind removed these turns: withdraw what they asked for (see {@link rewindable}). Idempotent. Returns the withdrawn IDs. */
+  rewound(threadId: string, runIds: ReadonlySet<string>): string[] {
+    const now = new Date().toISOString();
+    const open = this.state.decisions.filter(d => d.threadId === threadId && d.runId && runIds.has(d.runId) && (d.status === 'pending' || ((d.status === 'decided' || d.status === 'stopped') && d.resume && (d.resume.state === 'pending' || d.resume.state === 'queued'))));
+    if (!open.length) return [];
+    for (const record of open) {
+      if (record.status === 'pending') Object.assign(record, { status: 'cancelled', cancelledAt: now, cancelReason: 'rewound' });
+      // A decided outcome not sent yet is never sent: the turn it would resume is gone.
+      else if (record.resume) { record.resume.state = 'blocked'; record.resume.error = 'rewound'; }
+    }
+    this.save(); this.changed();
+    return open.map(d => d.id);
+  }
   /** A conversation was archived: its pending decision can no longer be decided. */
   archived(threadId: string) {
     const now = new Date().toISOString();
