@@ -1,7 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ChevronRight, Clock, ExternalLink, Globe, LoaderCircle, ShieldCheck, ShieldX, CircleAlert } from 'lucide-react';
+import React, { useContext, useEffect, useRef, useState } from 'react';
+import { ChevronRight, Clock, ExternalLink, Globe, LoaderCircle, RefreshCw, ShieldCheck, ShieldX, CircleAlert } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { expiryLabel, researchFromPreview, researchOutcome, type Research, type ResearchSource } from './web-research-model.js';
+import { expiryLabel, researchFromDecision, researchFromPreview, researchOutcome, type Research, type ResearchSource } from './web-research-model.js';
+import { DecisionsContext } from './decisions.js';
+import { ago, decisionSummary, mayReview, type DecisionView } from './decisions-model.js';
+import { useToast } from './toasts.js';
 
 /* The web_search review card (in the dock) and its line where the search was made. */
 
@@ -113,6 +116,7 @@ export function WebResearchLine({ toolCallId, argsText, result, pending, decided
     </div>;
   }
   const outcome = researchOutcome(args, result);
+  if (outcome.state === 'awaiting') return <ResearchDecision id={outcome.decision} query={query} toolCallId={toolCallId}/>;
   const Icon = outcome.state === 'approved' ? ShieldCheck : outcome.state === 'dismissed' ? ShieldX : outcome.state === 'expired' ? Clock : outcome.state === 'failed' || outcome.state === 'needed-approval' ? CircleAlert : Globe;
   const id = `web-${toolCallId}`;
   return <div className="line web-line" data-tone={outcome.state === 'approved' ? 'answered' : outcome.state === 'dismissed' || outcome.state === 'expired' ? 'denied' : outcome.state === 'failed' || outcome.state === 'needed-approval' ? 'error' : 'done'} data-open={open || undefined} data-tool-call-id={toolCallId} data-conversation-part="web-research">
@@ -148,3 +152,72 @@ export function ReplySources({ results }: { results: { argsText: string; result:
 
 /** Re-exported so the chat can tell a web research request from other approvals. */
 export const isWebResearch = (request?: InteractionRequest) => request?.kind === 'approval' && request.tool === 'web_search' && request.preview?.kind === 'web-research';
+
+/**
+ * A web search result nobody reviewed in time, now a decision: the review
+ * card in place (no time limit), then one line with how it ended. Only the
+ * person whose message started the search, or an admin, can review it.
+ */
+function ResearchDecision({ id, query, toolCallId }: { id: string; query: string; toolCallId: string }) {
+  const state = useContext(DecisionsContext);
+  const decision = state.byId.get(id);
+  useEffect(() => { if (!decision) state.ensure(id); }, [id, decision, state]);
+  const [open, setOpen] = useState(false);
+  if (decision?.status === 'pending') return <ResearchDecisionCard decision={decision}/>;
+  const label = !decision ? `Web research waiting for review: ${query}` : decisionSummary(decision, state.me) === undefined ? `Web research: ${query}`
+    : decision.status === 'cancelled' ? `Web research review closed: ${query}`
+    : decision.choice?.id === 'approve' ? `Web research approved later: ${query}` : decision.choice?.id === 'search_again' ? `Web research: new search asked for: ${query}` : `Web research dismissed: ${query}`;
+  const research = researchFromDecision(decision?.research);
+  const Icon = decision?.choice?.id === 'approve' ? ShieldCheck : decision?.choice?.id === 'search_again' ? RefreshCw : decision ? ShieldX : Clock;
+  return <div className="line web-line" data-tone={decision?.choice?.id === 'approve' ? 'answered' : decision ? 'denied' : 'pending'} data-open={open || undefined} data-tool-call-id={toolCallId} id={`decision-${id}`}>
+    <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+      <Icon size={14} className="line-icon" aria-hidden="true"/><span className="line-label">{label}</span>
+      {decision?.decidedAt && <span className="line-meta">{ago(decision.decidedAt)}</span>}
+      <ChevronRight size={14} className="chev" aria-hidden="true"/>
+    </button>
+    {open && <div className="line-detail"><div className="tool-detail">
+      <p className="muted">{decision ? `${decisionSummary(decision, state.me) ?? ''}. The outcome reached the agent as a new message.` : 'Nobody reviewed it in time, so it waits as a decision. The agent has none of it yet.'}{decision?.comment ? ` Note: “${decision.comment}”` : ''}</p>
+      {research && <ResearchBody research={research}/>}
+    </div></div>}
+  </div>;
+}
+
+/** The card of a web research decision: like the review card, without a time limit; "Search again" once the result is stale. */
+export function ResearchDecisionCard({ decision }: { decision: DecisionView }) {
+  const { decide, me, admin } = useContext(DecisionsContext);
+  const toast = useToast();
+  const research = researchFromDecision(decision.research);
+  const [noting, setNoting] = useState(false);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const sent = useRef(false);
+  const allowed = mayReview(decision, me, !!admin);
+  // Stale once `staleAt` passes, also while the page stays open.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(timer); }, []);
+  const stale = decision.stale || (!!decision.staleAt && now >= Date.parse(decision.staleAt));
+  const submit = async (choice: 'approve' | 'reject' | 'search_again') => {
+    if (sent.current) return;
+    sent.current = true; setBusy(true);
+    try { await decide(decision.id, { choice, ...(choice !== 'approve' && note.trim() ? { comment: note.trim().slice(0, 1000) } : {}) }); }
+    catch (error) { sent.current = false; toast((error as Error).message, { tone: 'error' }); }
+    finally { setBusy(false); }
+  };
+  const searchedAt = typeof decision.research?.searchedAt === 'string' ? decision.research.searchedAt : decision.createdAt;
+  return <section className="card approval-card web-research-card decision-card" id={`decision-${decision.id}`} aria-label={`Review web research: ${research?.query ?? ''}`} aria-busy={busy || undefined}>
+    <header className="card-head"><Globe size={16} aria-hidden="true"/><span>Web research waiting for review</span><span className="decision-asked">searched {ago(searchedAt)}</span></header>
+    <h2 className="card-title">“{research?.query ?? decision.question}”</h2>
+    <p className="card-details">Nobody reviewed it in time, so the agent ended its turn without it. Approve it to send it to the agent (as untrusted web content, with its age); there is no time limit.{stale ? ' It is old now: you can also ask for a new search.' : ''}</p>
+    {research && <div className="web-review-scroll"><ResearchBody research={research}/></div>}
+    {research && <p className="web-meta">{research.sources.length} source{research.sources.length === 1 ? '' : 's'}{research.dropped ? ` · ${research.dropped} dropped as irrelevant` : ''}</p>}
+    {noting && allowed && <textarea className="other-field" aria-label="Note for the agent" placeholder="A note for the agent (optional)…" maxLength={1000} rows={2} value={note} disabled={busy} onChange={e => setNote(e.target.value)}/>}
+    {allowed
+      ? <div className="card-actions">
+          {!noting && <button type="button" className="btn ghost" disabled={busy} onClick={() => setNoting(true)}>Reject with note…</button>}
+          {stale && <button type="button" className="btn ghost" disabled={busy} onClick={() => void submit('search_again')}><RefreshCw size={14} aria-hidden="true"/>Search again</button>}
+          <button type="button" className="btn ghost" disabled={busy} onClick={() => void submit('reject')}>Reject</button>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void submit('approve')}>{busy ? 'Sending…' : 'Approve'}</button>
+        </div>
+      : <p className="card-details">Waiting for {decision.reviewer?.name ?? 'the person who asked'} to review it. Only they, or an admin of this agent, can.</p>}
+  </section>;
+}

@@ -236,7 +236,7 @@ const fakeSummarizer = (calls: WebSummaryRequest[]): WebSummarizer => async requ
 };
 
 /** The main agent's bridge, with web_search and two dangerous tools that must never run during a search. */
-function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | undefined; answer?: (request: InteractionRequest, signal: AbortSignal) => object | Promise<object>; summarize?: WebSummarizer; reviewTimeoutMs?: number } = {}) {
+function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | undefined; answer?: (request: InteractionRequest, signal: AbortSignal) => object | Promise<object>; summarize?: WebSummarizer; reviewTimeoutMs?: number; escalate?: (research: unknown, toolCallId: string) => Promise<{ id: string }> } = {}) {
   const ran: string[] = [];
   const calls: WebSummaryRequest[] = [];
   const researcher = createWebResearcher({ search: web.origin, summarize: options.summarize ?? fakeSummarizer(calls), pages: { unsafeAllowOrigins: [web.origin] } });
@@ -249,7 +249,7 @@ function mainAgent(web: Web, options: { unattended?: () => UnattendedPolicy | un
   interactions.connect(async (request, signal) => { requests.push(request); return { id: request.id, ...((await options.answer?.(request, signal)) ?? { approved: true }) }; });
   const events: ToolActivity[] = [];
   const bridge = createToolBridge({ tools: definition.tools, permissions: definition.permissions, interactions, timeoutMs: 30_000, persist: e => events.push(e),
-    context: () => ({ [WEB_SEARCH_CONTEXT]: { researcher, ...(options.reviewTimeoutMs ? { reviewTimeoutMs: options.reviewTimeoutMs } : {}) } }), ...(options.unattended ? { unattended: options.unattended } : {}) });
+    context: () => ({ [WEB_SEARCH_CONTEXT]: { researcher, ...(options.reviewTimeoutMs ? { reviewTimeoutMs: options.reviewTimeoutMs } : {}), ...(options.escalate ? { escalate: options.escalate } : {}) } }), ...(options.unattended ? { unattended: options.unattended } : {}) });
   return { bridge, ran, calls, requests, events, definition };
 }
 const output = (result: { content: { type: string; text?: string }[] }) => JSON.parse(result.content[0]!.text!);
@@ -375,7 +375,7 @@ test('failures are fixed codes the agent can act on; an empty or irrelevant sear
 
 test('webSearch.reviewTimeoutMs: validated per agent, defaults to the harness maximum', () => {
   const base = { id: 'x', name: 'x', model: 'a/b', instructions: 'x', tools: webSearchTools, permissions: WEB_SEARCH_TOOL_PERMISSIONS };
-  assert.deepEqual(defineAgent(base).webSearch, { reviewTimeoutMs: 280_000 });
+  assert.deepEqual(defineAgent(base).webSearch, { reviewTimeoutMs: 280_000, staleAfterMs: 604_800_000 });
   assert.equal(DEFAULT_WEB_SEARCH.reviewTimeoutMs, WEB_SEARCH_REVIEW_LIMITS.maxTimeoutMs);
   assert.equal(defineAgent({ ...base, webSearch: { reviewTimeoutMs: 60_000 } }).webSearch.reviewTimeoutMs, 60_000);
   for (const bad of [900_000, 300_001, 5000, 1.5e4 + 0.5, '60000', null]) {
@@ -384,7 +384,7 @@ test('webSearch.reviewTimeoutMs: validated per agent, defaults to the harness ma
   assert.throws(() => defineAgent({ ...base, webSearch: { timeout: 1 } as never }), /Unknown webSearch setting/);
 });
 
-test('a review nobody answers expires: the prompt is withdrawn, the agent is told "Web research expired" and gets none of the result', async () => {
+test('without a decision desk (terminal UI, plain scripts), a review nobody answers expires: the prompt is withdrawn, the agent is told "Web research expired" and gets none of the result', async () => {
   const web = await loopbackWeb();
   try {
     let withdrawn = false;
@@ -401,9 +401,36 @@ test('a review nobody answers expires: the prompt is withdrawn, the agent is tol
     // The review request says when it expires (the app shows it, and hosts wait until then).
     const expiresAt = Date.parse(main.requests[0]!.expiresAt!);
     assert.ok(expiresAt > started && expiresAt <= started + WEB_SEARCH_REVIEW_LIMITS.callBudgetMs);
-    assert.equal(main.events.at(-1)?.code, 'review_expired');
+    assert.equal(main.events.at(-1)?.code, 'approval_expired');
     // Answered in time, the same review still delivers.
     const quick = mainAgent(web, { reviewTimeoutMs: 5000 });
     assert.equal(output(await quick.bridge.execute('web_search', 'expire-2', { query: 'release 4.2' })).untrusted, true);
   } finally { await web.close(); }
+});
+
+test('with a decision desk, a review nobody answers is escalated instead: the result is handed over (not to the agent) and the agent is told it awaits review', async () => {
+  const web = await loopbackWeb();
+  try {
+    const escalated: { research: { query: string }; toolCallId: string }[] = [];
+    const main = mainAgent(web, { reviewTimeoutMs: 200, answer: (_request, signal) => new Promise(resolve => signal.addEventListener('abort', () => resolve({ approved: true }))),
+      escalate: async (research, toolCallId) => { escalated.push({ research: research as { query: string }, toolCallId }); return { id: 'decision-1' }; } });
+    const result = await main.bridge.execute('web_search', 'esc-1', { query: 'release 4.2' });
+    const told = output(result);
+    assert.equal(result.isError, false);
+    assert.deepEqual([told.awaiting_review, told.decision, told.query], [true, 'decision-1', 'release 4.2']);
+    assert.match(told.message, /End your turn now/);
+    assert.doesNotMatch(JSON.stringify(told), /4\.2 shipped|127\.0\.0\.1/, 'none of the result reaches the agent');
+    assert.deepEqual(escalated.map(e => [e.research.query, e.toolCallId]), [['release 4.2', 'esc-1']]);
+    assert.equal(main.events.at(-1)?.code, 'approval_expired');
+    // A failing desk falls back to expiry.
+    const failing = mainAgent(web, { reviewTimeoutMs: 200, answer: (_r, signal) => new Promise(resolve => signal.addEventListener('abort', () => resolve({ approved: true }))), escalate: async () => { throw new Error('decision_limit'); } });
+    assert.equal(output(await failing.bridge.execute('web_search', 'esc-2', { query: 'release 4.2' })).error, 'review_expired');
+  } finally { await web.close(); }
+});
+
+test('webSearch.staleAfterMs: validated per agent, defaults to 7 days', () => {
+  const base = { id: 'x', name: 'x', model: 'a/b', instructions: 'x', tools: webSearchTools, permissions: WEB_SEARCH_TOOL_PERMISSIONS };
+  assert.equal(defineAgent(base).webSearch.staleAfterMs, 7 * 86_400_000);
+  assert.equal(defineAgent({ ...base, webSearch: { staleAfterMs: 3_600_000 } }).webSearch.staleAfterMs, 3_600_000);
+  for (const bad of [1000, 400 * 86_400_000, 'x']) assert.throws(() => defineAgent({ ...base, webSearch: { staleAfterMs: bad as number } }), /staleAfterMs must be/);
 });

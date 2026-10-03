@@ -187,7 +187,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           }
           if (['interaction_resolved', 'interaction_ended'].includes(event.type) && currentInteraction.current?.runId === id && currentInteraction.current.id === event.data.id) {
             currentInteraction.current.resolved = true;
-            setInteractionOutcome(event.type === 'interaction_resolved' ? 'Response received. Waiting for the agent…' : event.data.code === 'expired' ? 'This review expired. The agent got none of the result.' : event.data.code === 'timed_out' ? 'This question timed out. Your response was not submitted.' : event.data.code === 'cancelled' ? 'This question was cancelled. Your response was not submitted.' : 'This question ended before an answer was confirmed. Do not resend this turn.');
+            setInteractionOutcome(event.type === 'interaction_resolved' ? 'Response received. Waiting for the agent…' : event.data.code === 'expired' ? 'Not reviewed in time: it now waits for review in this conversation (and the bell).' : event.data.code === 'timed_out' ? 'This question timed out. Your response was not submitted.' : event.data.code === 'cancelled' ? 'This question was cancelled. Your response was not submitted.' : 'This question ended before an answer was confirmed. Do not resend this turn.');
           }
           if (event.type === 'completed' || event.type === 'failed') {
             ended = true; endedAt = new Date().toISOString(); lastRun.current = id;
@@ -597,7 +597,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   useEffect(() => { if (!current.draft && feed.loaded) void loadDecisions(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [feedKey]);
   const loading_ = useRef(new Set<string>());
   const decisionsState = useMemo<DecisionsState>(() => ({
-    byId: threadDecisions, team: !!team, ...(team ? { me: team.user.id } : {}),
+    byId: threadDecisions, team: !!team, admin: !team || isAdmin, ...(team ? { me: team.user.id } : {}),
     ensure: id => {
       if (loading_.current.has(id) || threadDecisions.has(id)) return;
       loading_.current.add(id);
@@ -618,7 +618,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
       setTimeout(() => void refreshView().catch(() => {}), 600);
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [threadDecisions, team]);
+  }), [threadDecisions, team, isAdmin]);
   const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending') : undefined;
   /** Open a decision from the bell: its conversation (switching agents on a team server). */
   const openDecision = useCallback((decision: FeedDecision) => {

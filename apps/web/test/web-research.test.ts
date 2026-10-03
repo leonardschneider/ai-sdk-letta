@@ -35,3 +35,18 @@ test('an expired review shows "Web research expired", and the card says when it 
   assert.equal(expiryLabel('2026-10-02T16:52:00Z', () => '4:52 PM'), 'Expires at 4:52 PM if nobody reviews it.');
   assert.equal(expiryLabel(undefined), undefined);
 });
+
+test('an escalated review: the line points at its decision; the outcome line reads approved with its age, dismissed or a new search; only the searcher or an admin may review', async () => {
+  const { researchOutcome: outcome } = await import('../src/web-research-model.js');
+  const { outcomeSummary, mayReview } = await import('../src/decisions-model.js');
+  const awaiting = outcome({ query: 'q' }, { awaiting_review: true, decision: 'd1', query: 'q', message: 'm' });
+  assert.deepEqual([awaiting.state, 'decision' in awaiting && awaiting.decision], ['awaiting', 'd1']);
+  const by = { id: 'u-mia', name: 'Mia' };
+  assert.equal(outcomeSummary({ outcome: 'decided', by, kind: 'web-research', question: 'release 4.2', age: '2 hours ago', choice: { id: 'approve', label: 'Approve' } }), 'Web research approved by Mia · from 2 hours ago: release 4.2');
+  assert.equal(outcomeSummary({ outcome: 'decided', by, kind: 'web-research', question: 'q', choice: { id: 'reject', label: 'Reject' } }), 'Web research dismissed by Mia: q');
+  assert.equal(outcomeSummary({ outcome: 'decided', by, kind: 'web-research', question: 'q', choice: { id: 'search_again', label: 'Search again' } }), 'Mia asked for a new search: q');
+  const decision = { kind: 'web-research' as const, reviewer: { id: 'u-mia', name: 'Mia' } };
+  assert.equal(mayReview(decision, 'u-mia', false), true); assert.equal(mayReview(decision, 'u-sam', false), false);
+  assert.equal(mayReview(decision, 'u-sam', true), true); assert.equal(mayReview(decision, undefined, false), true);
+  assert.equal(mayReview({}, 'u-sam', false), true, 'ordinary decisions: any member');
+});

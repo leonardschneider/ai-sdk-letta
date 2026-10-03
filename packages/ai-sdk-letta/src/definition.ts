@@ -14,8 +14,17 @@ export interface WebSearchSettings {
    * ends any application tool call 5 minutes after it starts: the search
    * itself counts, so a review never lasts beyond about 4 min 50 s after the
    * search began. @default 280000 (the maximum)
+   *
+   * A result nobody reviews in time becomes a decision (on servers that keep
+   * decisions): the agent ends its turn, and the result waits, without a
+   * time limit, until the person who asked (or an admin) reviews it.
    */
   reviewTimeoutMs: number;
+  /**
+   * A result waiting as a decision that is older than this can also be
+   * answered with "Search again" (the agent then searches anew). @default 604800000 (7 days)
+   */
+  staleAfterMs: number;
 }
 /** Bounds of {@link WebSearchSettings.reviewTimeoutMs}. */
 export const WEB_SEARCH_REVIEW_LIMITS = Object.freeze({
@@ -25,8 +34,12 @@ export const WEB_SEARCH_REVIEW_LIMITS = Object.freeze({
   defaultTimeoutMs: 280_000,
   /** Longest a review may last after the search started (the harness ends the call at 300 s). */
   callBudgetMs: 290_000,
+  /** Bounds of {@link WebSearchSettings.staleAfterMs}: one minute to one year; default 7 days. */
+  minStaleMs: 60_000,
+  maxStaleMs: 366 * 86_400_000,
+  defaultStaleMs: 7 * 86_400_000,
 });
-export const DEFAULT_WEB_SEARCH: Readonly<WebSearchSettings> = Object.freeze({ reviewTimeoutMs: WEB_SEARCH_REVIEW_LIMITS.defaultTimeoutMs });
+export const DEFAULT_WEB_SEARCH: Readonly<WebSearchSettings> = Object.freeze({ reviewTimeoutMs: WEB_SEARCH_REVIEW_LIMITS.defaultTimeoutMs, staleAfterMs: WEB_SEARCH_REVIEW_LIMITS.defaultStaleMs });
 
 /** How a single application tool call is authorized. */
 export type ToolPermission = 'allow' | 'ask' | 'deny';
@@ -179,14 +192,17 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
 function resolveWebSearch(input: unknown): Readonly<WebSearchSettings> {
   if (input === undefined) return DEFAULT_WEB_SEARCH;
   if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('webSearch must be an object such as { reviewTimeoutMs: 120000 }');
-  const unknown = Object.keys(input).filter(key => key !== 'reviewTimeoutMs');
-  if (unknown.length) throw new Error(`Unknown webSearch setting(s): ${unknown.join(', ')}. Supported: reviewTimeoutMs.`);
-  const { reviewTimeoutMs = DEFAULT_WEB_SEARCH.reviewTimeoutMs } = input as { reviewTimeoutMs?: unknown };
-  const { minTimeoutMs, maxTimeoutMs } = WEB_SEARCH_REVIEW_LIMITS;
+  const unknown = Object.keys(input).filter(key => key !== 'reviewTimeoutMs' && key !== 'staleAfterMs');
+  if (unknown.length) throw new Error(`Unknown webSearch setting(s): ${unknown.join(', ')}. Supported: reviewTimeoutMs, staleAfterMs.`);
+  const { reviewTimeoutMs = DEFAULT_WEB_SEARCH.reviewTimeoutMs, staleAfterMs = DEFAULT_WEB_SEARCH.staleAfterMs } = input as { reviewTimeoutMs?: unknown; staleAfterMs?: unknown };
+  const { minTimeoutMs, maxTimeoutMs, minStaleMs, maxStaleMs } = WEB_SEARCH_REVIEW_LIMITS;
   if (typeof reviewTimeoutMs !== 'number' || !Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs < minTimeoutMs || reviewTimeoutMs > maxTimeoutMs) {
     throw new Error(`webSearch.reviewTimeoutMs must be ${minTimeoutMs}–${maxTimeoutMs} ms: the Letta harness ends an application tool call (the search and its review) after 5 minutes`);
   }
-  return Object.freeze({ reviewTimeoutMs });
+  if (typeof staleAfterMs !== 'number' || !Number.isInteger(staleAfterMs) || staleAfterMs < minStaleMs || staleAfterMs > maxStaleMs) {
+    throw new Error(`webSearch.staleAfterMs must be ${minStaleMs}–${maxStaleMs} ms`);
+  }
+  return Object.freeze({ reviewTimeoutMs, staleAfterMs });
 }
 
 function resolveUi(input: unknown): Readonly<AgentUiSettings> {

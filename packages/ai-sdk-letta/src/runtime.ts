@@ -19,7 +19,7 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
-import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearcher, type WebResearcherOptions } from './web-search.js';
+import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
 import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
 
 /**
@@ -341,12 +341,19 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
         const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
         const desk = options.decisions && decisionsEnabled(definition) ? options.decisions : undefined;
+        // Web search reviews not answered in time become decisions, also for agents without the decision tools.
+        const reviewDesk = researcher && options.decisions?.review ? options.decisions : undefined;
         // A requested decision pauses the work: the turn must end with a reply (never a silent "listened"), and no further tools run.
         const requested = () => { turnPaused = true; turnSilence = false; };
         const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
           ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
           ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
-          ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, reviewTimeoutMs: definition.webSearch.reviewTimeoutMs, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
+          ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, reviewTimeoutMs: definition.webSearch.reviewTimeoutMs, ...(turnActor ? { actor: turnActor } : {}),
+            // A result nobody reviewed in time waits as a decision (when the host keeps them); the rest of the turn pauses.
+            ...(reviewDesk ? { escalate: async (research: WebResearch, toolCallId: string) => {
+              const recorded = await reviewDesk.review!({ research, staleAfterMs: definition.webSearch.staleAfterMs }, { conversationId, toolCallId, ...(turnActor ? { actor: turnActor } : {}) });
+              requested(); return recorded;
+            } } : {}) } } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;

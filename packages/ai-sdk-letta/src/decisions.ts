@@ -1,6 +1,7 @@
 import { jsonSchema, tool, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import type { TurnActor } from './credentials.js';
+import type { WebResearch } from './web-search.js';
 
 /**
  * Decisions: the agent asks the people of a conversation to choose, without
@@ -51,6 +52,14 @@ export interface DecisionDesk {
   request(request: DecisionRequest, turn: { conversationId: string; toolCallId: string; actor?: TurnActor }): Promise<RequestedDecision>;
   /** Withdraw the conversation's pending decision (or the one with `id`, if it belongs to the conversation). Resolves with its ID, or `undefined` when nothing was pending. */
   cancel(turn: { conversationId: string; actor?: TurnActor }, id?: string): Promise<string | undefined>;
+  /**
+   * Keep a web search result nobody reviewed in time as a decision of its own
+   * (kind `web-research`): only the person whose turn searched, or an admin,
+   * may approve or reject it, without a time limit. It never replaces the
+   * conversation's pending decision, and `cancel_decision` never withdraws it.
+   * Optional: hosts without it let such reviews expire.
+   */
+  review?(request: { research: WebResearch; staleAfterMs: number }, turn: { conversationId: string; toolCallId: string; actor?: TurnActor }): Promise<{ id: string }>;
 }
 /** What the runtime binds for a turn: the desk, the conversation, who the turn acts for, and a callback that pauses the rest of the turn. */
 export type DecisionContext = { desk: DecisionDesk; conversationId: string; actor?: TurnActor; requested?: (id: string) => void };

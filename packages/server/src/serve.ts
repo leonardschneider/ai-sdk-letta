@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
@@ -67,9 +67,11 @@ export interface RunningServer {
  */
 function decisionDesk(definition: AgentDefinition) {
   let board: DecisionBoard | undefined;
-  const desk: DecisionDesk | undefined = decisionsEnabled(definition) ? {
+  // Agents with request_decision, and agents with web_search (a review nobody answers in time becomes a decision).
+  const desk: DecisionDesk | undefined = decisionsEnabled(definition) || webSearchEnabled(definition) ? {
     request: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.request(request, turn); },
     cancel: (turn, id) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.cancel(turn, id); },
+    review: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.review!(request, turn); },
   } : undefined;
   return { desk, bind: (runtime: ThreadRuntime, directory: string, owner: string) => {
     if (!desk) return undefined;

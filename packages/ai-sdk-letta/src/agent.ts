@@ -517,6 +517,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             if (toolName === REQUEST_DECISION_TOOL && !event.isError) requestedDecision = true;
             let result: JSONValue = event.content;
             try { result = JSON.parse(event.content); } catch { /* SDK text output */ }
+            // So is one whose web research now waits for review as a decision.
+            if (toolName === 'web_search' && !event.isError && result && typeof result === 'object' && (result as { awaiting_review?: unknown }).awaiting_review === true) requestedDecision = true;
             emit({ type: 'tool-result', toolCallId: event.toolCallId, toolName, result: result ?? 'null', isError: event.isError });
             calls.delete(event.toolCallId);
           } else if (event.type === 'stream_event' && event.event.message_type === 'usage_statistics') {

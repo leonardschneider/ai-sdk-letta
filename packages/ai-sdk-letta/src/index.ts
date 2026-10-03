@@ -58,7 +58,7 @@ export {
 export { allowMemoryTool, memoryCommitCommand } from './memory.js';
 export {
   webSearchTool, webSearchTools, webSearchEnabled, createWebResearcher, searxngSearch, validateResearch, deliverResearch, researchPreview, summaryPrompt, parseSummaryText,
-  WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_PERMISSIONS, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_RESEARCH_PREVIEW, WEB_SUMMARY_SCHEMA, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_DISMISSED, WEB_SEARCH_EXPIRED,
+  WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_PERMISSIONS, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_RESEARCH_PREVIEW, WEB_SUMMARY_SCHEMA, WEB_SUMMARIZER_INSTRUCTIONS, WEB_SEARCH_DISMISSED, WEB_SEARCH_EXPIRED, webSearchAwaitingReview, webResearchMessage, webResearchOutcomeNote, researchAge, type WebResearchOutcome,
   type WebSearchInput, type WebSearchOutput, type WebResearch, type WebClaim, type WebSource, type WebSearchResult, type WebSourceInput, type WebSummaryRequest, type WebSummarizer,
   type WebSearchEngine, type WebResearcher, type WebResearcherOptions, type WebSearchContext,
 } from './web-search.js';

@@ -154,7 +154,7 @@ Both run [`examples/basic`](examples/basic). The first run creates a Letta
 agent named "Example Assistant"; later runs reopen it. Useful variables:
 `LETTA_MODEL` (model handle), `AGENT_ID` (logical ID, for a throwaway agent),
 `AI_SDK_LETTA_STATE_DIR` (state directory), `TEXT_STATS_PERMISSION=ask` (try
-approvals), `DECISIONS=1` (try [decisions](#decisions)), `WEB_SEARCH=1` with `SEARXNG_URL` (try [web search](#web-search); `WEB_SEARCH_REVIEW_MS` sets the review time). Pass options after `--`, for example `npm run gui -- --port 4500`
+approvals), `DECISIONS=1` (try [decisions](#decisions)), `WEB_SEARCH=1` with `SEARXNG_URL` (try [web search](#web-search); `WEB_SEARCH_REVIEW_MS` and `WEB_SEARCH_STALE_MS` set the review time and when "Search again" is offered). Pass options after `--`, for example `npm run gui -- --port 4500`
 or `npm run tui -- --new "Planning"`.
 
 To build your own agent, follow [Building your own agent](docs/building-your-own-agent.md),
@@ -593,21 +593,36 @@ How a search works (`web_search({ query, purpose? })`):
    told the search was dismissed (with the note, if any) and sees none of it.
    A search that finds nothing relevant asks nobody and says so.
 
-**How long a review waits** is a per-agent setting, `webSearch:
-{ reviewTimeoutMs }` on the definition (10,000–280,000 ms; default 280,000,
-the maximum). A review nobody answers in time expires: the card closes, the
-agent is told "Web research expired" and gets none of the result, and the
-turn ends normally, so the conversation stays usable. Reviews do not use the
-shared approval budget (about four minutes per turn): the HTTP runtime waits
-for each review until it expires. Why not 15 minutes: the Letta harness
-(`@letta-ai/letta-code` 0.33.4, in SDK 0.8.22) ends every application tool
-call 300 s after it starts and refuses any longer `timeout_ms`, and a search
-plus its review is one tool call. So a review always expires at the latest
-290 s after its search began (the card shows when).
+**A review nobody answers in time becomes a decision.** How long the review
+card waits in the turn is a per-agent setting, `webSearch: { reviewTimeoutMs }`
+(10,000–280,000 ms; default 280,000). Answered in time, the agent continues in
+the same turn. Otherwise, just before the Letta harness ends the tool call
+(it ends every application tool call 300 s after it starts and refuses
+longer timeouts, so the turn itself cannot wait longer):
+
+- the result is kept on the server, with the conversation's
+  [decisions](#decisions) (`decisions.json`, 0600, survives restarts); the
+  agent still has none of it, is told the research awaits review, and ends
+  its turn. The conversation stays usable;
+- the card stays where the search was made, and the bell lists it, with
+  **Approve**, **Reject** and **Reject with note**, and no time limit. Unlike
+  other decisions, only the person whose message started the search, or an
+  admin of the agent, may review it (others get 403 and do not see it in the
+  bell);
+- the outcome reaches the agent once, as a new turn (the decisions' outcome
+  path): approved, the result labelled as untrusted web research with its age
+  ("from 2 hours ago"); rejected, that it was dismissed, with the note;
+- once the result is older than `webSearch.staleAfterMs` (default 7 days) the
+  card also offers **Search again**, which asks the agent to search anew.
+
+It never replaces the conversation's own pending decision, and
+`cancel_decision` does not withdraw it. Without a decision store (the terminal
+UI, or `openLettaAgent` used without the server) an unanswered review still
+expires: the agent is told "Web research expired" and gets none of it.
 
 ```ts
 defineAgent({ ..., tools: { ...webSearchTools }, permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS },
-  webSearch: { reviewTimeoutMs: 120_000 } });  // two minutes to review each result
+  webSearch: { reviewTimeoutMs: 120_000, staleAfterMs: 2 * 86_400_000 } });  // 2 minutes in the turn; "Search again" after 2 days
 ```
 
 **Unattended runs** (automations) cannot be reviewed: `web_search` fails with
@@ -1200,7 +1215,8 @@ single-user agent before it is given up (`start_timeout`).
   origin and a per-person CSRF token. Each agent's routes answer 404 to
   non-members (the same as an unknown agent); answering approvals and
   questions, and stopping a reply, need the person who sent the message or an
-  admin of that agent (403 otherwise); only admins change members.
+  admin of that agent (403 otherwise); only admins change members. Web
+  search reviews that became decisions keep that rule.
   Decisions are seen and decided by the agent's members only (404 for anyone
   else); any member may decide, and who did is recorded. The notification
   feed (`/api/decisions`) lists only the agents you belong to.
@@ -1292,8 +1308,9 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   it can misjudge relevance or be misled by a page; the review is the
   safeguard, and the agent is told the content is untrusted. Each search
   takes a few seconds more for the sub-agent to start (a search took 20–30 s
-  live). A review lasts at most about 4 min 50 s after its search began (the
-  harness's 5-minute cap on a tool call), then expires cleanly. In unattended runs, `'ask'` tools that
+  live). A review waits in the turn at most about 4 min 50 s after its search
+  began (the harness's 5-minute cap on a tool call); after that it waits as a
+  decision, and the answer arrives as a new turn. In unattended runs, `'ask'` tools that
   are not pre-approved are now refused before their preparation runs (for
   `web_search`: before anything is searched).
 - **Local backend only.** `openLettaAgent` uses the Agent SDK `local` backend.

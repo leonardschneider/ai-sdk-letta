@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { DECISION_LIMITS, LOCAL_USER_ID, decisionMessage, pendingDecisionNote, type DecisionDesk, type DecisionOption, type DecisionRequest, type TurnActor } from 'ai-sdk-letta';
+import { DECISION_LIMITS, LOCAL_USER_ID, decisionMessage, pendingDecisionNote, webResearchMessage, researchAge, type DecisionDesk, type DecisionOption, type DecisionRequest, type TurnActor, type WebResearch, type WebResearchOutcome } from 'ai-sdk-letta';
 import { RuntimeFault, type RunAuthor, type RunAutomation, type RunDecision, type ThreadRuntime } from './runtime.js';
 
 /**
@@ -40,6 +40,15 @@ export type DecisionRecord = {
    * conversation is read-only or archived; `error` says why).
    */
   resume?: { runIds: string[]; state: 'pending' | 'queued' | 'delivered' | 'blocked'; error?: string };
+  /**
+   * `web-research`: a web search result nobody reviewed in time (see
+   * `DecisionDesk.review`). Its options are `approve`, `reject` and, once the
+   * result is older than `staleAfterMs`, `search_again`. Only the person whose
+   * turn searched (`requestedBy.person`), or an admin, may decide it.
+   */
+  kind?: 'web-research';
+  research?: WebResearch;
+  staleAfterMs?: number;
 };
 type State = { version: 1; decisions: DecisionRecord[] };
 
@@ -56,7 +65,16 @@ export type PublicDecision = {
   decidedBy?: DecisionPerson; choice?: DecisionOption; comment?: string; decidedAt?: string;
   cancelledAt?: string; cancelReason?: string; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
+  /** A web search result waiting for review (see {@link DecisionRecord.kind}), the person who may review it (or an admin), and whether "Search again" is offered. */
+  kind?: 'web-research'; research?: WebResearch; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
 };
+
+/** The options of a web research decision. `search_again` is only accepted once the result is stale. */
+export const WEB_RESEARCH_OPTIONS: readonly DecisionOption[] = Object.freeze([
+  { id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }, { id: 'search_again', label: 'Search again' },
+]);
+const isResearch = (record: DecisionRecord) => record.kind === 'web-research';
+const staleAt = (record: DecisionRecord) => record.research && record.staleAfterMs ? Date.parse(record.research.searchedAt) + record.staleAfterMs : Infinity;
 
 /** A decision someone else made first, or that is no longer open. */
 export class DecisionConflict extends RuntimeFault {
@@ -116,6 +134,7 @@ export class DecisionBoard {
   readonly desk: DecisionDesk = {
     request: async (request, turn) => this.request(request, turn),
     cancel: async (turn, id) => this.cancel(turn.conversationId, id),
+    review: async (request, turn) => this.review(request.research, request.staleAfterMs, turn),
   };
   private threadOf(conversationId: string) {
     const threadId = this.runtime.threadOfConversation(this.owner, conversationId);
@@ -139,7 +158,7 @@ export class DecisionBoard {
     };
     // One open decision per conversation: a new one replaces the pending one.
     let replaced: string | undefined;
-    for (const old of pending.filter(d => d.threadId === threadId)) {
+    for (const old of pending.filter(d => d.threadId === threadId && !isResearch(d))) {
       Object.assign(old, { status: 'cancelled', cancelledAt: now, cancelReason: 'superseded', supersededBy: record.id });
       replaced = old.id;
     }
@@ -148,9 +167,35 @@ export class DecisionBoard {
     this.save(); this.changed();
     return { id: record.id, ...(replaced ? { replaced } : {}) };
   }
+  /** A web search result nobody reviewed in time: kept as a decision only its searcher (or an admin) may take. */
+  private review(research: WebResearch, staleAfterMs: number, turn: { conversationId: string; toolCallId: string; actor?: TurnActor }) {
+    const threadId = this.threadOf(turn.conversationId);
+    const run = this.runtime.activeRun(threadId);
+    if (this.state.decisions.filter(d => d.status === 'pending').length >= DECISION_BOARD_LIMITS.pendingPerAgent) throw new Error('decision_limit');
+    const person: DecisionPerson | undefined = run?.author ? { id: run.author.id, name: run.author.name, login: run.author.login, ...(run.author.avatar ? { avatar: run.author.avatar } : {}) }
+      : turn.actor ? { id: turn.actor.id, name: turn.actor.name ?? 'You', ...(turn.actor.login ? { login: turn.actor.login } : {}) } : undefined;
+    const record: DecisionRecord = {
+      id: randomUUID(), threadId, conversationId: turn.conversationId, ...(run ? { runId: run.id } : {}), toolCallId: turn.toolCallId,
+      question: visible(`Review web research: “${research.query}”`, DECISION_LIMITS.maxQuestionCharacters), options: WEB_RESEARCH_OPTIONS.map(o => ({ ...o })), allowComment: true,
+      requestedBy: { ...(person ? { person } : {}), ...(run?.source ? { source: { via: run.source.via, name: run.source.name, tokenId: run.source.tokenId } } : {}) },
+      createdAt: new Date().toISOString(), status: 'pending', kind: 'web-research', research: structuredClone(research), staleAfterMs,
+    };
+    this.state.decisions.push(record);
+    this.forget();
+    this.save(); this.changed();
+    return { id: record.id };
+  }
+  /**
+   * Whether `who` may decide a decision: anyone for ordinary decisions; for
+   * web research, the person whose turn searched, or an admin.
+   */
+  mayDecide(id: string, who: { id: string }, admin: boolean): boolean {
+    const record = this.record(id);
+    return !isResearch(record) || admin || (!!record.requestedBy.person && record.requestedBy.person.id === who.id);
+  }
   private cancel(conversationId: string, id?: string): string | undefined {
     const threadId = this.runtime.threadOfConversation(this.owner, conversationId);
-    const record = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && (!id || d.id === id));
+    const record = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isResearch(d) && (!id || d.id === id));
     if (!record) return undefined;
     Object.assign(record, { status: 'cancelled', cancelledAt: new Date().toISOString(), cancelReason: 'withdrawn' });
     this.save(); this.changed();
@@ -178,6 +223,8 @@ export class DecisionBoard {
       ...(record.decidedBy ? { decidedBy: { ...record.decidedBy } } : {}), ...(choice ? { choice: { ...choice } } : {}), ...(record.comment ? { comment: record.comment } : {}), ...(record.decidedAt ? { decidedAt: record.decidedAt } : {}),
       ...(record.cancelledAt ? { cancelledAt: record.cancelledAt, cancelReason: record.cancelReason } : {}), ...(record.supersededBy ? { supersededBy: record.supersededBy } : {}),
       ...(record.resume && runId ? { resume: { runId, state: record.resume.state, ...(record.resume.error ? { error: record.resume.error } : {}) } } : {}),
+      ...(isResearch(record) ? { kind: 'web-research' as const, research: structuredClone(record.research!), stale: Date.now() >= staleAt(record), ...(Number.isFinite(staleAt(record)) ? { staleAt: new Date(staleAt(record)).toISOString() } : {}),
+        ...(record.requestedBy.person ? { reviewer: { id: record.requestedBy.person.id, name: record.requestedBy.person.name } } : {}) } : {}),
     };
   }
   /** Pending decisions of conversations that are not archived, oldest first. */
@@ -201,8 +248,11 @@ export class DecisionBoard {
   requestedBy(runId: string): DecisionRecord | undefined { const found = this.state.decisions.filter(d => d.runId === runId).at(-1); return found ? structuredClone(found) : undefined; }
   /** The note for an ordinary turn of a conversation with a pending decision. */
   pendingNote(threadId: string): string | undefined {
-    const pending = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId);
-    return pending ? pendingDecisionNote(pending) : undefined;
+    const pending = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isResearch(d));
+    const research = this.state.decisions.filter(d => d.status === 'pending' && d.threadId === threadId && isResearch(d));
+    const notes = [...(pending ? [pendingDecisionNote(pending)] : []),
+      ...(research.length ? [`Web research waiting for review in the app: ${research.map(d => `“${visible(d.research!.query, 200).replace(/[<>]/g, '')}” (decision ${d.id})`).join('; ')}. You have none of it; do not search for the same thing again unless asked. If it is approved, it arrives as a message starting with "[Web research]".`] : [])];
+    return notes.length ? notes.join(' ') : undefined;
   }
 
   /* ---------------- deciding ---------------- */
@@ -218,6 +268,11 @@ export class DecisionBoard {
     const record = this.record(id);
     const { choice, stop, comment } = (input ?? {}) as { choice?: unknown; stop?: unknown; comment?: unknown };
     if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['choice', 'stop', 'comment'].includes(key))) throw new RuntimeFault('invalid_input', 400);
+    if (isResearch(record)) {
+      // Approve (no note), Reject (an optional note for the agent), or, once the result is stale, Search again.
+      if (stop !== undefined || !['approve', 'reject', 'search_again'].includes(choice as string) || (comment !== undefined && (typeof comment !== 'string' || comment.length > DECISION_LIMITS.maxCommentCharacters)) || (choice === 'approve' && typeof comment === 'string' && comment.trim())) throw new RuntimeFault('invalid_input', 400);
+      if (record.status === 'pending' && choice === 'search_again' && Date.now() < staleAt(record)) throw new RuntimeFault('not_stale', 409);
+    }
     if ((stop !== undefined && stop !== true) || (stop === true) === (choice !== undefined) || (choice !== undefined && (typeof choice !== 'string' || !record.options.some(o => o.id === choice)))) throw new RuntimeFault('invalid_input', 400);
     if (comment !== undefined && (typeof comment !== 'string' || comment.length > DECISION_LIMITS.maxCommentCharacters)) throw new RuntimeFault('invalid_input', 400);
     const text = typeof comment === 'string' ? commentText(comment) : '';
@@ -287,13 +342,29 @@ export class DecisionBoard {
   }
   /** The outcome message (what the agent receives, and the app shows as a compact line). */
   outcomeText(record: DecisionRecord): string {
+    if (isResearch(record)) return webResearchMessage(this.researchOutcome(record));
     const choice = record.options.find(o => o.id === record.choice);
     // The single-user app's person is "You" on screen, "The user" to the agent.
     const by = !record.decidedBy ? 'Someone' : record.decidedBy.id === LOCAL_USER_ID ? 'The user' : record.decidedBy.name;
     return decisionMessage({ id: record.id, question: record.question, outcome: record.status === 'stopped' ? 'stopped' : 'decided', by,
       ...(choice ? { choice: { id: choice.id, label: choice.label } } : {}), ...(record.comment ? { comment: record.comment } : {}) });
   }
+  private researchOutcome(record: DecisionRecord): WebResearchOutcome {
+    const by = !record.decidedBy ? 'Someone' : record.decidedBy.id === LOCAL_USER_ID ? 'The user' : record.decidedBy.name;
+    const at = Date.parse(record.decidedAt ?? new Date().toISOString());
+    const research = record.research!;
+    if (record.choice === 'approve') return { outcome: 'approve', by, research, at, id: record.id };
+    if (record.choice === 'search_again') return { outcome: 'search_again', by, query: research.query, ...(research.purpose ? { purpose: research.purpose } : {}), searchedAt: research.searchedAt, at, ...(record.comment ? { note: record.comment } : {}), id: record.id };
+    return { outcome: 'reject', by, query: research.query, ...(record.comment ? { note: record.comment } : {}), id: record.id };
+  }
   private runDecision(record: DecisionRecord): RunDecision {
+    if (isResearch(record)) {
+      const research = record.research!;
+      const choice = record.options.find(o => o.id === record.choice);
+      return { id: record.id, outcome: 'decided', kind: 'web-research', question: research.query, by: { id: record.decidedBy!.id, name: record.decidedBy!.name },
+        ...(choice ? { choice: { id: choice.id, label: choice.label } } : {}), ...(record.comment ? { comment: record.comment } : {}),
+        age: researchAge(research.searchedAt, Date.parse(record.decidedAt ?? new Date().toISOString())) };
+    }
     const choice = record.options.find(o => o.id === record.choice);
     return { id: record.id, outcome: record.status === 'stopped' ? 'stopped' : 'decided', question: record.question, by: { id: record.decidedBy!.id, name: record.decidedBy!.name },
       ...(choice ? { choice: { id: choice.id, label: choice.label } } : {}), ...(record.comment ? { comment: record.comment } : {}) };

@@ -32,13 +32,13 @@ export type PreparedCall = {
    */
   denied?: { message: string; allowNote?: boolean };
   /**
-   * The approval expires at `at` (epoch ms): the prompt is withdrawn, the
-   * call does not run, and the agent is told `message` (code
-   * `review_expired`), so the turn ends normally. The request carries
+   * The approval expires at `at` (epoch ms): the prompt is withdrawn and
+   * `onExpire()` says what the agent receives instead (for `web_search`: the
+   * result moved to a decision people can take later). The request carries
    * `expiresAt`, and hosts give it that long instead of their shared
    * human-wait budget.
    */
-  expires?: { at: number; message: string };
+  expires?: { at: number; onExpire: () => Promise<unknown> | unknown };
 };
 /** Key of a tool's {@link PrepareCall}. */
 export const PREPARE_CALL: unique symbol = Symbol.for('ai-sdk-letta.prepareCall');
@@ -311,8 +311,15 @@ export function createToolBridge(options: ToolBridgeOptions) {
             answer = await options.interactions.request({ kind: 'approval', toolCallId: id, tool: name, title: `Approve ${name}?`, details: JSON.stringify(args), ...(prepared.preview ? { preview: prepared.preview } : {}), ...(prepared.onBehalfOf ? { onBehalfOf: prepared.onBehalfOf } : {}), ...(prepared.denied?.allowNote ? { allowNote: true } : {}), ...(prepared.expires ? { expiresAt: new Date(prepared.expires.at).toISOString() } : {}) }, expiry ? AbortSignal.any([signal, expiry]) : signal);
           } catch (error) {
             if (expiry?.aborted && !signal.aborted) {
-              emit(name, id, 'denied', Date.now(), 'review_expired');
-              return { content: [{ type: 'text', text: JSON.stringify({ error: 'review_expired', message: prepared.expires!.message }) }], isError: true };
+              // Not answered in time: the tool decides what happens to the call (it never runs as approved).
+              try {
+                const output = await prepared.expires!.onExpire();
+                const result = await modelContent(definition, id, args, output);
+                // An output naming an error (for example `review_expired`) is reported as one.
+                const failed = result.isError || (!!output && typeof output === 'object' && typeof (output as { error?: unknown }).error === 'string');
+                emit(name, id, failed ? 'denied' : 'completion', started, 'approval_expired');
+                return { ...result, isError: failed };
+              } catch { emit(name, id, 'error', started, 'tool_failed'); return { content: [{ type: 'text', text: JSON.stringify({ error: 'tool_failed' }) }], isError: true }; }
             }
             throw error;
           }

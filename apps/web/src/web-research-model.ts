@@ -57,6 +57,7 @@ export function expiryLabel(expiresAt: string | undefined, format = (date: Date)
 export type ResearchOutcome =
   | { state: 'approved'; label: string; research: Research; reviewed: boolean }
   | { state: 'dismissed'; label: string; note?: string }
+  | { state: 'awaiting'; label: string; decision: string }
   | { state: 'empty' | 'failed' | 'needed-approval' | 'cancelled' | 'expired'; label: string; detail?: string };
 
 const FAILED: Record<string, string> = {
@@ -82,10 +83,16 @@ export function researchOutcome(args: Record<string, unknown>, result: unknown):
     return { state: 'approved', label: `${reviewed ? 'Web research approved' : 'Web research (pre-approved, not reviewed)'}: ${research.query}`, research, reviewed };
   }
   if (value.error === 'user_denied') return { state: 'dismissed', label: `Web research dismissed: ${query}`, ...(str(value.note, 1000) ? { note: str(value.note, 1000) } : {}) };
+  if (value.awaiting_review === true && typeof value.decision === 'string') return { state: 'awaiting', label: `Web research waiting for review: ${query}`, decision: value.decision };
   if (value.error === 'review_expired') return { state: 'expired', label: `Web research expired: ${query}`, detail: 'Nobody reviewed the result in time, so the agent got none of it.' };
   if (value.error === 'approval_required') return { state: 'needed-approval', label: `Web research needed review: ${query}`, detail: 'Started by an automation, so nobody could review the result. Nothing was searched. Pre-approve web search for that automation to let it search unreviewed.' };
   if (value.error === 'approval_cancelled' || value.error === 'tool_cancelled' || value.error === 'unattended_stopped') return { state: 'cancelled', label: `Web research cancelled: ${query}` };
   if (value.results === 0) return { state: 'empty', label: `Web research found nothing relevant: ${query}` };
   const code = typeof value.error === 'string' ? value.error : '';
   return { state: 'failed', label: `Web research didn’t complete: ${query}`, ...(FAILED[code] ? { detail: FAILED[code] } : {}) };
+}
+
+/** The research of a web research decision (`decision.research`, as stored on the server), for its card. */
+export function researchFromDecision(research: Record<string, unknown> | undefined): Research | undefined {
+  return research ? researchFromPreview({ kind: 'web-research', data: research }) : undefined;
 }

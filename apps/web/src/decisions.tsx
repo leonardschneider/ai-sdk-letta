@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
-import { Bell, Check, ChevronRight, CircleStop, CornerDownRight, LoaderCircle, Signpost } from 'lucide-react';
+import { Bell, Check, ChevronRight, CircleStop, CornerDownRight, Globe, LoaderCircle, Signpost } from 'lucide-react';
 import { useAuiState } from '@assistant-ui/react';
 import { useToast } from './toasts.js';
 import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
@@ -14,7 +14,7 @@ import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, outco
  * ID on a team server, `undefined` in the single-user app), and how to decide.
  * `ensure` loads a decision the page does not know yet (one asked live).
  */
-export type DecisionsState = { byId: ReadonlyMap<string, DecisionView>; me?: string; team: boolean; decide(id: string, body: { choice?: string; stop?: true; comment?: string }): Promise<void>; ensure(id: string): void };
+export type DecisionsState = { byId: ReadonlyMap<string, DecisionView>; me?: string; team: boolean; admin?: boolean; decide(id: string, body: { choice?: string; stop?: true; comment?: string }): Promise<void>; ensure(id: string): void };
 export const DecisionsContext = createContext<DecisionsState>({ byId: new Map(), team: false, decide: async () => {}, ensure: () => {} });
 
 /** Re-render every 30 seconds, so "3 min ago" stays true. */
@@ -72,7 +72,7 @@ export function DecisionBell({ decisions, showAgent, me, onOpen }: { decisions: 
         {!!count && <ul className="bell-list">
           {decisions.map(decision => <li key={decision.id}>
             <button type="button" className="bell-item" onClick={() => { setOpen(false); onOpen(decision); }}>
-              <span className="bell-item-icon" aria-hidden="true"><Signpost size={14}/></span>
+              <span className="bell-item-icon" aria-hidden="true">{decision.kind === 'web-research' ? <Globe size={14}/> : <Signpost size={14}/>}</span>
               <span className="bell-item-body">
                 <span className="bell-item-question">{decision.question}</span>
                 <span className="bell-item-where">{showAgent ? `${decision.agent.name} · ` : ''}{decision.thread.title}</span>
@@ -199,7 +199,7 @@ export function OutcomeLine({ outcome, time }: { outcome: DecisionOutcome; time?
   const label = outcomeSummary(outcome, me);
   return <div className="decision-outcome" data-outcome={outcome.outcome} role="note" aria-label={`${label}${time ? `, ${ago(time)}` : ''}`}>
     <span className="decision-outcome-line">
-      {outcome.outcome === 'stopped' ? <CircleStop size={14} aria-hidden="true"/> : <Check size={14} aria-hidden="true"/>}
+      {outcome.outcome === 'stopped' ? <CircleStop size={14} aria-hidden="true"/> : outcome.kind === 'web-research' ? <Globe size={14} aria-hidden="true"/> : <Check size={14} aria-hidden="true"/>}
       <span className="decision-outcome-label">{label}</span>
       {time && <time dateTime={time} className="decision-outcome-time">· {ago(time)}</time>}
     </span>

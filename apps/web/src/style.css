@@ -837,3 +837,11 @@ body[data-resizing] iframe { pointer-events: none; }
   .web-research-card .card-actions { margin-top: 10px; gap: 6px; }
   .web-research-card .card-actions .btn { padding: 7px 10px; }
 }
+/* A web search review that became a decision: the dock card's look, in the conversation. */
+.decision-card.web-research-card { max-height: none; }
+.decision-card.web-research-card .card-actions { flex-wrap: wrap; }
+.decision-card.web-research-card .card-actions .btn { white-space: nowrap; }
+@media (max-width: 480px) {
+  .decision-card.web-research-card .card-actions .btn { flex: 1 1 auto; padding: 7px 10px; }
+  .decision-card.web-research-card .card-actions .btn.primary { flex-basis: 100%; order: 9; }
+}
