@@ -14,12 +14,23 @@ export {
   type ImageInputErrorCode, type ImageMediaType, type ImageLimits, type DecodedImage,
 } from './images.js';
 export {
-  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
-  type AgentDefinition, type WebSearchSettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
+  defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, DEFAULT_MEMORY, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
+  type AgentDefinition, type WebSearchSettings, type MemorySettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { openLettaAgent, createLettaAgent, openAgentHost, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
-export { MemoryJournal, type MemoryRewindPlan } from './memory-journal.js';
-export { planRevert, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
+export { openLettaAgent, createLettaAgent, openAgentHost, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
+export { MemoryJournal, AGENT_EMAIL, REVIEW_EMAIL, harnessCommit, type MemoryRewindPlan, type TurnCommits } from './memory-journal.js';
+export {
+  turnProvenance, withSource, sourceOfTool, adminClean, untrusted, provenanceTrailers, parseProvenanceTrailers, provenanceLabel, blameProvenance, sections, commitTrailers, PROVENANCE_TRAILERS, TRUSTED_TOOLS,
+  type TurnProvenance, type ContentSource, type ProvenanceActor, type LineProvenance, type SectionProvenance,
+} from './provenance.js';
+export { MemoryGuard, isProtectedPath, isIndexUpkeep, reviewFloor, failedReview, DEFAULT_PROTECTED_MEMORY, DEFAULT_MEMORY_SAFETY, type MemoryReview, type MemoryRefusal, type MemoryGuardEvents, type MemoryGuardOptions, type MemorySafetySettings } from './memory-guard.js';
+export {
+  lettaReviewer, sweepReviewers, reviewerSessionOptions, reviewPrompt, validateVerdict, stricter, chooseReviewerModel, modelFamily, VERDICTS, VERDICT_SCHEMA, JIMINY_INSTRUCTIONS, JIMINY_NAME, REVIEWER_PREFERENCES,
+  type Verdict, type JiminyVerdict, type ReviewRequest, type MemoryReviewer, type LettaReviewerOptions,
+} from './jiminy.js';
+export { dreamHookSupported, dreamHookCommand, parseDreamRequest, reviewDreamRequest, DREAM_HOOK_CAPABILITY, type DreamRequest, type DreamResponse } from './dream-review.js';
+export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenAgentsOf, transcriptsDirectory, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
+export { planRevert, changedBy, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
 export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';

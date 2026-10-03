@@ -5,7 +5,8 @@ import type { DecisionBoard } from './decisions.js';
 import { externalEffects, forkPoint, rewindTurn, rewoundSpan, soloRefusal, type RewindSummary } from './rewind.js';
 import {
   REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
-  decisionOutcomeNote, webResearchOutcomeNote,
+  decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel,
+  type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
   type ConversationRewind, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
@@ -28,7 +29,9 @@ export type RunImage = { mediaType: string; bytes: number; sha256: string };
  * Who wrote a turn, in a shared (team) runtime. `id` is the stable user ID;
  * `name` the display name at the time; `login` the identity provider login.
  */
-export type RunAuthor = { id: string; login: string; name: string; avatar?: string };
+export type RunAuthor = { id: string; login: string; name: string; avatar?: string;
+  /** Their role in the agent when they sent the turn (team servers): memory provenance records it, and only an admin's turn may change protected memory. */
+  role?: 'admin' | 'member' };
 /**
  * What started a turn that no person typed: an automation (a workflow in n8n
  * or Conductor, a script) through the automation API, or a task the agent
@@ -140,6 +143,30 @@ export interface RewindHooks {
   schedules(runIds: ReadonlySet<string>): { id: string; at: string; prompt: string; state: 'pending' | 'fired' }[];
   cancelSchedules(runIds: ReadonlySet<string>): Promise<string[]>;
 }
+/** A memory review as the app shows it. */
+export type PublicMemoryReview = Pick<MemoryReview, 'id' | 'kind' | 'files' | 'status' | 'verdict' | 'floor' | 'rule' | 'outcome' | 'decision' | 'mergedAt' | 'createdAt' | 'settledAt' | 'error' | 'beforeMerge'> & {
+  provenance: string; threadId?: string; diff?: string;
+  jiminy?: { trust: number; verdict: string; reason: string; model?: string; ms?: number };
+  /** Dreams merged before review: how long the change was in memory before the review settled (ms). */
+  exposureMs?: number;
+};
+function publicReview(review: MemoryReview, runtime: ThreadRuntime): PublicMemoryReview {
+  const threadId = review.conversationId ? runtime.threadOfConversationAny(review.conversationId) : undefined;
+  const exposure = review.kind === 'dream' && !review.beforeMerge && review.mergedAt && review.settledAt ? Math.max(0, Date.parse(review.settledAt) - Date.parse(review.mergedAt)) : undefined;
+  return { id: review.id, kind: review.kind, files: structuredClone(review.files), status: review.status, provenance: provenanceLabel(review.provenance), createdAt: review.createdAt,
+    ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.floor ? { floor: review.floor } : {}), ...(review.rule ? { rule: review.rule } : {}), ...(review.outcome ? { outcome: review.outcome } : {}), ...(review.decision ? { decision: review.decision } : {}),
+    ...(review.mergedAt ? { mergedAt: review.mergedAt } : {}), ...(review.settledAt ? { settledAt: review.settledAt } : {}), ...(review.error ? { error: review.error } : {}), ...(review.beforeMerge ? { beforeMerge: structuredClone(review.beforeMerge) } : {}),
+    ...(threadId ? { threadId } : {}), ...(review.diff ? { diff: review.diff } : {}),
+    ...(review.jiminy ? { jiminy: { trust: review.jiminy.trust, verdict: review.jiminy.verdict, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}), ...(review.jiminy.ms ? { ms: review.jiminy.ms } : {}) } } : {}),
+    ...(exposure !== undefined ? { exposureMs: exposure } : {}) };
+}
+/** The provenance line and review outcome of a memory commit, for the rewind confirmation. */
+function memoryChip(rewind: ConversationRewind, commit: string): { provenance?: string; review?: string } {
+  const entry = rewind.memory.entryOf(commit);
+  const review = rewind.guard?.reviewsOf(new Set([commit]))[0];
+  const provenance = entry?.provenance ? provenanceLabel(entry.provenance) : review ? provenanceLabel(review.provenance) : undefined;
+  return { ...(provenance ? { provenance } : {}), ...(review?.verdict ? { review: `${review.verdict}${review.jiminy ? ` · trust ${review.jiminy.trust.toFixed(2)}` : ''}` } : {}) };
+}
 /** One conversation's session and its single running turn (one lane per runtime unless parallel). */
 type Lane = { key: string; locked: boolean; usedAt?: number; current?: RuntimeSession; active?: { run: Run; control: AbortController }; pending?: { runId: string; request: InteractionRequest; resolve(value: InteractionResponse): void }; draining?: boolean };
 /** An opened agent conversation as seen by the runtime. */
@@ -155,6 +182,10 @@ export interface RuntimeSession {
   close?(): Promise<void>;
   /** Rewind support (fork, history records, memory journal); without it, rewinds are refused with `rewind_unavailable`. */
   rewind?: ConversationRewind;
+  /** The agent's memory guard (provenance, reviews), when the host has one. */
+  memory?: MemoryGuard;
+  /** Run a Letta harness command (`reflect`) in this conversation, when the host supports it. */
+  harnessCommand?(command: 'reflect', args?: string): Promise<string>;
 }
 /** Opens and closes the single agent session the runtime drives. */
 export interface RuntimeHost {
@@ -284,6 +315,13 @@ export class ThreadRuntime {
   decisions?: DecisionBoard;
   /** Tasks the agent scheduled, when the server schedules them (set by the automation service). */
   rewindHooks?: RewindHooks;
+  /**
+   * The agent's memory guard (provenance and reviews of memory changes),
+   * once a conversation is open. Set by the server's host.
+   */
+  memory?: MemoryGuard;
+  /** The reviewer's model setting, when the app may change it (see {@link setReviewerModel}). */
+  reviewerModel?: { value(): string; set(model: string): void; available(): Promise<string[]> };
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -388,6 +426,7 @@ export class ThreadRuntime {
     const identity = this.state.threads.find(t => t.agentId)?.agentId;
     if (identity && session.agentId !== identity) { await (session.close?.() ?? this.host.close()); throw new RuntimeFault('identity_mismatch'); }
     lane.current = session;
+    if (session.memory) this.memory = session.memory;
     return session;
   }
   private async closeLane(lane: Lane) {
@@ -528,6 +567,72 @@ export class ThreadRuntime {
     return this.summary(thread);
   }
   private renaming: Promise<void> = Promise.resolve();
+  /* ---------------- memory: provenance and reviews ---------------- */
+
+  /** The memory guard, opening a session if none is open yet (the guard needs the memory directory). */
+  private async guardOf(owner: string): Promise<MemoryGuard> {
+    this.authorize(owner);
+    if (this.memory) return this.memory;
+    throw new RuntimeFault('memory_unavailable', 409);
+  }
+  /** Memory reviews, newest first (a view without internals beyond what people need), and the reviewer setting. */
+  async memoryReviews(owner: string, limit = 50): Promise<{ reviews: PublicMemoryReview[]; refused: { path: string; code: string; tool: string; at: string; provenance?: string; threadId?: string }[]; ready: boolean; reviewer?: { model: string; available: string[] } }> {
+    this.authorize(owner);
+    // Before a conversation is opened the guard does not exist yet: nothing to show (not an error).
+    const reviews = (this.memory?.list() ?? []).reverse().slice(0, Math.min(200, Math.max(1, limit))).map(r => publicReview(r, this));
+    // Writes refused by the memory guard (protected files, new root files from untrusted turns), newest first.
+    const refused = (this.memory?.refusals ?? []).slice(-20).reverse().map(r => { const run = r.turn ? this.state.runs.find(x => x.id === r.turn) : undefined; return { path: r.path, code: r.code, tool: r.tool, at: r.at, ...(r.provenance ? { provenance: r.provenance } : {}), ...(run ? { threadId: run.threadId } : {}) }; });
+    return { reviews, refused, ready: !!this.memory, ...(this.reviewerModel ? { reviewer: { model: this.reviewerModel.value(), available: await this.reviewerModel.available().catch(() => []) } } : {}) };
+  }
+  /** Per-section provenance of a memory file (see `MemoryGuard.provenanceOf`). */
+  async memoryProvenance(owner: string, path: unknown) {
+    const guard = await this.guardOf(owner);
+    if (typeof path !== 'string' || path.length > 300) throw new RuntimeFault('invalid_input', 400);
+    try { return await guard.provenanceOf(path); }
+    catch (error) { throw new RuntimeFault(error instanceof Error && error.message === 'invalid_path' ? 'invalid_input' : 'not_found', error instanceof Error && error.message === 'invalid_path' ? 400 : 404); }
+  }
+  /** Change the reviewer's model (`'auto'`, `'off'` is not offered here, or a connected model's handle). */
+  setReviewerModel(owner: string, input: unknown) {
+    this.authorize(owner);
+    const model = (input as { model?: unknown } | undefined)?.model;
+    if (!this.reviewerModel || typeof model !== 'string' || !(model === 'auto' || /^[\w.-]+\/[\w.:-]+$/.test(model))) throw new RuntimeFault('invalid_input', 400);
+    this.reviewerModel.set(model);
+    this.changed();
+    return { model: this.reviewerModel.value() };
+  }
+  /**
+   * Start a dream (reflection) of a thread's conversation now, instead of
+   * waiting for the step count: for operators checking how dreams are
+   * reviewed. `instruction` steers what the dream looks at. Refused while a
+   * turn runs in the thread.
+   */
+  async dreamNow(owner: string, threadId: string, input: unknown): Promise<{ started: true; output: string }> {
+    const thread = this.thread(owner, threadId);
+    const instruction = (input as { instruction?: unknown } | undefined)?.instruction;
+    if (instruction !== undefined && (typeof instruction !== 'string' || instruction.length > 1000)) throw new RuntimeFault('invalid_input', 400);
+    const lane = this.lane(thread.id);
+    return this.exclusive(lane, async () => {
+      const session = await this.openIn(lane, thread);
+      if (!session.harnessCommand) throw new RuntimeFault('dream_unavailable');
+      const output = await session.harnessCommand('reflect', typeof instruction === 'string' && instruction.trim() ? `--instruction ${JSON.stringify(instruction.trim())}` : '');
+      return { started: true as const, output: output.slice(0, 500) };
+    });
+  }
+  /** Memory reviews changed (one started, settled or reverted something): open pages refresh. */
+  memoryChanged() { this.memoryVersion++; this.changed(); }
+  /** Changes the memory guard reverted or removed recently, newest last (for a toast in the app; in memory only). */
+  private reverts: { id: string; at: string; files: string[]; reason?: string; held: boolean; kind: 'turn' | 'dream' }[] = [];
+  /** Bumped whenever a memory review changes (the app polls `/v1/memory/reviews` only then). */
+  memoryVersion = 0;
+  /** A memory change was reverted (reject) or removed until approved (ask_human): the app shows a toast. */
+  memoryReverted(review: MemoryReview) {
+    this.reverts.push({ id: review.id, at: new Date().toISOString(), files: review.files.map(f => f.path), ...(review.jiminy?.reason ? { reason: review.jiminy.reason.slice(0, 200) } : review.rule ? { reason: review.rule } : {}), held: review.outcome === 'removed', kind: review.kind });
+    if (this.reverts.length > 50) this.reverts = this.reverts.slice(-50);
+    this.changed();
+  }
+  /** Recent reverts (for toasts): those after `since` (an ISO time). */
+  memoryReverts(owner: string, since?: string) { this.authorize(owner); return this.reverts.filter(r => !since || r.at > since).map(r => ({ ...r, files: [...r.files] })); }
+
   /* ---------------- rewind ---------------- */
 
   /** A rewind of this thread is being prepared or applied (no turn may start). */
@@ -592,7 +697,7 @@ export class ThreadRuntime {
       message: { runId: lead.id, input: lead.input, ...((lead.images?.length ?? 0) + (lead.files?.length ?? 0) ? { attachments: (lead.images?.length ?? 0) + (lead.files?.length ?? 0) } : {}) },
       turns: span.map(rewindTurn),
       resources: resources ? { files: resources.files, kept: resources.kept } : null,
-      memory: { files: memory.files, kept: memory.kept },
+      memory: { files: memory.files, kept: memory.kept.map(c => ({ ...c, ...memoryChip(rewind, c.commit) })), commits: memory.commits.map(c => ({ ...c, ...memoryChip(rewind, c.commit) })) },
       external: [...externalEffects(span, this.rewindInternal), ...fired.map(s => ({ runId: '', tool: 'schedule_task', label: 'A scheduled task already ran', detail: s.prompt.slice(0, 160) }))],
       cancel: { decisions: decisions.map(d => ({ id: d.id, question: d.kind === 'web-research' ? (d.research?.query ?? d.question) : d.question, ...(d.kind ? { kind: d.kind } : {}) })), schedules: schedules.filter(s => s.state === 'pending') },
     };
@@ -1325,7 +1430,7 @@ export class ThreadRuntime {
       const speaker = (r: Run) => r.author ? { name: r.author.name, login: r.author.login } : { name: '' };
       // Tools that use personal credentials (Atlassian) act for the person whose message started the turn
       // (the first message's author in a combined turn). Single-user runtimes leave it to the host (the local user).
-      const actor = run.author ? { actor: { id: run.author.id, name: run.author.name, login: run.author.login } } : {};
+      const actor = run.author ? { actor: { id: run.author.id, name: run.author.name, login: run.author.login, ...(run.author.role ? { role: run.author.role } : {}) } } : {};
       // Every turn carries its run ID as the message's OTID: history shows its author or source, and a rewind finds the turn (and its resources and memory changes).
       const shared = this.queueing ? { otid: run.id, ...actor,
         ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
@@ -1334,11 +1439,13 @@ export class ThreadRuntime {
       // What the agent should know about decisions: this turn brings one's outcome, or one is still pending in this conversation.
       const reminder = run.decision ? (run.decision.kind === 'web-research' ? webResearchOutcomeNote(run.decision.choice?.id === 'approve' ? 'approve' : run.decision.choice?.id === 'search_again' ? 'search_again' : 'reject') : decisionOutcomeNote(run.decision.outcome)) : this.decisions?.pendingNote(run.threadId);
       const decision = { ...(reminder ? { reminder } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
-      const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via } } : {};
+      const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name } } : {};
+      // An approved web research result arrives with this turn: untrusted content for memory provenance.
+      const sources = run.decision?.kind === 'web-research' && run.decision.choice?.id === 'approve' ? { sources: [{ kind: 'web' as const, label: 'web research', reviewed: true }] } : {};
       const tag = { otid: run.id };
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision });
+        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
@@ -1484,6 +1591,12 @@ export class ThreadRuntime {
     return this.state.threads.find(t => t.id === threadId && t.owner === owner)?.conversationId;
   }
   /** The thread's Letta conversation ID (for tools that schedule work in it). */
+  /** The thread of a Letta conversation, whoever owns it (memory reviews name conversations). */
+  threadOfConversationAny(conversationId: string): string | undefined { return this.state.threads.find(t => t.conversationId === conversationId)?.id; }
+  /** The most recently active thread (dream reviews are shown there). */
+  latestThread(): string | undefined { return [...this.state.threads].filter(t => t.state === 'ready' && !t.archived).sort((a, b) => (b.lastActivityAt ?? b.createdAt ?? '').localeCompare(a.lastActivityAt ?? a.createdAt ?? ''))[0]?.id; }
+  /** Who wrote a run (memory reviews ask them, or an admin). */
+  authorOfRun(runId: string): RunAuthor | undefined { return this.state.runs.find(r => r.id === runId)?.author; }
   threadOfConversation(owner: string, conversationId: string) {
     this.authorize(owner);
     return this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId && t.state === 'ready')?.id;

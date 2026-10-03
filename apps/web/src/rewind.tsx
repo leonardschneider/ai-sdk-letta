@@ -100,6 +100,7 @@ function Section({ section }: { section: RewindSection }) {
       {section.lines.map(line => <li key={line.key} data-tone={line.tone}>
         <span className="rewind-item">{line.text}</span>
         {line.detail && <span className="rewind-detail">{line.detail}</span>}
+        {line.chips?.length ? <span className="prov-chips rewind-chips">{line.chips.map(chip => <span key={chip} className="prov-chip" data-tone={/^(reject|ask_human)/.test(chip) ? 'reverted' : /^flag/.test(chip) ? 'flag' : /^accept/.test(chip) ? 'ok' : 'neutral'}>{chip}</span>)}</span> : null}
       </li>)}
     </ul>
   </section>;

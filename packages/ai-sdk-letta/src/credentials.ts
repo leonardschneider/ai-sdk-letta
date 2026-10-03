@@ -17,10 +17,16 @@ import { join } from 'node:path';
 /** The user of single-user apps (the local GUI and TUI). Team servers use each person's stable user ID. */
 export const LOCAL_USER_ID = 'local';
 
-/** Who a turn acts for: the person whose message started it. Tools that use personal credentials act as this user. */
-export type TurnActor = { id: string; name?: string; login?: string };
-/** The local user of single-user apps. */
-export const LOCAL_ACTOR: Readonly<TurnActor> = Object.freeze({ id: LOCAL_USER_ID, name: 'You' });
+/**
+ * Who a turn acts for: the person whose message started it. Tools that use
+ * personal credentials act as this user. `role` is their role in the agent,
+ * as the server knows it (team servers: `admin` or `member`); memory
+ * provenance records it, and only an admin's turn may change protected
+ * memory files (see `MemoryGuard`). Never from the model.
+ */
+export type TurnActor = { id: string; name?: string; login?: string; role?: 'admin' | 'member' };
+/** The local user of single-user apps: they own the app, so they are its admin. */
+export const LOCAL_ACTOR: Readonly<TurnActor> = Object.freeze({ id: LOCAL_USER_ID, name: 'You', role: 'admin' });
 /** Key under which the runtime passes the turn's {@link TurnActor} to tools (`options.context[ACTOR_CONTEXT]`). Never from the model. */
 export const ACTOR_CONTEXT = 'ai-sdk-letta.actor';
 

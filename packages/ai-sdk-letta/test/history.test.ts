@@ -160,7 +160,7 @@ test('uncertain delivery survives restart and blocks only that conversation, nev
 });
 
 test('reflection command targets selected conversation, app-private local_project only', () => {
-  assert.deepEqual(dreamingCommand(definition, 'agent-local-1', 'local-conv-2'), { type: 'set_reflection_settings', runtime: { agent_id: 'agent-local-1', conversation_id: 'local-conv-2' }, scope: 'local_project', settings: { trigger: 'step-count', step_count: 25 } });
+  assert.deepEqual(dreamingCommand(definition, 'agent-local-1', 'local-conv-2'), { type: 'set_reflection_settings', runtime: { agent_id: 'agent-local-1', conversation_id: 'local-conv-2' }, scope: 'local_project', settings: { trigger: 'step-count', step_count: 25, merge: 'auto' } });
 });
 test('projection carries valid backend message dates as display metadata only', () => {
   const display = projectHistory(rows(

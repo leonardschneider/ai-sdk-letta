@@ -182,7 +182,7 @@ test('team: each person has their own connection; turns act for their author; on
     let pending: { id: string } | undefined;
     for (let i = 0; i < 200 && !pending; i++) { pending = runtime.pendingInteraction('team', runId) as { id: string } | undefined; if (!pending) await new Promise(r => setTimeout(r, 10)); }
     assert.ok(pending);
-    assert.deepEqual(fixture.actors.at(-1), { id: mia.id, name: 'Mia', login: 'mia@example.com' });
+    assert.deepEqual(fixture.actors.at(-1), { id: mia.id, name: 'Mia', login: 'mia@example.com', role: 'member' });
     const byAdmin = await call('owner', 'POST', `/api/agents/alpha/v1/runs/${runId}/answer`, { id: pending!.id, approved: true });
     assert.equal(byAdmin.status, 403);
     assert.equal(JSON.parse(byAdmin.text).error, 'not_your_account');

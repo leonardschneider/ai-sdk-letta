@@ -77,7 +77,7 @@ export async function treeEntries(git: GitRunner, tree: string, paths: readonly 
   return found;
 }
 /** Paths a commit changed against its first parent (no rename detection), and how. */
-async function changedBy(git: GitRunner, commit: string): Promise<Map<string, 'A' | 'M' | 'D'>> {
+export async function changedBy(git: GitRunner, commit: string): Promise<Map<string, 'A' | 'M' | 'D'>> {
   const fields = split0(await text(git, ['diff-tree', '-r', '-z', '--no-renames', '--no-commit-id', await firstParent(git, commit), commit]));
   const result = new Map<string, 'A' | 'M' | 'D'>();
   for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -110,8 +110,9 @@ async function patchTree(git: GitRunner, tree: string, changes: ReadonlyMap<stri
  * order) on top of HEAD. Only git objects are written (in a scratch index
  * `indexFile`, which the caller removes).
  * @param busy paths being changed right now (uncommitted): never reverted, reported as conflicts
+ * @param only revert only these paths (as the commits named them); others are left as they are
  */
-export async function planRevert(git: GitRunner, targets: readonly string[], indexFile: string, busy: ReadonlySet<string> = new Set()): Promise<RevertPlan> {
+export async function planRevert(git: GitRunner, targets: readonly string[], indexFile: string, busy: ReadonlySet<string> = new Set(), only?: ReadonlySet<string>): Promise<RevertPlan> {
   if (targets.length && !await gitSupportsRevert(git)) throw new Error('rewind_unavailable: git 2.40 or later is needed');
   const head = await headOf(git);
   if (!head) return { tree: EMPTY_TREE, files: [], commits: [], changes: [] };
@@ -130,6 +131,8 @@ export async function planRevert(git: GitRunner, targets: readonly string[], ind
   const before = new Map<string, TreeEntry | undefined>();
   for (const commit of ordered.filter(c => targetSet.has(c))) {
     const changed = await changedBy(git, commit);
+    if (only) for (const path of [...changed.keys()]) if (!only.has(path)) changed.delete(path);
+    if (!changed.size) continue;
     // Where each of its paths is now: follow exact moves made by later commits that are not reverted.
     const later = chain.slice(chain.indexOf(commit) + 1).filter(c => !targetSet.has(c));
     const where = new Map([...changed.keys()].map(path => [path, path]));

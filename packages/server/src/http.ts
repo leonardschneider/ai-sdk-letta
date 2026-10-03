@@ -201,6 +201,17 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/threads/:id/rewind', async (req, res) => res.json(await runtime.rewind(owner, req.params.id, req.body, author(req))));
   app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id, true); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
   app.post('/v1/runs/:id/cancel', (req, res) => { mayAct(req, req.params.id); runtime.cancel(owner, req.params.id); res.json({ accepted: true }); });
+  /* ---------------- memory: provenance and reviews ---------------- */
+  /** Memory reviews (newest first) and the reviewer's model setting. */
+  app.get('/v1/memory/reviews', async (req, res) => res.json(await runtime.memoryReviews(owner, Math.min(200, Math.max(1, Number(req.query.limit) || 50)))));
+  /** Who changed each section of a memory file (`?path=human.md`), and how it was reviewed. */
+  app.get('/v1/memory/provenance', async (req, res) => res.json(await runtime.memoryProvenance(owner, req.query.path)));
+  /** Changes the memory guard reverted or held since `?since=` (an ISO time), for a toast. */
+  app.get('/v1/memory/reverts', (req, res) => res.json({ reverts: runtime.memoryReverts(owner, typeof req.query.since === 'string' ? req.query.since : undefined), version: runtime.memoryVersion }));
+  /** Dream now (operators): `{ instruction? }` starts a reflection of the thread's conversation; its merge is reviewed like any dream (team servers: admins only). */
+  app.post('/v1/threads/:id/dream', async (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(await runtime.dreamNow(owner, req.params.id, req.body)); });
+  /** Change the reviewer's model: `{ model: 'auto' | '<provider>/<model>' }` (team servers: admins only). */
+  app.put('/v1/memory/reviewer', (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(runtime.setReviewerModel(owner, req.body)); });
   /* ---------------- decisions ---------------- */
   const board = () => { if (!runtime.decisions) throw new RuntimeFault('not_found', 404); return runtime.decisions; };
   /** Decisions: `?thread=<id>` that conversation's (newest 50, any status), otherwise the pending ones. */
@@ -219,7 +230,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
    */
   app.post('/v1/decisions/:id/decide', (req, res) => {
     const who = access ? access.author(req) : { id: LOCAL_USER_ID, name: 'You' };
-    // Web research keeps the review rule: the person whose turn searched, or an admin (403 otherwise).
+    // Web research and memory reviews keep their rule: the person whose turn it was, or an admin (protected memory: admins only; 403 otherwise).
     if (access && !board().mayDecide(req.params.id, who, access.mayAct(req, {}))) throw new RuntimeFault('not_your_review', 403);
     try { res.json(board().decide(req.params.id, who, req.body)); }
     catch (error) { if (error instanceof DecisionConflict) return res.status(409).json({ error: error.code, decision: error.decision }); throw error; }
@@ -280,6 +291,8 @@ export interface GuiAgentInfo {
   automations?: boolean;
   /** The agent can request decisions (it has `request_decision`): members see and decide them. */
   decisions?: boolean;
+  /** The agent's memory is reviewed (Jiminy): the app shows the Memory view and memory review decisions. */
+  memory?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -324,7 +337,7 @@ export class DecisionFeed {
    * the people `mayReview` allows (the searcher and admins).
    */
   pending(visible: (agentId: string) => boolean, mayReview: (agentId: string, decision: PublicDecision) => boolean = () => true): FeedDecision[] {
-    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => decision.kind !== 'web-research' || mayReview(entry.agent.id, decision)).flatMap(decision => {
+    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => (decision.kind !== 'web-research' && decision.kind !== 'memory-review') || mayReview(entry.agent.id, decision)).flatMap(decision => {
       const thread = entry.runtime.threadSummary(entry.owner, decision.threadId);
       return thread && !thread.archived ? [{ ...decision, agent: { ...entry.agent }, thread: { id: thread.id, title: thread.title } }] : [];
     })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -370,7 +383,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
@@ -473,7 +486,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}) }; };
   // Pending decisions of every agent you belong to (the notification bell).
   const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
@@ -508,7 +521,7 @@ export function teamApp(options: TeamAppOptions) {
     app.use('/api/agents/:agent/automations', member, (req, res, next) => { (req as unknown as Record<symbol, string>)[AGENT] = String(req.params.agent); routes(req, res, next); });
   }
   app.get('/api/decisions', decisionFeedRoute(feed, req => { const user = who(req)?.user; return agentId => !!user && !!directory.role(agentId, user.id); },
-    req => { const user = who(req)?.user; return (agentId, decision) => !!user && (directory.role(agentId, user.id) === 'admin' || decision.reviewer?.id === user.id); }));
+    req => { const user = who(req)?.user; return (agentId, decision) => !!user && (directory.role(agentId, user.id) === 'admin' || (!decision.memory?.adminOnly && decision.reviewer?.id === user.id)); }));
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
   // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
   const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();
@@ -516,7 +529,8 @@ export function teamApp(options: TeamAppOptions) {
   app.patch('/api/agents/:agent/members/:user', member, json, (req, res) => res.json(directory.setRole(String(req.params.agent), actor(req), String(req.params.user), req.body)));
   app.delete('/api/agents/:agent/members/:user', member, (req, res) => { directory.removeMember(String(req.params.agent), actor(req), String(req.params.user)); membersChanged(String(req.params.agent)); res.json({ removed: true }); });
   const routers = new Map([...agents].map(([id, agent]) => [id, runtimeRoutes(express(), agent.runtime, 'team', undefined, {
-    author: req => authorOf(actor(req)),
+    // The author carries their role in this agent: memory provenance records it, and only an admin's turn may change protected memory.
+    author: req => { const role = (req as unknown as { role?: string }).role; return { ...authorOf(actor(req)), ...(role === 'admin' || role === 'member' ? { role } : {}) }; },
     mayAct: (req, run) => isAdmin(req) || run.author?.id === actor(req).id,
   }, integrations)]));
   app.use('/api/agents/:agent', member, (req, res, next) => routers.get(String(req.params.agent))!(req, res, next));

@@ -3,7 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
@@ -71,31 +72,76 @@ export interface RunningServer {
  * The decisions of an agent that has `request_decision`: a desk for its
  * sessions now, bound to the board once the runtime exists.
  */
-function decisionDesk(definition: AgentDefinition) {
+function decisionDesk(definition: AgentDefinition, memoryReviews = false) {
   let board: DecisionBoard | undefined;
   // Agents with request_decision, and agents with web_search (a review nobody answers in time becomes a decision).
-  const desk: DecisionDesk | undefined = decisionsEnabled(definition) || webSearchEnabled(definition) ? {
+  const agentDesk = decisionsEnabled(definition) || webSearchEnabled(definition);
+  // Memory reviews a person must decide are decisions too (the bell): every agent whose memory is reviewed has a board.
+  const keepBoard = agentDesk || (memoryReviews && definition.memory.reviewer !== 'off');
+  const desk: DecisionDesk | undefined = agentDesk ? {
     request: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.request(request, turn); },
     cancel: (turn, id) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.cancel(turn, id); },
     review: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.review!(request, turn); },
   } : undefined;
   return { desk, bind: (runtime: ThreadRuntime, directory: string, owner: string) => {
-    if (!desk) return undefined;
+    if (!keepBoard) return undefined;
     board = new DecisionBoard(join(directory, 'decisions.json'), runtime, owner, { id: definition.id, name: definition.name });
     return board;
   } };
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch']): RuntimeHost {
+/**
+ * Memory review wiring of one agent: reviews reach the runtime (pages
+ * refresh; reverts show a toast), held changes become memory review
+ * decisions, and the reviewer's model can be changed in the app (kept in
+ * `<dir>/memory-review.json`; the definition's setting is the default).
+ */
+function memoryWiring(definition: AgentDefinition, directory: string) {
+  let runtime: ThreadRuntime | undefined;
+  let board: DecisionBoard | undefined;
+  const file = join(directory, 'memory-review.json');
+  let model = definition.memory.reviewer;
+  try { const saved = JSON.parse(readFileSync(file, 'utf8')) as { model?: unknown }; if (typeof saved.model === 'string' && (saved.model === 'auto' || /^[\w.-]+\/[\w.:-]+$/.test(saved.model))) model = saved.model; } catch { /* the definition's */ }
+  let available: Promise<string[]> | undefined;
+  const events: MemoryGuardEvents = {
+    changed: (review, event) => { runtime?.memoryChanged(); if (event === 'reverted') runtime?.memoryReverted(review); },
+    askHuman: async (review: MemoryReview) => {
+      if (!board || !runtime) return undefined;
+      const threadId = (review.conversationId ? runtime.threadOfConversationAny(review.conversationId) : undefined) ?? runtime.latestThread();
+      const author = review.turn ? runtime.authorOfRun(review.turn) : undefined;
+      return board.memoryReview(review, threadId, author ? { id: author.id, name: author.name } : review.provenance.actor.kind === 'person' && review.provenance.actor.id ? { id: review.provenance.actor.id, name: review.provenance.actor.name ?? 'You' } : undefined);
+    },
+  };
+  return {
+    events, model: () => model,
+    bind(value: ThreadRuntime, decisions?: DecisionBoard) {
+      runtime = value; board = decisions;
+      if (board) board.memoryReviews = { decide: async (id, choice, by) => { if (!runtime?.memory) throw new Error('memory_unavailable'); await runtime.memory.decideReview(id, choice, by); } };
+      if (definition.memory.reviewer !== 'off') value.reviewerModel = {
+        value: () => model,
+        set: next => { model = next; writeFileSync(file, JSON.stringify({ model }), { mode: 0o600 }); },
+        available: () => available ??= (async () => {
+          const client = new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 30_000 } });
+          try { return (await client.models.list()).entries.map(e => e.handle).filter((h): h is string => typeof h === 'string' && /^(anthropic|openai|openai-codex|google[^/]*)\//.test(h)).slice(0, 60); }
+          catch { available = undefined; return []; }
+          finally { await client.close(); }
+        })(),
+      };
+    },
+  };
+}
+type MemoryWiring = ReturnType<typeof memoryWiring>;
+
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
-      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind };
+      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
   };
@@ -105,11 +151,11 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  * A host that keeps several conversations of one agent open at once (each its
  * own Letta session), for a shared runtime. The agent itself is opened on first use.
  */
-function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch']): RuntimeHost {
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}) }).catch(error => { agent = undefined; throw error; });
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
@@ -117,7 +163,7 @@ function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>,
       const host = await opened();
       const conversation = await host.open(options);
       const presentation = conversation.agent.presentation!;
-      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, close: () => conversation.close() };
+      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, close: () => conversation.close() };
     },
     close: async () => { const current = agent; agent = undefined; await (await current?.catch(() => undefined))?.close(); },
   };
@@ -169,9 +215,11 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
     const scheduling = automationScheduling(options.automation, [definition]);
-    const decisions = decisionDesk(definition);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    const decisions = decisionDesk(definition, true);
+    const memory = memoryWiring(definition, directory);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     const board = decisions.bind(runtime, directory, owner);
+    memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
     if (options.automation) {
@@ -237,7 +285,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [] });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.
@@ -275,12 +323,15 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     for (const definition of definitions) {
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
-      const decisions = decisionDesk(definition);
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+      const decisions = decisionDesk(definition, true);
+      const memory = memoryWiring(definition, folder);
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
       runtimes.push(runtime);
-      boards.push(decisions.bind(runtime, folder, 'team'));
+      const board = decisions.bind(runtime, folder, 'team');
+      boards.push(board);
+      memory.bind(runtime, board);
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });
       automationAgents.push(automationAgent(definition, runtime, 'team', stateDirectory, true));
     }
