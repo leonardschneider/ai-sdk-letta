@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
+import { ConversationForkHydrationError, LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
 import { jsonSchema, tool, type Tool, type ToolSet, type UIMessage } from 'ai';
 import { LettaAgent } from './agent.js';
 import { creationOptions, dreamingCommand, INTERNAL_MEMORY_TOOLS, type AgentDefinition } from './definition.js';
@@ -47,7 +47,12 @@ export type ConversationChoice = { conversationId: string } | { newTitle: string
 export interface OpenAgentOptions {
   /** State root; see {@link resolveStateDirectory}. */
   stateDirectory?: string;
-  /** Open this conversation (`'default'` or a Letta conversation ID). */
+  /**
+   * Open this conversation (a Letta conversation ID; `'default'` only for an
+   * agent's existing default conversation). Without it (and without
+   * `newTitle`), the last selected one, or a new named conversation when
+   * there is none yet: new conversations never use the agent's default one.
+   */
   conversationId?: string;
   /** Create and open a new conversation with this title. */
   newTitle?: string;
@@ -183,8 +188,9 @@ export interface ConversationRewind {
   /**
    * A new conversation with this one's history up to and including
    * `messageId` (`null`: no history; a new empty conversation with the same
-   * title). Returns its ID as soon as the backend made it (`onCreated` gets
-   * it first, so a caller can record it before anything else can fail).
+   * title). `onCreated` gets its ID as soon as it is known. Only named
+   * conversations are forked: the agent's `default` conversation (used by
+   * earlier versions) is refused with `rewind_legacy_conversation`.
    */
   fork(messageId: string | null, onCreated?: (conversationId: string) => void): Promise<string>;
   /** Archive a conversation of this agent (kept for audit, hidden from lists). `'default'` cannot be archived: `false`. */
@@ -468,26 +474,33 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             return { records: loaded.messages.map(historyRecord), truncated: loaded.truncated };
           },
           fork: async (messageId, onCreated) => {
+            // Conversations made before named-only conversations (the agent's default one) are never forked: rewind refuses them.
+            if (conversationId === 'default') throw new Error('rewind_legacy_conversation');
+            const manager = managementClient(REQUEST_TIMEOUT_MS);
             let forked: string;
-            if (messageId === null) {
-              const creator = managementClient(REQUEST_TIMEOUT_MS);
-              try {
-                const created = await creator.conversations.create({ agentId: identity.agentId, summary: sanitizeText(conversationTitle) });
+            try {
+              if (messageId === null) {
+                const created = await manager.conversations.create({ agentId: identity.agentId, summary: sanitizeText(conversationTitle) });
                 if (created.agent_id !== identity.agentId) throw new Error('Created conversation belongs to a different agent');
                 forked = created.id;
-              } finally { await creator.close(); }
-            } else {
-              // The session's command also forks the default conversation (the SDK's fork() cannot name its agent).
-              const response = await live.sendCommand({ type: 'conversation_fork', conversation_id: conversationId, body: { agent_id: identity.agentId, message_id: messageId } }, { responseType: 'conversation_fork_response', timeoutMs: REQUEST_TIMEOUT_MS });
-              const id = (response.conversation as { id?: unknown } | null | undefined)?.id;
-              if (response.success !== true || typeof id !== 'string' || !validConversationId(id) || id === 'default') throw new Error('rewind_fork_failed');
-              forked = id;
-            }
-            onCreated?.(forked);
-            // Check what was made (the SDK calls a failure here ConversationForkHydrationError): the ID is already known to the caller.
-            const inspector = managementClient(REQUEST_TIMEOUT_MS);
-            try { const made = await inspector.conversations.retrieve(forked); if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent'); }
-            finally { await inspector.close(); }
+                onCreated?.(forked);
+              } else {
+                try {
+                  const made = await manager.conversations.fork(conversationId, { messageId });
+                  forked = made.id;
+                  onCreated?.(forked);
+                  if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent');
+                } catch (error) {
+                  // Made, but its state could not be read back: the ID is known, so the caller records it and can finish the rewind.
+                  if (!(error instanceof ConversationForkHydrationError)) throw error;
+                  forked = error.conversationId;
+                  onCreated?.(forked);
+                  const made = await manager.conversations.retrieve(forked);
+                  if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent');
+                }
+              }
+            } finally { await manager.close(); }
+            if (!validConversationId(forked) || forked === 'default') throw new Error('rewind_fork_failed');
             return forked;
           },
           archive: async id => {
@@ -552,6 +565,9 @@ async function webResearcher(definition: AgentDefinition, option: OpenAgentOptio
   return createWebResearcher({ ...settings, summarize });
 }
 
+/** Title of a conversation created when none was chosen (first launch of a new agent). */
+export const newConversationTitle = (now = new Date()) => `Conversation ${now.toISOString().slice(0, 16).replace('T', ' ')}`;
+
 /** Open an agent, or throw if no conversation was selected. */
 export async function createLettaAgent<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: Omit<OpenAgentOptions, 'choose'> = {}): Promise<LettaRuntime<TOOLS>> {
   const runtime = await openLettaAgent(definition, options);
@@ -578,19 +594,23 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
       const manager = managementClient();
       try { choice = await options.choose(identity, await listConversations(query => manager.conversations.list(query), identity.agentId)); }
       finally { await manager.close(); }
-    } else choice = options.newTitle !== undefined ? { newTitle: options.newTitle } : { conversationId: options.conversationId ?? identity.conversationId };
+    } else {
+      // Nothing selected yet (a new agent): create a named conversation, never the agent's default one.
+      const conversationId = options.conversationId ?? identity.conversationId;
+      choice = options.newTitle !== undefined ? { newTitle: options.newTitle } : conversationId ? { conversationId } : { newTitle: newConversationTitle() };
+    }
     if (choice === null) { await host.close(); return undefined; }
     const conversation = await host.openConversation(choice);
     const { live, conversationId } = conversation;
     // Navigation reads through this same mapped runtime; it never enumerates other agents.
-    let listedIds = new Set<string>(['default']);
+    let listedIds = new Set<string>(identity.namedOnly ? [] : ['default']);
     const navigation: NavigationSource = {
       agentId: identity.agentId, currentId: conversationId,
       list: async signal => {
         assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         const reader = managementClient(15_000);
         try {
-          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal);
+          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly);
           listedIds = new Set(result.entries.map(entry => entry.id));
           return result;
         } finally { await reader.close(); }

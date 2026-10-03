@@ -42,6 +42,7 @@ export const REWIND_REFUSALS = Object.freeze({
   rewind_automation: 'An automation or scheduled task sent a message after this one.',
   rewind_not_editable: 'Only your own messages can be edited.',
   rewind_too_old: 'This message was sent before rewind was available, or its turn is no longer recorded.',
+  rewind_legacy_conversation: 'This older conversation can\u2019t be rewound.',
   rewind_unavailable: 'This agent cannot rewind conversations.',
   runtime_busy: 'Wait until the agent has finished (and nothing waits to be sent).',
   delivery_uncertain: 'A later turn did not finish cleanly; it cannot be rewound.',

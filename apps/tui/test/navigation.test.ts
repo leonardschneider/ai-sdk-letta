@@ -80,6 +80,9 @@ test('navigation listing scopes every page, rejects other agents and caps enumer
   let page = 0;
   const markdown = await listNavigationEntries(async () => page++ ? [] : [{ id: 'local-conv-md', agent_id: 'mapped', summary: 'Plan *trip* to [Rome](https://example.com)' } as LettaConversation, { id: 'local-conv-empty', agent_id: 'mapped', summary: '**' } as LettaConversation], 'mapped');
   assert.deepEqual(markdown.entries.slice(1).map(e => e.title), ['Plan trip to Rome', '**']);
+  // A new agent only has named conversations: `default` is not offered.
+  const named = await listNavigationEntries(async () => [], 'mapped', undefined, false);
+  assert.deepEqual(named.entries, []);
 });
 
 test('snippet includes surrounding context with plain-text terminal control removal', () => {

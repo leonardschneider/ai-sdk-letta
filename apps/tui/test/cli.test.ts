@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { parseTerminalArgs, conversationRows } from '../src/index.js';
+import { newConversationTitle } from 'ai-sdk-letta';
 
 test('CLI supports explicit navigation, rejects contradictory flags, and shows title/activity/id', () => {
   assert.deepEqual(parseTerminalArgs(['--state-dir', '/tmp/state', '--conversation', 'default']), { stateDirectory: '/tmp/state', conversationId: 'default' });
@@ -22,3 +23,11 @@ test('Markdown titles show as plain text in the terminal', () => {
   assert.equal(rows[2]!.title, '****', 'terminal controls are removed before parsing');
 });
 
+test('named conversations: a new agent\'s picker has no default conversation; an agent of an earlier version keeps it', () => {
+  const conversations = [{ id: 'local-conv-2', agent_id: 'agent-local-1', summary: 'Work', last_message_at: 'today' } as LettaConversation, { id: 'default', agent_id: 'agent-local-1' } as LettaConversation];
+  const fresh = conversationRows({ version: 2, definitionId: 'test-assistant', name: 'Test Assistant', backend: '/backend', agentId: 'agent-local-1', namedOnly: true }, conversations);
+  assert.deepEqual(fresh.map(row => row.id), ['local-conv-2']);
+  const legacy = conversationRows({ version: 2, definitionId: 'test-assistant', name: 'Test Assistant', backend: '/backend', agentId: 'agent-local-1', conversationId: 'default' }, conversations);
+  assert.deepEqual(legacy.map(row => row.id), ['default', 'local-conv-2']);
+  assert.match(newConversationTitle(new Date('2026-10-03T09:12:30Z')), /^Conversation 2026-10-03 09:12$/);
+});

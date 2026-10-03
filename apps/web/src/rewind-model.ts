@@ -50,6 +50,7 @@ export function rewindError(code: string): string {
     rewind_not_solo: 'Rewind works in conversations only you wrote in. Others have written here, so earlier messages can’t be edited.',
     rewind_not_editable: 'Only your own messages can be edited.',
     rewind_automation: 'An automation or a scheduled task sent a message after this one, so it can’t be rewound.',
+    rewind_legacy_conversation: 'This older conversation can’t be rewound.',
     rewind_too_old: 'This message was sent before rewind was available, so what its turn changed isn’t recorded. It can’t be rewound.',
     rewind_unavailable: 'This agent can’t rewind conversations.',
     rewind_in_progress: 'A rewind of this conversation is in progress. Wait a moment.',

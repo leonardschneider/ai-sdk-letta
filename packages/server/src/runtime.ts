@@ -543,6 +543,8 @@ export class ThreadRuntime {
     const lane = this.lane(thread.id);
     if (lane.locked || lane.active || this.state.runs.some(r => r.threadId === thread.id && (r.status === 'queued' || r.status === 'running')) || this.rewinding(thread.id)) throw new RuntimeFault('runtime_busy');
     if (thread.archived) throw new RuntimeFault('thread_archived');
+    // Threads of earlier versions that use the agent's default Letta conversation are never forked or rewound.
+    if (thread.conversationId === 'default') throw new RuntimeFault('rewind_legacy_conversation');
     const delivered = this.delivered(thread.id);
     let span: Run[];
     try { span = rewoundSpan(delivered, runId); } catch { throw new RuntimeFault('not_found', 404); }
@@ -737,6 +739,7 @@ export class ThreadRuntime {
   /** Turn IDs of a thread's delivered turns a rewind may start from, for the app (your own ordinary messages; see `soloRefusal`). */
   editable(owner: string, threadId: string, who?: RunAuthor): { runIds: string[]; refusal?: string } {
     const thread = this.thread(owner, threadId);
+    if (thread.conversationId === 'default') return { runIds: [], refusal: 'rewind_legacy_conversation' };
     const delivered = this.delivered(thread.id);
     const runIds: string[] = [];
     let refusal: string | undefined;

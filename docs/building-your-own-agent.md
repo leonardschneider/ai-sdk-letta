@@ -676,8 +676,11 @@ try {
 
 **From code.** `createLettaAgent` opens the agent (creating it on first use)
 and returns the `LettaAgent` plus `close()`. Options: `stateDirectory`,
-`conversationId` (`'default'` or a Letta conversation ID), `newTitle` (create
-a conversation), `traces`. Without either, it reopens the last conversation.
+`conversationId` (a Letta conversation ID), `newTitle` (create a named
+conversation), `traces`. Without either, it reopens the last conversation;
+on the first launch of a new agent it creates a named one (new
+conversations never use the agent's `default` conversation; agents created
+by earlier versions keep theirs).
 
 ```ts
 // src/stream.ts
@@ -720,7 +723,9 @@ continues from the edited message; what the later turns changed in the
 agent's resources and memory is reverted (new git commits, history kept),
 and the confirmation lists what cannot be undone (commands with internet
 access, Jira and Confluence changes, other application tools). It works in
-solo conversations (in a team server, ones only you wrote in). See
+solo conversations (in a team server, ones only you wrote in); older
+conversations that use the agent's `default` Letta conversation cannot be
+rewound. See
 [Rewind](../README.md#rewind-edit-an-earlier-message) for the details.
 
 Your own tools' calls are listed as "can't be undone" unless you say they

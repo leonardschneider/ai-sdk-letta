@@ -116,7 +116,9 @@ test('v1 mapping migrates in place without agent creation; selection persists sa
   const f = fixture(t);
   const first = await f.acquire(); first.release();
   const file = join(f.directory, 'test-assistant.json');
-  writeFileSync(file, JSON.stringify({ ...first.identity, version: 1 }));
+  // A v1 mapping (earlier versions): always the default conversation.
+  const { namedOnly: _named, ...v1 } = first.identity;
+  writeFileSync(file, JSON.stringify({ ...v1, version: 1, conversationId: 'default' }));
   f.api.create = async () => assert.fail('must not recreate');
   const migrated = await f.acquire();
   assert.equal(migrated.identity.version, 2);

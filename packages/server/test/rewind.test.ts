@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { SDKMessage, SendMessage } from '@letta-ai/letta-agent-sdk';
 import { tool, jsonSchema, type UIMessage } from 'ai';
 import { AttachmentStore, LettaAgent, MemoryJournal, ResourceStore, ToolInteractions, createToolBridge, decisionTools, DECISIONS_CONTEXT, DECISION_TOOL_PERMISSIONS, type ConversationRewind, type HistoryRecord } from 'ai-sdk-letta';
-import { AutomationService, AutomationStore, DecisionBoard, ThreadRuntime, forkPoint, guiApp, rewoundSpan, soloRefusal, externalEffects, type AutomationAgent, type Orchestrator, type Run, type RunAuthor, type RuntimeHost } from '../src/index.js';
+import { AutomationService, AutomationStore, createToken, DecisionBoard, ThreadRuntime, forkPoint, guiApp, rewoundSpan, soloRefusal, externalEffects, type AutomationAgent, type Orchestrator, type Run, type RunAuthor, type RuntimeHost } from '../src/index.js';
 
 /* ------------------------------------------------------------------ */
 /* Fixture: a scripted agent over real resources and a real memory repo */
@@ -46,6 +46,7 @@ function fixture(options: { team?: boolean; directory?: string; failFork?: () =>
   let runtime: ThreadRuntime | undefined;
   let conversations = 0;
   let settling = 0;
+  const opened: ({ conversationId: string } | { newTitle: string })[] = [];
   const display = (records: Record_[]): UIMessage[] => records.filter(r => r.type === 'user_message' || r.type === 'assistant_message').map(r => ({ id: r.id, role: r.type === 'user_message' ? 'user' : 'assistant', parts: [{ type: 'text', text: r.text ?? '' }], metadata: { ...(r.otid ? { otid: r.otid } : {}) } }));
   const host: RuntimeHost = {
     ...(options.team ? { parallel: true } : {}),
@@ -53,6 +54,7 @@ function fixture(options: { team?: boolean; directory?: string; failFork?: () =>
     resources: async () => { const store = ResourceStore.open(root, AGENT); await store.init(); return store; },
     async close() {},
     async open(target) {
+      opened.push(structuredClone(target));
       const conversationId = 'conversationId' in target ? target.conversationId : `local-conv-${++conversations}-${randomUUID().slice(0, 8)}`;
       if (!histories.has(conversationId)) histories.set(conversationId, []);
       const store = ResourceStore.open(root, AGENT);
@@ -133,7 +135,7 @@ function fixture(options: { team?: boolean; directory?: string; failFork?: () =>
   const board = new DecisionBoard(join(directory, 'decisions.json'), runtime, owner, { id: 'rewinder', name: 'Rewinder' });
   const rt = runtime;
   const store = () => ResourceStore.open(root, AGENT);
-  return { settled: () => until(() => settling === 0, 'end of turn'), directory, runtime: rt, board, owner, histories, archived, forks, journal, memoryDir, store, holds,
+  return { opened, settled: () => until(() => settling === 0, 'end of turn'), directory, runtime: rt, board, owner, histories, archived, forks, journal, memoryDir, store, holds,
     async turn(threadId: string, text: string, author?: RunAuthor) {
       const id = randomUUID();
       await rt.start(owner, { id, threadId, text, parentRunId: rt.latestRun(owner, threadId)?.id ?? null }, author);
@@ -509,4 +511,55 @@ test('HTTP: preview and rewind routes (CSRF, fixed error codes); capabilities an
     assert.equal(done.status, 200);
     assert.equal((await done.json() as { rewind: { stage: string } }).rewind.stage, 'done');
   } finally { server.close(); rmSync(assets, { recursive: true, force: true }); await f.cleanup(); }
+});
+
+test('legacy conversations (the agent\'s default Letta conversation) cannot be rewound: no editable messages, and preview and rewind refuse with rewind_legacy_conversation', async () => {
+  const f = fixture();
+  const directory = f.directory;
+  try {
+    const threadId = await f.thread('Legacy');
+    await f.turn(threadId, 'hello');
+    const second = await f.turn(threadId, 'write a.md one');
+    await f.runtime.close();
+    // A thread of an earlier version: its conversation is the agent's default one (same history, same runs).
+    const state = JSON.parse(readFileSync(join(directory, 'state.json'), 'utf8'));
+    const thread = state.threads.find((t: { id: string }) => t.id === threadId);
+    const history = f.histories.get(thread.conversationId)!;
+    thread.conversationId = 'default';
+    writeFileSync(join(directory, 'state.json'), JSON.stringify(state));
+    const g = fixture({ directory });
+    try {
+      g.histories.set('default', history);
+      assert.deepEqual(g.runtime.editable(g.owner, threadId), { runIds: [], refusal: 'rewind_legacy_conversation' });
+      await assert.rejects(g.runtime.rewindPreview(g.owner, threadId, second), (error: Error & { code?: string }) => error.message === 'rewind_legacy_conversation');
+      await assert.rejects(g.runtime.rewind(g.owner, threadId, rewindInput(second, 'x')), /rewind_legacy_conversation/);
+      assert.equal(g.forks.length, 0, 'nothing was forked');
+      assert.equal(g.conversation(threadId), 'default', 'the thread keeps its conversation');
+      // It still works as a conversation.
+      await g.turn(threadId, 'still here');
+      assert.equal(g.histories.get('default')!.filter(r => r.type === 'user_message').length, 3);
+    } finally { await g.runtime.close(); }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('new conversations are always named: the GUI\'s threads and automation runs open with a new title, never the default conversation', async () => {
+  const f = fixture();
+  try {
+    const threadId = await f.thread('Fresh');
+    assert.match(f.conversation(threadId), /^local-conv-/);
+    assert.ok(f.opened.every(target => !('conversationId' in target) || target.conversationId !== 'default'));
+    assert.ok(f.opened.some(target => 'newTitle' in target && target.newTitle === 'Fresh'));
+    const agent: AutomationAgent = { id: 'rewinder', name: 'Rewinder', runtime: f.runtime, owner: f.owner, store: new AutomationStore(join(f.directory, 'automation.json')), preApprovable: [], replyModes: false };
+    const service = new AutomationService({ agents: [agent] });
+    const { token } = createToken(agent.store, { name: 'Nightly', via: 'n8n', preApproved: [] }, { actor: { id: 'local', name: 'You' }, createdBy: { id: 'local', name: 'You' }, preApprovable: [] });
+    const run = service.startRun(agent, agent.store.read().tokens.find(t => t.id === token.id)!, { text: 'hello', idempotencyKey: 'k1', newConversation: true, title: 'From n8n' });
+    await until(() => !!service.runById(agent, run.id).threadId && f.runtime.runRecord(f.owner, run.id) !== undefined, 'automation run');
+    const created = service.runById(agent, run.id).threadId!;
+    assert.match(f.conversation(created), /^local-conv-/);
+    assert.ok(f.opened.some(target => 'newTitle' in target && target.newTitle === 'From n8n'));
+    assert.ok(f.opened.every(target => !('conversationId' in target) || target.conversationId !== 'default'));
+    await until(() => ['completed', 'failed'].includes(f.runtime.runRecord(f.owner, run.id)?.status ?? ''), 'automation run done');
+    await f.settled();
+    service.close();
+  } finally { await f.cleanup(); }
 });

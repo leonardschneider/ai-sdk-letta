@@ -17,7 +17,7 @@ export {
   defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
   type AgentDefinition, type WebSearchSettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { openLettaAgent, createLettaAgent, openAgentHost, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
+export { openLettaAgent, createLettaAgent, openAgentHost, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
 export { MemoryJournal, type MemoryRewindPlan } from './memory-journal.js';
 export { planRevert, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';

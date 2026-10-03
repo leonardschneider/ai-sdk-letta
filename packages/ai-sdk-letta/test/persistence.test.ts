@@ -52,14 +52,16 @@ test('sessions load MemFS, inherit dreaming and expose only app tools plus scope
   assert.equal((await options.canUseTool!('Unknown', {})).behavior, 'deny');
 });
 
-test('mapping persists SDK-generated physical ID and default conversation across two launches, with private permissions', async context => {
+test('mapping persists SDK-generated physical ID across two launches, with private permissions; a new agent never selects the default conversation', async context => {
   const f = fixture(context);
   const first = await f.acquire();
   assert.notEqual(first.identity.agentId, first.identity.definitionId);
+  assert.equal(first.identity.conversationId, undefined, 'no conversation until the first named one is created');
+  assert.equal(first.identity.namedOnly, true);
   first.release(); first.release();
   const second = await f.acquire();
   assert.deepEqual(second.identity, first.identity);
-  assert.equal(second.identity.conversationId, 'default');
+  assert.equal(second.identity.conversationId, undefined);
   assert.equal(f.creates(), 1);
   assert.equal(statSync(f.directory).mode & 0o777, 0o700);
   assert.equal(statSync(join(f.directory, 'test-assistant.json')).mode & 0o777, 0o600);
@@ -166,4 +168,19 @@ test('restart starts empty provider guard history and sends only the new user tu
   assert.equal(result.toolResults.length, 0);
   assert.equal(first.id, second.id);
   assert.equal(first.lettaAgentId, second.lettaAgentId);
+});
+
+test('a mapping written by an earlier version (default conversation) keeps working unchanged', async context => {
+  const f = fixture(context);
+  const first = await f.acquire(); first.release();
+  const file = join(f.directory, 'test-assistant.json');
+  const { namedOnly: _named, ...legacy } = JSON.parse(readFileSync(file, 'utf8'));
+  writeFileSync(file, JSON.stringify({ ...legacy, conversationId: 'default' }));
+  const reopened = await f.acquire();
+  assert.equal(reopened.identity.conversationId, 'default');
+  assert.equal(reopened.identity.namedOnly, undefined, 'the default conversation stays listed for this agent');
+  reopened.release();
+  // A mapping with neither a conversation nor the named-only mark is not one this library wrote.
+  writeFileSync(file, JSON.stringify(legacy));
+  await assert.rejects(f.acquire(), /Invalid identity mapping/);
 });

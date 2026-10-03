@@ -39,6 +39,7 @@ test('rewind confirmation: empty sections are left out', () => {
 test('rewind errors: fixed codes get plain wording; anything else says nothing changed', () => {
   assert.match(rewindError('rewind_not_solo'), /only you wrote in/);
   assert.match(rewindError('runtime_busy'), /Wait until the agent has finished/);
+  assert.equal(rewindError('rewind_legacy_conversation'), 'This older conversation can’t be rewound.');
   assert.equal(rewindError('something_else'), 'Couldn’t rewind. Nothing was changed.');
 });
 

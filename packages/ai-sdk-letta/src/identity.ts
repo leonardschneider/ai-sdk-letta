@@ -1,8 +1,17 @@
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Persisted mapping from a logical definition ID to the Letta-generated agent ID. */
-export type Identity = { version: 2; definitionId: string; name: string; backend: string; agentId: string; conversationId: string };
+/**
+ * Persisted mapping from a logical definition ID to the Letta-generated agent ID.
+ *
+ * `conversationId` is the last selected conversation: absent until the first
+ * one is created. New conversations are always named Letta conversations,
+ * never the agent's `default` one. Mappings written by earlier versions
+ * record `'default'` and keep working (that conversation stays usable).
+ * `namedOnly`: the mapping was created by a version that never uses the
+ * `default` conversation, so pickers do not offer it (it is empty).
+ */
+export type Identity = { version: 2; definitionId: string; name: string; backend: string; agentId: string; conversationId?: string; namedOnly?: true };
 
 /** Letta conversation IDs accepted by this library (`default` is the agent's default conversation). */
 export const validConversationId = (id: string): boolean => id === 'default' || /^(?:conv-|local-conv-)[a-zA-Z0-9-]+$/.test(id);
@@ -73,14 +82,15 @@ export async function acquireIdentity(directory: string, definition: { id: strin
     };
     if (exists(file)) {
       const stored = read(file);
-      if (![1, 2].includes(stored.version) || stored.definitionId !== definition.id || stored.name !== definition.name || stored.backend !== backend || typeof stored.conversationId !== 'string' || !validConversationId(stored.conversationId) || (stored.version === 1 && stored.conversationId !== 'default') || !validLocalAgentId(stored.agentId)) throw new Error('Invalid identity mapping or backend mismatch; refusing to recreate agent');
+      if (![1, 2].includes(stored.version) || stored.definitionId !== definition.id || stored.name !== definition.name || stored.backend !== backend || (stored.conversationId !== undefined && (typeof stored.conversationId !== 'string' || !validConversationId(stored.conversationId))) || (stored.conversationId === undefined && stored.namedOnly !== true) || (stored.namedOnly !== undefined && stored.namedOnly !== true) || (stored.version === 1 && stored.conversationId !== 'default') || !validLocalAgentId(stored.agentId)) throw new Error('Invalid identity mapping or backend mismatch; refusing to recreate agent');
       migrate = stored.version === 1;
       identity = { ...stored, version: 2 };
     } else {
       durableWrite(pending, { definitionId: definition.id, name: definition.name, backend, createdAt: new Date().toISOString(), state: 'creation-uncertain' });
       const agentId = await api.create();
       if (!validLocalAgentId(agentId)) throw new Error('SDK returned a non-local agent ID');
-      identity = { version: 2, definitionId: definition.id, name: definition.name, backend, agentId, conversationId: 'default' };
+      // No conversation yet: the first one is created (named) when the agent is first opened.
+      identity = { version: 2, definitionId: definition.id, name: definition.name, backend, agentId, namedOnly: true };
       // Keep the intent until an fsynced mapping is in place. Crashes fail closed.
       durableWrite(`${file}.new`, identity);
       renameSync(`${file}.new`, file);
