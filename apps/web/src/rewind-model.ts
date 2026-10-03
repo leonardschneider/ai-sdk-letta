@@ -5,9 +5,11 @@ export type { RewindSummary };
 type FilePlan = NonNullable<RewindSummary['resources']>['files'][number];
 
 /** One line of a section. `tone`: how it reads (`danger` for what is lost, `warn` for what stays despite the rewind). */
-export type RewindLine = { key: string; text: string; detail?: string; tone?: 'danger' | 'warn' };
+export type RewindLine = { key: string; text: string; detail?: string; tone?: 'danger' | 'warn';
+  /** Memory commits: who made the change and how it was reviewed (provenance chips). */
+  chips?: string[] };
 /** A section of the confirmation, in order. Empty sections are left out. */
-export type RewindSection = { id: 'turns' | 'files' | 'memory' | 'conflicts' | 'kept' | 'external' | 'cancel'; title: string; lines: RewindLine[]; note?: string };
+export type RewindSection = { id: 'turns' | 'files' | 'memory' | 'memory-commits' | 'conflicts' | 'kept' | 'external' | 'cancel'; title: string; lines: RewindLine[]; note?: string };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** What happens to a file the rewound turns changed. */
@@ -27,12 +29,16 @@ export function rewindSections(summary: RewindSummary): RewindSection[] {
   if (resources.length) sections.push({ id: 'files', title: `Resources reverted (${plural(resources.length, 'file')})`, lines: resources.map(f => ({ key: `r:${f.path}`, text: f.path, detail: fileAction(f) })) });
   const memory = summary.memory?.files.filter(f => f.status === 'revert') ?? [];
   if (memory.length) sections.push({ id: 'memory', title: `Memory reverted (${plural(memory.length, 'file')})`, lines: memory.map(f => ({ key: `m:${f.path}`, text: f.path, detail: fileAction(f) })) });
+  // The rewound turns' memory commits, each with who made it and how it was reviewed.
+  const commits = summary.memory?.commits ?? [];
+  if (commits.length) sections.push({ id: 'memory-commits', title: `Memory changes these turns made (${plural(commits.length, 'commit')})`,
+    lines: commits.map(c => ({ key: `mc:${c.commit}`, text: c.subject, chips: [...(c.provenance ? [c.provenance] : []), ...(c.review ? [c.review] : [])] })) });
   const conflicts = [...(summary.resources?.files ?? []).filter(f => f.status === 'conflict').map(f => ({ key: `rc:${f.path}`, text: f.path, detail: conflictText(f), tone: 'warn' as const })),
     ...(summary.memory?.files ?? []).filter(f => f.status === 'conflict').map(f => ({ key: `mc:${f.path}`, text: `Memory: ${f.path}`, detail: conflictText(f), tone: 'warn' as const }))];
   if (conflicts.length) sections.push({ id: 'conflicts', title: `Can’t be reverted cleanly (${conflicts.length})`, lines: conflicts, note: 'Another change touched the same lines after these turns. These files are left as they are now; review them after the rewind.' });
   const kept: RewindLine[] = [
     ...(summary.resources?.kept ?? []).map(c => ({ key: `k:${c.commit}`, text: c.subject, detail: c.kind === 'shared' ? 'Made while another conversation ran too; kept' : 'Not made by these turns; kept' })),
-    ...(summary.memory?.kept ?? []).map(c => ({ key: `km:${c.commit}`, text: `Memory: ${c.subject}`, detail: c.kind === 'shared' ? 'Made while another conversation ran too; kept' : 'Background memory work (dreaming); kept' })),
+    ...(summary.memory?.kept ?? []).map(c => ({ key: `km:${c.commit}`, text: `Memory: ${c.subject}`, detail: c.kind === 'shared' ? 'Made while another conversation ran too; kept' : 'Background memory work (dreaming); kept', ...(c.provenance || c.review ? { chips: [...(c.provenance ? [c.provenance] : []), ...(c.review ? [c.review] : [])] } : {}) })),
   ];
   if (kept.length) sections.push({ id: 'kept', title: `Kept (${kept.length})`, lines: kept, note: 'Changes since then that these turns did not make alone (your own in the Resources panel, other conversations’, dreaming) stay.' });
   if (summary.external.length) sections.push({ id: 'external', title: `Can’t be undone (${summary.external.length})`, lines: summary.external.map((e, i) => ({ key: `x:${i}`, text: e.label, ...(e.detail ? { detail: e.detail } : {}), tone: 'danger' as const })), note: 'These happened outside the app; a rewind cannot take them back.' });

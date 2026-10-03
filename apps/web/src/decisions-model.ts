@@ -12,7 +12,9 @@ export type DecisionView = {
   cancelledAt?: string; cancelReason?: 'withdrawn' | 'superseded' | 'archived'; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
   /** A web search result waiting for review (only `reviewer`, or an admin, may decide it); `stale`: "Search again" is offered. */
-  kind?: 'web-research'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  kind?: 'web-research' | 'memory-review'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  /** A memory change held for a person (`memory-review`): removed until approved. `adminOnly`: it touches protected files. */
+  memory?: { reviewId: string; files: { path: string; protected: boolean; change: string }[]; diff: string; provenance: string; protected: boolean; adminOnly: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
 };
 /** A pending decision in the notification bell: with its agent and conversation. */
 export type FeedDecision = DecisionView & { agent: { id: string; name: string }; thread: { id: string; title: string } };
@@ -112,7 +114,16 @@ export function requestedId(result: unknown): string | undefined {
   return data && data.requested === true && typeof data.id === 'string' ? data.id : undefined;
 }
 
-/** Whether someone may review a web research decision: the person whose turn searched, or an admin (single-user app: always). */
-export function mayReview(decision: Pick<DecisionView, 'kind' | 'reviewer'>, me: string | undefined, admin: boolean): boolean {
-  return decision.kind !== 'web-research' || me === undefined || admin || decision.reviewer?.id === me;
+/** Whether someone may review a web research or memory decision: the person whose turn it was, or an admin (protected memory: admins only; single-user app: always). */
+export function mayReview(decision: Pick<DecisionView, 'kind' | 'reviewer' | 'memory'>, me: string | undefined, admin: boolean): boolean {
+  if (me === undefined || admin) return true;
+  if (decision.kind === 'memory-review') return !decision.memory?.adminOnly && decision.reviewer?.id === me;
+  return decision.kind !== 'web-research' || decision.reviewer?.id === me;
+}
+/** The outcome line of a memory review decision: "Approved by Mia: re-applied", "Rejected by you: kept removed". */
+export function memoryDecisionSummary(decision: Pick<DecisionView, 'status' | 'decidedBy' | 'choice' | 'memory'>, me?: string): string | undefined {
+  if (decision.status !== 'decided') return undefined;
+  const who = personName(decision.decidedBy, me);
+  const failed = decision.memory?.outcome === 'failed';
+  return decision.choice?.id === 'approve' ? `Approved by ${who}${failed ? ': re-applying failed' : decision.memory?.outcome === 'reapplied' ? ': re-applied' : ''}` : `Rejected by ${who}: kept removed`;
 }

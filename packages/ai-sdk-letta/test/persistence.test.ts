@@ -28,7 +28,7 @@ test('definition controls logical identity, registry and supported creation opti
   assert.equal(options.dreaming, undefined); // SDK convenience option mutates global defaults.
   assert.deepEqual(dreamingCommand(definition, 'agent-local-test'), {
     type: 'set_reflection_settings', runtime: { agent_id: 'agent-local-test', conversation_id: 'default' },
-    scope: 'local_project', settings: { trigger: 'step-count', step_count: 25 },
+    scope: 'local_project', settings: { trigger: 'step-count', step_count: 25, merge: 'auto' },
   });
   assert.deepEqual(options.baseTools, []);
   assert.deepEqual(options.skillSources, []);

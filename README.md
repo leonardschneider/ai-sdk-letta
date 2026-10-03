@@ -569,8 +569,11 @@ How a search works (`web_search({ query, purpose? })`):
    `none`, an empty allow-list, every permission request denied; the session
    must report no tools before anything is sent) and **no memory** (created
    without MemFS, opened `stateless`). It is deleted right after the search,
-   with its conversation and the empty memory folder the local backend
-   creates; one left by a crash is deleted at the next start. It never
+   with its conversation, the empty memory folder the local backend
+   creates, and the transcripts the Letta harness writes for every agent
+   (`~/.letta/transcripts/<agent ID>`, which would otherwise keep the page
+   text); one left by a crash is deleted at the next start (by its record,
+   or by its name and tag). It never
    touches the main agent's memory, conversations, resources, sandbox or
    integrations.
 3. **Our code validates and caps** the answer: the schema must match;
@@ -738,6 +741,97 @@ default Letta conversation (`rewind_legacy_conversation`; see
 `text` as run `newRunId`. From code: `ThreadRuntime.rewindPreview()` and
 `rewind()`; underneath, `ResourceStore.planRewind()`/`applyRewind()` and
 `MemoryJournal` (in `ai-sdk-letta`).
+
+### Memory provenance and review (Jiminy)
+
+An agent that remembers can also be taught the wrong things: a web page, a
+PDF, a Jira ticket or an automation can carry instructions written by someone
+else, and a memory entry outlives the turn that wrote it. ai-sdk-letta records
+where every memory change came from, protects the files that hold the agent's
+directives, and has every change reviewed by **Jiminy**, a separate reviewer
+(the agent's conscience).
+
+**Provenance, kept outside the memory.** Each turn's provenance (who acted:
+the person and their role in the agent, or the automation token or scheduled
+task; whether it ran unattended; and the untrusted content it read: web
+research, attachments, Jira or Confluence, other tool output) is written to
+the memory ledger (`<state>/memory/<agent ID>.json`) and as trailers of the
+turn's commits (`X-Actor`, `X-Actor-Role`, `X-Unattended`, `X-Sources`,
+`X-Writer`), or as a git note (`refs/notes/provenance`) on commits the agent
+made itself. Never in memory files: the agent could rewrite those. What a
+conversation has read stays with it, so later turns there count as untrusted
+too. Per line, `git blame --first-parent` names the commit (a dream's lines
+belong to its merge) and its provenance names the turn. The agent can ask
+with the **`memory_provenance`** tool (`{ path }`: each section, who wrote it,
+from what, how it was reviewed), and each turn starts with a short note of who
+it acts for and what it may not change.
+
+**Protected files.** By default `persona.md`, `rules.md`, `goals.md`,
+`MEMORY.md`, and the older layout's `system/**` (set `memory.protected` in the
+definition). Only an **admin turn with no untrusted content** may write them:
+an attended turn of a person whose role is admin (on a team server, the
+author's role in the agent; in the single-user app, you) that read nothing
+untrusted. Any other write is refused before it happens, also under another
+letter case (`PERSONA.md`). A **new file at the memory root** (root files join
+the agent's instructions) is refused from a turn that read untrusted content
+or ran unattended. A change to a protected file that no turn made (a dream,
+anything else) is reverted at once, without asking anyone. A dream that only
+adds link lines to `MEMORY.md` (index upkeep) is reviewed with the file it
+indexes instead.
+
+**Jiminy reviews every memory-changing turn and every dream**, in the
+background: a fresh, hidden Letta agent per review, with no tools, no memory
+and a JSON-schema answer (`trust` 0–1, `verdict`, `reason`), deleted right
+after with everything the backend and the harness kept for it (its memory
+folder and its transcripts). It gets the diff, the provenance and the
+protected files' text as inert data. The harness decides a floor first
+(protected files changed outside an admin turn with no untrusted content:
+reject); Jiminy can only make it stricter:
+
+| Verdict | What happens |
+| --- | --- |
+| `accept` | Kept. |
+| `flag` | Kept, and shown as flagged in the Memory view. |
+| `reject` | Reverted at once (a new commit by the harness), with a toast in the app. |
+| `ask_human` | **Removed** at once, and a **memory review** decision opens in the bell, with the diff. *Approve* re-applies it (a new commit whose provenance names who approved); *Reject* keeps it removed. Protected files: admins only; otherwise the person whose turn made it, or an admin. |
+
+A review that fails (timeout, error) counts as `flag`, or `reject` when a
+protected file changed. The next turn waits for pending reviews of protected
+files. A review a stop interrupted runs again at the next start.
+
+**The reviewer's model** is `memory.reviewer`: `'auto'` (default) picks a
+model of **another family** than the agent's when one is connected (for
+example Claude through the Anthropic provider for a GPT agent), otherwise the
+agent's own; or a handle; or `'off'` (no review, protected files stay
+protected). People can change it in the app (Memory → Reviewer model; admins
+on a team server).
+
+**Dreams.** Dreaming (Letta's reflection) merges its work on its own (merge
+mode `auto`; never `explicit`). The guard notices the merge, reverts protected
+files deterministically and has Jiminy review the rest, so a bad dream is in
+memory for a few seconds (the **exposure window**, shown per dream; about
+10–15 s in our tests). A Letta harness that can ask its client before merging
+a dream (it lists the merge mode `client`, a proposal we prototyped in a fork
+of Letta Code) is detected at start, and then dreams are reviewed **before**
+they merge: rejected ones never reach memory, and the transcript is reflected
+on again later. Turn it off with `memory: { approveDreams: false }`.
+
+**In the app.** The sidebar's **Memory** view lists reviewed changes (who and
+what they came from, the verdict, Jiminy's trust and reason, the diff, and for
+dreams the exposure window), writes refused before they happened, and who
+wrote each part of a file. The rewind confirmation shows the same chips for
+the memory changes it would undo. A reverted or held change shows a toast.
+
+```ts
+defineAgent({
+  // ...
+  memory: {
+    protected: ['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'policies/**'],
+    reviewer: 'auto',          // or 'anthropic/claude-sonnet-5', or 'off'
+    trustedTools: ['text_stats'], // application tools whose results are your own
+  },
+});
+```
 
 ### Shell commands (sandbox)
 
@@ -1256,6 +1350,11 @@ single-user agent before it is given up (`start_timeout`).
 - **Memory is confined.** The harness gets only `Read`, `Write` and `Edit` on
   Markdown files inside the agent's own MemFS directory (no dot-files,
   traversal, symlinks or hard links) and one exact `git commit` command.
+- **Memory changes are attributed and reviewed.** Provenance lives in the
+  ledger and git metadata, never in memory files. Protected files change only
+  in an admin's own turn with no untrusted content; everything else is
+  reviewed by a separate reviewer that can only tighten the harness's
+  decision (see [Memory provenance and review](#memory-provenance-and-review-jiminy)).
 - **The GUI is loopback-only.** It binds to 127.0.0.1 and checks the Host
   header, the Origin, and fetch metadata. A random HttpOnly, SameSite=Strict
   cookie authenticates the browser, and every mutation also needs an
@@ -1353,7 +1452,10 @@ State lives in one directory, resolved in this order:
                            files of 0.3 kept aside after they were moved into resources/
   credentials/atlassian/   each person's Atlassian site, email and API token (0600; one file per person)
   memory/<letta agent ID>.json
-                           which turn changed which memory commit (for rewinds)
+                           which turn changed which memory commit, and its provenance (for rewinds and reviews)
+  memory/<letta agent ID>.reviews.json
+                           memory reviews (verdicts, reverts, held changes)
+  memory-review/pending/   crash records of temporary reviewer agents (deleted at the next start)
   server/<id>/automation.json
                            automation tokens (hashes only), idempotency keys of recent runs, scheduled tasks (0600)
 ```
@@ -1422,6 +1524,16 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   decision, and the answer arrives as a new turn. In unattended runs, `'ask'` tools that
   are not pre-approved are now refused before their preparation runs (for
   `web_search`: before anything is searched).
+- **Memory review.** Jiminy is a model: it can misjudge, and the harness's
+  floor only covers protected files; its verdict never loosens that floor.
+  Each review starts a temporary agent (5–10 s, about 20 s for the first one
+  after a start). Without a harness that asks before merging dreams, a dream
+  is in memory until its review settles (about 10–15 s). A dream that changes
+  `MEMORY.md` beyond index links is reverted as a whole for that file.
+  Provenance covers changes ai-sdk-letta saw: changes made while it was not
+  running are reviewed when it starts, as changes outside turns. The per-turn
+  untrusted flag is per conversation: content a person pastes into a message
+  is their own words, not a source.
 - **Local backend only.** `openLettaAgent` uses the Agent SDK `local` backend.
   Letta Cloud and remote App Servers are not supported by `LettaAgent` yet
   (the provider package does support them).

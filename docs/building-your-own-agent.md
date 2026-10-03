@@ -568,6 +568,76 @@ What the agent writes to memory is up to the model and your instructions.
 If you want it to remember specific things (preferences, project facts), say
 so in `instructions`.
 
+### Memory provenance and review (Jiminy)
+
+Every memory change is recorded with where it came from (who asked and their
+role, whether the turn was unattended, and the untrusted content it read),
+in the memory ledger and git metadata, never in the memory files themselves.
+Three things follow from it:
+
+- **Protected files** (`persona.md`, `rules.md`, `goals.md`, `MEMORY.md` and
+  `system/**` by default) change only in an **admin's own turn that read no
+  untrusted content**. Other writes are refused before they happen; so is a
+  new root file from an untrusted or unattended turn. Changes no turn made
+  (dreams) are reverted from protected files at once.
+- **Jiminy**, a separate reviewer, reviews every memory-changing turn and
+  every dream in the background: `accept` and `flag` keep the change,
+  `reject` reverts it, `ask_human` removes it until a person approves it
+  (a *memory review* in the app's bell). It can only make the harness's own
+  decision stricter.
+- The agent can call `memory_provenance` with a path to see who wrote what.
+
+The defaults need no code. To change them:
+
+```ts
+// src/memory-settings.ts
+import { defineAgent } from 'ai-sdk-letta';
+
+export const guarded = defineAgent({
+  id: 'kitchen-helper-guarded',
+  name: 'Kitchen helper (guarded)',
+  model: 'openai-codex/gpt-5.5',
+  instructions: 'You help in the kitchen.',
+  tools: {},
+  memory: {
+    // Also protect the house rules folder.
+    protected: ['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'house-rules/**'],
+    // 'auto' (default): another model family than the agent's when one is connected.
+    reviewer: 'auto',
+  },
+});
+```
+
+On a team server, a turn's role is its author's role in the agent; in the
+single-user app, you are the admin. Turns started by automations are
+unattended, so they never change protected files, whoever the token acts for.
+You can check the rules offline with `MemoryGuard` (a scratch git repository
+stands in for the agent's memory):
+
+```ts
+// src/memory.test.ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { MemoryGuard, MemoryJournal, turnProvenance } from 'ai-sdk-letta';
+
+test('only an admin turn with no untrusted content may change persona.md', () => {
+  const root = mkdtempSync(join(tmpdir(), 'memory-'));
+  execFileSync('git', ['init', '-q', root]);
+  writeFileSync(join(root, 'persona.md'), 'I help in the kitchen.\n');
+  const guard = new MemoryGuard({ journal: MemoryJournal.open(join(root, '.ledger'), 'agent-local-guide', root) });
+  const persona = join(root, 'persona.md');
+  const admin = { id: 'alice', name: 'Alice', role: 'admin' as const };
+  assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: admin })), undefined);
+  assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: admin, sources: [{ kind: 'web', label: 'web research' }] }))?.code, 'protected_memory');
+  assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: { id: 'bob', role: 'member' } }))?.code, 'protected_memory');
+  assert.equal(guard.allows('Write', join(root, 'new-rules.md'), turnProvenance({ actor: admin, unattended: { source: 'n8n' } }))?.code, 'new_root_file');
+});
+```
+
 ## 9. Run it
 
 **Terminal (from a clone).** `runTerminal` handles the conversation picker,

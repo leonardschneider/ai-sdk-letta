@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
-import { Bell, Check, ChevronRight, CircleStop, CornerDownRight, Globe, LoaderCircle, Signpost } from 'lucide-react';
+import { Bell, Brain, Check, ChevronRight, CircleStop, CornerDownRight, Globe, LoaderCircle, Lock, Signpost } from 'lucide-react';
 import { useAuiState } from '@assistant-ui/react';
 import { useToast } from './toasts.js';
-import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
+import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, mayReview, memoryDecisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
+import { DiffView } from './memory.js';
 
 /* ------------------------------------------------------------------ */
 /* State shared with the conversation                                  */
@@ -72,7 +73,7 @@ export function DecisionBell({ decisions, showAgent, me, onOpen }: { decisions: 
         {!!count && <ul className="bell-list">
           {decisions.map(decision => <li key={decision.id}>
             <button type="button" className="bell-item" onClick={() => { setOpen(false); onOpen(decision); }}>
-              <span className="bell-item-icon" aria-hidden="true">{decision.kind === 'web-research' ? <Globe size={14}/> : <Signpost size={14}/>}</span>
+              <span className="bell-item-icon" aria-hidden="true">{decision.kind === 'web-research' ? <Globe size={14}/> : decision.kind === 'memory-review' ? <Brain size={14}/> : <Signpost size={14}/>}</span>
               <span className="bell-item-body">
                 <span className="bell-item-question">{decision.question}</span>
                 <span className="bell-item-where">{showAgent ? `${decision.agent.name} · ` : ''}{decision.thread.title}</span>
@@ -250,3 +251,48 @@ export function PendingDecisionBar({ decision }: { decision?: DecisionView }) {
 
 /** The error a decide call failed with, as toast text. */
 export function decideMessage(code: string, decision?: DecisionView, me?: string) { return decideError(code, decision, me); }
+
+/**
+ * The card of a memory review: a memory change Jiminy held for a person. It
+ * is removed from memory now; Approve re-applies it (recording who approved),
+ * Reject keeps it removed. Protected files: admins only.
+ */
+export function MemoryReviewCard({ decision }: { decision: DecisionView }) {
+  const { decide, me, admin } = useContext(DecisionsContext);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const sent = useRef(false);
+  useTick();
+  const memory = decision.memory;
+  const allowed = mayReview(decision, me, !!admin);
+  const settled = memoryDecisionSummary(decision, me);
+  const submit = async (choice: 'approve' | 'reject') => {
+    if (sent.current) return;
+    sent.current = true; setBusy(true);
+    try { await decide(decision.id, { choice }); }
+    catch (error) { sent.current = false; toast((error as Error).message, { tone: 'error' }); }
+    finally { setBusy(false); }
+  };
+  return <section className="card decision-card memory-review-card" id={`decision-${decision.id}`} aria-label={`Memory review: ${decision.question}`} aria-busy={busy || undefined}>
+    <header className="card-head"><Brain size={16} aria-hidden="true"/><span>Memory review</span><span className="decision-asked">{ago(decision.createdAt)}</span></header>
+    <h2 className="card-title">{decision.question}</h2>
+    {memory && <span className="prov-chips">
+      <span className="prov-chip" data-tone="neutral">{memory.kind === 'dream' ? 'Dream' : memory.provenance}</span>
+      {decision.status === 'decided'
+        ? decision.choice?.id === 'approve' ? <span className="prov-chip" data-tone="ok">{memory.outcome === 'reapplied' ? 'Approved and re-applied' : 'Approved'}</span> : <span className="prov-chip" data-tone="reverted">Rejected: kept removed</span>
+        : <span className="prov-chip" data-tone="held">Removed until approved</span>}
+      {typeof memory.trust === 'number' && <span className="prov-chip" data-tone="neutral" title={memory.model ? `Reviewed by ${memory.model}` : undefined}>trust {memory.trust.toFixed(2)}</span>}
+      {memory.adminOnly && <span className="prov-chip" data-tone="flag"><Lock size={10} aria-hidden="true"/> admins only</span>}
+    </span>}
+    {decision.context && <p className="card-details">Jiminy{memory?.model ? ` (${memory.model})` : ''}: {decision.context}</p>}
+    {memory?.diff && <DiffView diff={memory.diff}/>}
+    {settled
+      ? <p className="decision-who">{settled}{decision.decidedAt ? ` · ${ago(decision.decidedAt)}` : ''}</p>
+      : allowed
+        ? <div className="card-actions">
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => void submit('reject')}>Reject: keep it removed</button>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => void submit('approve')}>{busy ? 'Sending…' : 'Approve: re-apply it'}</button>
+          </div>
+        : <p className="card-details">{memory?.adminOnly ? 'It changes a protected file: only an admin of this agent can decide.' : `Waiting for ${decision.reviewer?.name ?? 'the person whose message made it'}, or an admin.`}</p>}
+  </section>;
+}

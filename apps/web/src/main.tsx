@@ -10,7 +10,8 @@ import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
-import { DecisionBell, DecisionsContext, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
+import { DecisionBell, DecisionsContext, MemoryReviewCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
+import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
 import { decideError, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
 import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
@@ -103,7 +104,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   // Automations (n8n, Conductor, scripts) start turns too: the app follows changes it did not make, also when one person uses it.
   // Decisions: their outcomes start turns too (someone decides, the work resumes).
   const decisionsEnabled = team ? team.agents.some(a => a.decisions) : !!agent.decisions;
-  const follow = !!team || !!agent.automations || !!agent.decisions;
+  // Memory review (Jiminy): the Memory view, toasts when a change is reverted, and held changes as decisions.
+  const memoryEnabled = !!agent.memory;
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const follow = !!team || !!agent.automations || !!agent.decisions || memoryEnabled;
   const mayManageAutomations = !!agent.automations && (!team || agent.role === 'admin');
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(!unreachable);
@@ -128,6 +132,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
   const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
   const [turns, setTurns] = useState(0);
+  // Bumped whenever the server reports a change (long poll): memory reviews and toasts follow it.
+  const [serverChanges, setServerChanges] = useState(0);
+  const memoryPending = useMemoryToasts(memoryEnabled && !connecting && !unreachable, serverChanges + turns);
   const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
@@ -322,6 +329,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           if (version === since) continue;
           const first = since === -1;
           since = version;
+          setServerChanges(n => n + 1);
           const list = await api<ThreadSummary[]>('/v1/threads');
           if (control.signal.aborted) return;
           const keyOf = (t: ThreadSummary) => `${t.running ?? ''}|${t.queued ?? 0}|${t.lastActivityAt ?? ''}|${t.title}|${t.pendingDecision ?? ''}`;
@@ -680,7 +688,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [threadDecisions, team, isAdmin]);
-  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending') : undefined;
+  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending' && d.kind !== 'memory-review') : undefined;
+  // Memory reviews of this conversation (held changes, and the ones decided while you watched): cards after the messages.
+  const memoryReviews = !current.draft ? [...threadDecisions.values()].filter(d => d.kind === 'memory-review' && (d.status === 'pending' || (d.decidedAt && Date.now() - Date.parse(d.decidedAt) < 10 * 60_000))) : [];
   /** Open a decision from the bell: its conversation (switching agents on a team server). */
   const openDecision = useCallback((decision: FeedDecision) => {
     setDrawer(false);
@@ -715,7 +725,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : {})}
-            footer={<>{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
+            footer={<>{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
         <main className="main">
@@ -742,6 +752,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                       {!readOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
+                {memoryReviews.map(decision => <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">
                 <div className="column footer-column">
@@ -801,6 +812,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
+        {memoryOpen && <MemoryDialog agentName={agent.name} admin={!team || isAdmin} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}

@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { DECISION_LIMITS, LOCAL_USER_ID, decisionMessage, pendingDecisionNote, webResearchMessage, researchAge, type DecisionDesk, type DecisionOption, type DecisionRequest, type TurnActor, type WebResearch, type WebResearchOutcome } from 'ai-sdk-letta';
+import { DECISION_LIMITS, LOCAL_USER_ID, decisionMessage, pendingDecisionNote, provenanceLabel, webResearchMessage, researchAge, type DecisionDesk, type DecisionOption, type DecisionRequest, type MemoryReview, type TurnActor, type WebResearch, type WebResearchOutcome } from 'ai-sdk-letta';
 import { RuntimeFault, type RunAuthor, type RunAutomation, type RunDecision, type ThreadRuntime } from './runtime.js';
 
 /**
@@ -46,10 +46,19 @@ export type DecisionRecord = {
    * result is older than `staleAfterMs`, `search_again`. Only the person whose
    * turn searched (`requestedBy.person`), or an admin, may decide it.
    */
-  kind?: 'web-research';
+  kind?: 'web-research' | 'memory-review';
   research?: WebResearch;
   staleAfterMs?: number;
+  /**
+   * `memory-review`: a memory change Jiminy held for a person (`ask_human`).
+   * It is removed from memory until decided: `approve` re-applies it,
+   * `reject` keeps it removed. No agent turn follows. Protected files: admins
+   * only; otherwise the person whose turn made it, or an admin.
+   */
+  memory?: MemoryReviewView;
 };
+/** What a memory review decision shows (the review, without internals). */
+export type MemoryReviewView = { reviewId: string; files: MemoryReview['files']; diff: string; provenance: string; protected: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
 type State = { version: 1; decisions: DecisionRecord[] };
 
 /** Bounds of the decisions of one agent. */
@@ -66,7 +75,9 @@ export type PublicDecision = {
   cancelledAt?: string; cancelReason?: string; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
   /** A web search result waiting for review (see {@link DecisionRecord.kind}), the person who may review it (or an admin), and whether "Search again" is offered. */
-  kind?: 'web-research'; research?: WebResearch; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  kind?: 'web-research' | 'memory-review'; research?: WebResearch; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  /** A memory change held for a person (see {@link DecisionRecord.memory}); `adminOnly`: it touches protected files. */
+  memory?: MemoryReviewView & { adminOnly: boolean };
 };
 
 /** The options of a web research decision. `search_again` is only accepted once the result is stale. */
@@ -74,6 +85,13 @@ export const WEB_RESEARCH_OPTIONS: readonly DecisionOption[] = Object.freeze([
   { id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }, { id: 'search_again', label: 'Search again' },
 ]);
 const isResearch = (record: DecisionRecord) => record.kind === 'web-research';
+const isMemory = (record: DecisionRecord) => record.kind === 'memory-review';
+/** Decisions kept apart from the conversation's one pending decision (reviews of web research or memory). */
+const isReview = (record: DecisionRecord) => isResearch(record) || isMemory(record);
+/** The options of a memory review decision. */
+export const MEMORY_REVIEW_OPTIONS: readonly DecisionOption[] = Object.freeze([
+  { id: 'approve', label: 'Approve: re-apply it' }, { id: 'reject', label: 'Reject: keep it removed' },
+]);
 const staleAt = (record: DecisionRecord) => record.research && record.staleAfterMs ? Date.parse(record.research.searchedAt) + record.staleAfterMs : Infinity;
 
 /** A decision someone else made first, or that is no longer open. */
@@ -131,6 +149,37 @@ export class DecisionBoard {
   /* ---------------- what the agent does (the DecisionDesk) ---------------- */
 
   /** The desk the agent's `request_decision` and `cancel_decision` tools use. */
+  /**
+   * Memory reviews: what to do when a memory review decision is decided
+   * (the server binds the agent's memory guard).
+   */
+  memoryReviews?: { decide(reviewId: string, choice: 'approve' | 'reject', by: { id: string; name: string }): Promise<unknown> };
+  /**
+   * A memory change held for a person (Jiminy answered ask_human): one
+   * decision per review, in the conversation of the turn that made it (a
+   * dream's in the most recent conversation). `requestedBy`: the turn's author.
+   */
+  memoryReview(review: MemoryReview, threadId: string | undefined, author?: { id: string; name: string }): string | undefined {
+    if (!threadId) return undefined;
+    const existing = this.state.decisions.find(d => d.memory?.reviewId === review.id);
+    if (existing) return existing.id;
+    const isProtected = review.files.some(f => f.protected);
+    const paths = review.files.map(f => f.path).join(', ');
+    const record: DecisionRecord = {
+      id: randomUUID(), threadId, conversationId: review.conversationId ?? '', toolCallId: `memory-review:${review.id}`,
+      question: visible(`Memory review: keep the ${review.kind === 'dream' ? 'dream' : 'change'} to ${paths}?`, DECISION_LIMITS.maxQuestionCharacters),
+      options: MEMORY_REVIEW_OPTIONS.map(o => ({ ...o })), ...(review.jiminy?.reason ? { context: visible(review.jiminy.reason, DECISION_LIMITS.maxContextCharacters) } : {}), allowComment: false,
+      requestedBy: { ...(author ? { person: { id: author.id, name: author.name } } : {}) },
+      createdAt: new Date().toISOString(), status: 'pending', kind: 'memory-review',
+      memory: { reviewId: review.id, files: structuredClone(review.files), diff: (review.diff ?? '').slice(0, 8000), provenance: provenanceLabel(review.provenance), protected: isProtected, kind: review.kind,
+        ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.jiminy ? { trust: review.jiminy.trust, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}) } : {}), ...(review.outcome ? { outcome: review.outcome } : {}) },
+    };
+    this.state.decisions.push(record);
+    this.forget();
+    this.save(); this.changed();
+    return record.id;
+  }
+
   readonly desk: DecisionDesk = {
     request: async (request, turn) => this.request(request, turn),
     cancel: async (turn, id) => this.cancel(turn.conversationId, id),
@@ -158,7 +207,7 @@ export class DecisionBoard {
     };
     // One open decision per conversation: a new one replaces the pending one.
     let replaced: string | undefined;
-    for (const old of pending.filter(d => d.threadId === threadId && !isResearch(d))) {
+    for (const old of pending.filter(d => d.threadId === threadId && !isReview(d))) {
       Object.assign(old, { status: 'cancelled', cancelledAt: now, cancelReason: 'superseded', supersededBy: record.id });
       replaced = old.id;
     }
@@ -191,11 +240,13 @@ export class DecisionBoard {
    */
   mayDecide(id: string, who: { id: string }, admin: boolean): boolean {
     const record = this.record(id);
-    return !isResearch(record) || admin || (!!record.requestedBy.person && record.requestedBy.person.id === who.id);
+    // Memory reviews of protected files (persona, rules, goals): admins only.
+    if (isMemory(record) && record.memory?.protected) return admin;
+    return !isReview(record) || admin || (!!record.requestedBy.person && record.requestedBy.person.id === who.id);
   }
   private cancel(conversationId: string, id?: string): string | undefined {
     const threadId = this.runtime.threadOfConversation(this.owner, conversationId);
-    const record = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isResearch(d) && (!id || d.id === id));
+    const record = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isReview(d) && (!id || d.id === id));
     if (!record) return undefined;
     Object.assign(record, { status: 'cancelled', cancelledAt: new Date().toISOString(), cancelReason: 'withdrawn' });
     this.save(); this.changed();
@@ -225,6 +276,8 @@ export class DecisionBoard {
       ...(record.resume && runId ? { resume: { runId, state: record.resume.state, ...(record.resume.error ? { error: record.resume.error } : {}) } } : {}),
       ...(isResearch(record) ? { kind: 'web-research' as const, research: structuredClone(record.research!), stale: Date.now() >= staleAt(record), ...(Number.isFinite(staleAt(record)) ? { staleAt: new Date(staleAt(record)).toISOString() } : {}),
         ...(record.requestedBy.person ? { reviewer: { id: record.requestedBy.person.id, name: record.requestedBy.person.name } } : {}) } : {}),
+      ...(isMemory(record) && record.memory ? { kind: 'memory-review' as const, memory: { ...structuredClone(record.memory), adminOnly: record.memory.protected },
+        ...(record.requestedBy.person && !record.memory.protected ? { reviewer: { id: record.requestedBy.person.id, name: record.requestedBy.person.name } } : {}) } : {}),
     };
   }
   /** Pending decisions of conversations that are not archived, oldest first. */
@@ -248,7 +301,7 @@ export class DecisionBoard {
   requestedBy(runId: string): DecisionRecord | undefined { const found = this.state.decisions.filter(d => d.runId === runId).at(-1); return found ? structuredClone(found) : undefined; }
   /** The note for an ordinary turn of a conversation with a pending decision. */
   pendingNote(threadId: string): string | undefined {
-    const pending = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isResearch(d));
+    const pending = this.state.decisions.find(d => d.status === 'pending' && d.threadId === threadId && !isReview(d));
     const research = this.state.decisions.filter(d => d.status === 'pending' && d.threadId === threadId && isResearch(d));
     const notes = [...(pending ? [pendingDecisionNote(pending)] : []),
       ...(research.length ? [`Web research waiting for review in the app: ${research.map(d => `“${visible(d.research!.query, 200).replace(/[<>]/g, '')}” (decision ${d.id})`).join('; ')}. You have none of it; do not search for the same thing again unless asked. If it is approved, it arrives as a message starting with "[Web research]".`] : [])];
@@ -268,6 +321,18 @@ export class DecisionBoard {
     const record = this.record(id);
     const { choice, stop, comment } = (input ?? {}) as { choice?: unknown; stop?: unknown; comment?: unknown };
     if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['choice', 'stop', 'comment'].includes(key))) throw new RuntimeFault('invalid_input', 400);
+    if (isMemory(record)) {
+      // Approve (re-apply) or Reject (keep removed); no comment, no stop, and no agent turn follows.
+      if (stop !== undefined || (choice !== 'approve' && choice !== 'reject') || comment !== undefined) throw new RuntimeFault('invalid_input', 400);
+      if (record.status !== 'pending') throw new DecisionConflict(this.view(record));
+      Object.assign(record, { status: 'decided', decidedBy: { id: who.id, name: visible(who.name, 120) || 'Someone', ...(who.login ? { login: who.login } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) }, choice, decidedAt: new Date().toISOString() });
+      this.save(); this.changed();
+      const reviewId = record.memory!.reviewId;
+      void this.memoryReviews?.decide(reviewId, choice as 'approve' | 'reject', { id: who.id, name: visible(who.name, 120) || 'Someone' }).then(
+        () => { record.memory!.outcome = choice === 'approve' ? 'reapplied' : 'kept_removed'; this.save(); this.changed(); },
+        () => { record.memory!.outcome = 'failed'; this.save(); this.changed(); });
+      return this.view(record);
+    }
     if (isResearch(record)) {
       // Approve (no note), Reject (an optional note for the agent), or, once the result is stale, Search again.
       if (stop !== undefined || !['approve', 'reject', 'search_again'].includes(choice as string) || (comment !== undefined && (typeof comment !== 'string' || comment.length > DECISION_LIMITS.maxCommentCharacters)) || (choice === 'approve' && typeof comment === 'string' && comment.trim())) throw new RuntimeFault('invalid_input', 400);

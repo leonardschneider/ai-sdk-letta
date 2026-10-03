@@ -155,7 +155,12 @@ export interface ToolBridgeOptions {
  *   Atlassian token) runs without asking only when it is that same person.
  * - `source`: what started the turn (for example `n8n`), told to the agent.
  */
-export type UnattendedPolicy = { readonly preApproved: readonly string[]; readonly onBehalfOf?: string; readonly source?: string };
+/**
+ * How an unattended turn runs (see {@link ToolBridgeOptions.unattended}).
+ * `source`: what started it (`n8n`, `conductor`, `api`); `kind`, `token`
+ * and `name`: the automation token or scheduled task, for memory provenance.
+ */
+export type UnattendedPolicy = { readonly preApproved: readonly string[]; readonly onBehalfOf?: string; readonly source?: string; readonly kind?: 'automation' | 'schedule'; readonly token?: string; readonly name?: string };
 /** Fixed codes of calls refused in an unattended turn. */
 export const UNATTENDED_CODES = Object.freeze(['approval_required', 'question_required', 'unattended_stopped'] as const);
 export type UnattendedCode = typeof UNATTENDED_CODES[number];

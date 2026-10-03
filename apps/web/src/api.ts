@@ -80,6 +80,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   automations?: boolean;
   /** The agent can ask for decisions: members see and decide them (the bell). */
   decisions?: boolean;
+  /** The agent's memory is reviewed (Jiminy): the Memory view, revert toasts, held changes in the bell. */
+  memory?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

@@ -17,7 +17,7 @@ export type RewindTurn = { runId: string; input: string; startedAt?: string; kin
 /** A side effect outside the app that a rewind cannot undo. */
 export type ExternalEffect = { runId: string; tool: string; label: string; detail?: string };
 /** A decision or web research review a rewind withdraws. */
-export type RewindDecision = { id: string; question: string; kind?: 'web-research' };
+export type RewindDecision = { id: string; question: string; kind?: 'web-research' | 'memory-review' };
 /** A task the agent scheduled that a rewind cancels (`pending`), or that already ran (`fired`: listed as an external effect). */
 export type RewindSchedule = { id: string; at: string; prompt: string; state: 'pending' | 'fired' };
 /** What a rewind would do (`POST /v1/threads/:id/rewind/preview`). */
@@ -28,8 +28,12 @@ export type RewindSummary = {
   turns: RewindTurn[];
   /** Resources: files reverted or kept on conflict, and later commits that are kept (yours in the panel, other conversations'). `null`: the agent has no resources. */
   resources: { files: FilePlan[]; kept: (CommitInfo & { kind?: 'shared' })[] } | null;
-  /** Memory: files reverted or kept on conflict, and commits kept (dreaming and other background work, or turns of several conversations at once). */
-  memory: { files: FilePlan[]; kept: (CommitInfo & { kind: 'background' | 'shared' })[] } | null;
+  /**
+   * Memory: files reverted or kept on conflict, commits kept (dreaming and
+   * other background work, or turns of several conversations at once), and
+   * the rewound turns' own memory commits with their provenance and review.
+   */
+  memory: { files: FilePlan[]; kept: (CommitInfo & { kind: 'background' | 'shared'; provenance?: string; review?: string })[]; commits?: (CommitInfo & { provenance?: string; review?: string })[] } | null;
   /** Side effects outside the app that stay. */
   external: ExternalEffect[];
   /** Withdrawn when the rewind runs. */

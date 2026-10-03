@@ -10,6 +10,7 @@ import { REPLY_MODES, STAY_SILENT_TOOL, turnNote, type ReplyMode, type TurnSpeak
 import type { TurnActor } from './credentials.js';
 import type { UnattendedPolicy } from './tools.js';
 import { REQUEST_DECISION_TOOL } from './decisions.js';
+import type { ContentSource } from './provenance.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -31,8 +32,13 @@ export interface AgentPresentation {
   historyTruncated: boolean;
 }
 
-/** The turn a `beforeTurn`/`afterTurn` hook runs for: its OTID, when the call set one (see {@link LettaCallOptions}). */
-export interface TurnInfo { otid?: string }
+/**
+ * The turn a `beforeTurn`/`afterTurn` hook runs for: its OTID, when the call
+ * set one (see {@link LettaCallOptions}), who it acts for, whether it is
+ * unattended, and the untrusted content its message carries (attachments,
+ * and the `sources` the call named).
+ */
+export interface TurnInfo { otid?: string; actor?: TurnActor; unattended?: UnattendedPolicy; sources?: ContentSource[] }
 
 /** Durable delivery hooks: `begin` before sending, `complete` after a confirmed finish. */
 export interface DeliveryHooks { begin(): void; complete(): void }
@@ -67,6 +73,14 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   afterTurn?: (turn: TurnInfo) => Promise<void>;
   /** Runs when a turn starts, before anything is stored or sent (paired with `afterTurn`). Errors are ignored. */
   beforeTurn?: (turn: TurnInfo) => void;
+  /**
+   * Awaited before a turn starts (after it is validated): the runtime waits
+   * here for pending reviews of protected memory, so the agent never acts on
+   * a directive change that may be reverted. Errors are ignored.
+   */
+  waitBeforeTurn?: () => Promise<void>;
+  /** A short note for the agent at the start of each turn (memory provenance), sent as a `<system-reminder>`. */
+  turnReminder?: (turn: TurnInfo) => string | undefined;
   /**
    * The session exposes the {@link STAY_SILENT_TOOL} tool, so turns may pass a
    * `replyMode` and the agent may listen without replying (see
@@ -129,6 +143,12 @@ export type LettaCallOptions = {
    * message is a decision's outcome. Up to 2,000 characters; markup is removed.
    */
   reminder?: string;
+  /**
+   * Untrusted content this turn's message itself carries (for example, an
+   * approved web research result delivered as a decision's outcome), for
+   * its memory provenance. Attachments are counted already.
+   */
+  sources?: ContentSource[];
 };
 /**
  * The note an unattended turn starts with (display history never shows it).
@@ -368,6 +388,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private readonly delivery?: DeliveryHooks;
   private readonly afterTurn?: (turn: TurnInfo) => Promise<void>;
   private readonly beforeTurn?: (turn: TurnInfo) => void;
+  private readonly waitBeforeTurn?: () => Promise<void>;
+  private readonly turnReminder?: (turn: TurnInfo) => string | undefined;
   private readonly modelId: string;
   private history: ModelMessage[] = [];
   private busy = false;
@@ -387,6 +409,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.attachments = options.attachments;
     this.afterTurn = options.afterTurn;
     this.beforeTurn = options.beforeTurn;
+    this.waitBeforeTurn = options.waitBeforeTurn;
+    this.turnReminder = options.turnReminder;
     this.listening = !!options.listening;
     this.name = options.name;
     this.defaultActor = options.defaultActor ? Object.freeze({ ...options.defaultActor }) : undefined;
@@ -410,10 +434,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder', 'sources'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
     if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
     if (options.reminder !== undefined && typeof options.reminder !== 'string') throw new Error('Invalid reminder');
+    if (options.sources !== undefined && (!Array.isArray(options.sources) || options.sources.length > 20 || options.sources.some(source => !source || !['web', 'attachment', 'atlassian', 'tool'].includes(source.kind)))) throw new Error('Invalid sources');
     if (options.unattended !== undefined && (!options.unattended || typeof options.unattended !== 'object' || !Array.isArray(options.unattended.preApproved) || options.unattended.preApproved.some(name => typeof name !== 'string'))) throw new Error('Invalid unattended policy');
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
     if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
@@ -428,7 +453,17 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
     options.abortSignal?.throwIfAborted();
     this.busy = true;
-    const info: TurnInfo = options.otid ? { otid: options.otid } : {};
+    // The previous turn's after-work (its memory commit and review start) finishes first; then pending reviews of protected memory settle (bounded by the runtime).
+    if (this.waitBeforeTurn) { try { await this.idle(); await this.waitBeforeTurn(); } catch { /* never blocks a turn */ } }
+    if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) { this.busy = false; throw new Error('Invalid speaker'); }
+    const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}), ...(options.actor.role === 'admin' || options.actor.role === 'member' ? { role: options.actor.role } : {}) }) : this.defaultActor;
+    // The same policy object for the whole turn (the bridge remembers a refusal per object).
+    const unattended = options.unattended ? Object.freeze({ preApproved: Object.freeze([...options.unattended.preApproved]), ...(typeof options.unattended.onBehalfOf === 'string' ? { onBehalfOf: options.unattended.onBehalfOf } : {}), ...(typeof options.unattended.source === 'string' ? { source: options.unattended.source } : {}),
+      ...(options.unattended.kind === 'automation' || options.unattended.kind === 'schedule' ? { kind: options.unattended.kind } : {}), ...(typeof options.unattended.token === 'string' ? { token: options.unattended.token } : {}), ...(typeof options.unattended.name === 'string' ? { name: options.unattended.name } : {}) }) : undefined;
+    // Attachments and images are content the person did not necessarily write: untrusted for memory provenance.
+    const attached: ContentSource[] = parsed.attachments.length ? [{ kind: 'attachment', label: parsed.attachments.length === 1 ? parsed.attachments[0]!.name || 'attachment' : `${parsed.attachments.length} attachments` }] : [];
+    const sources = [...attached, ...(options.sources ?? []).map(source => ({ ...source }))];
+    const info: TurnInfo = { ...(options.otid ? { otid: options.otid } : {}), ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}), ...(sources.length ? { sources } : {}) };
     try { this.beforeTurn?.(info); } catch { /* observer */ }
     // Attachments are stored before delivery; a turn that then fails leaves them in the folder (harmless, and listed).
     let turn: Awaited<ReturnType<typeof storeUserTurn>>;
@@ -439,17 +474,16 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;
     // The retained transcript keeps images as hashes only; Letta already holds the bytes.
     // (Compact before cloning: URL objects in image parts are not cloneable.)
-    if (options.speaker !== undefined && (!options.speaker || typeof options.speaker.name !== 'string')) throw new Error('Invalid speaker');
     const speakers = options.speakers ?? (options.speaker ? [options.speaker] : []);
     // Without a reply mode or several speakers, exactly the note shared runtimes always sent.
+    let provenanceNote = '';
+    try { provenanceNote = this.turnReminder?.(info) ?? ''; } catch { /* no note */ }
     const preface = (options.unattended ? unattendedNote(options.unattended.source, { decisions: Object.hasOwn(this.tools, REQUEST_DECISION_TOOL) }) : '')
       + (options.reminder ? reminderNote(options.reminder) : '')
+      + (provenanceNote ? reminderNote(provenanceNote) : '')
       + (options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '');
     const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
-    const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}) }) : this.defaultActor;
-    // The same policy object for the whole turn (the bridge remembers a refusal per object).
-    const unattended = options.unattended ? Object.freeze({ preApproved: Object.freeze([...options.unattended.preApproved]), ...(typeof options.unattended.onBehalfOf === 'string' ? { onBehalfOf: options.unattended.onBehalfOf } : {}), ...(typeof options.unattended.source === 'string' ? { source: options.unattended.source } : {}) }) : undefined;
     return { otid: options.otid, info, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor, unattended };
   }
 
