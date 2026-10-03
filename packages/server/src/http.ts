@@ -184,7 +184,12 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   /** Shared runtimes: you are typing in this conversation (`{ typing: true }`, a heartbeat) or stopped (`{ typing: false }`). Nothing else is accepted, never text. */
   app.post('/v1/threads/:id/typing', (req, res) => res.json(runtime.typing(owner, req.params.id, author(req), req.body)));
   // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off', replyMode: 'inherit' | 'always' | 'when-addressed' | 'agent-decides' (shared runtimes) }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
-  app.patch('/v1/threads/:id', async (req, res) => { const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary); });
+  app.patch('/v1/threads/:id', async (req, res) => {
+    // Trust mode loosens the protected-file rule: on a team server, only admins change it.
+    // Members may only make it stricter (Strict); turning trust on, or back to the agent's setting, is for admins.
+    if (access && req.body && typeof req.body === 'object' && 'trustJiminy' in req.body && (req.body as { trustJiminy?: unknown }).trustJiminy !== 'off' && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary);
+  });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
@@ -231,8 +236,10 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/decisions/:id/decide', (req, res) => {
     const who = access ? access.author(req) : { id: LOCAL_USER_ID, name: 'You' };
     // Web research and memory reviews keep their rule: the person whose turn it was, or an admin (protected memory: admins only; 403 otherwise).
-    if (access && !board().mayDecide(req.params.id, who, access.mayAct(req, {}))) throw new RuntimeFault('not_your_review', 403);
-    try { res.json(board().decide(req.params.id, who, req.body)); }
+    const admin = access ? access.mayAct(req, {}) : true;
+    if (access && !board().mayDecide(req.params.id, who, admin)) throw new RuntimeFault('not_your_review', 403);
+    // A claim is confirmed only by the person it names (single-user app: claims never name anyone but you).
+    try { res.json(board().decide(req.params.id, who, req.body, { admin: access ? admin : false })); }
     catch (error) { if (error instanceof DecisionConflict) return res.status(409).json({ error: error.code, decision: error.decision }); throw error; }
   });
   /**
@@ -293,6 +300,8 @@ export interface GuiAgentInfo {
   decisions?: boolean;
   /** The agent's memory is reviewed (Jiminy): the app shows the Memory view and memory review decisions. */
   memory?: boolean;
+  /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
+  trustJiminy?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -337,7 +346,7 @@ export class DecisionFeed {
    * the people `mayReview` allows (the searcher and admins).
    */
   pending(visible: (agentId: string) => boolean, mayReview: (agentId: string, decision: PublicDecision) => boolean = () => true): FeedDecision[] {
-    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => (decision.kind !== 'web-research' && decision.kind !== 'memory-review') || mayReview(entry.agent.id, decision)).flatMap(decision => {
+    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => !decision.kind || mayReview(entry.agent.id, decision)).flatMap(decision => {
       const thread = entry.runtime.threadSummary(entry.owner, decision.threadId);
       return thread && !thread.archived ? [{ ...decision, agent: { ...entry.agent }, thread: { id: thread.id, title: thread.title } }] : [];
     })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -383,7 +392,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
@@ -486,7 +495,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}), ...(info.trustJiminy ? { trustJiminy: true } : {}) }; };
   // Pending decisions of every agent you belong to (the notification bell).
   const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */

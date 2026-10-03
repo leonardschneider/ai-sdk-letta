@@ -3,7 +3,7 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname } from 'node:path';
 import type { Server } from 'node:http';
-import { LOCAL_USER_ID, MAX_INPUT_CHARACTERS, REPLY_MODES, type ReplyMode, type ScheduleRequest, type ScheduledTask, type TaskScheduler, type TurnActor } from 'ai-sdk-letta';
+import { DEFAULT_AUTOMATION_FLOOR, LOCAL_USER_ID, MAX_INPUT_CHARACTERS, REPLY_MODES, type ReplyMode, type ScheduleRequest, type ScheduledTask, type TaskScheduler, type TurnActor } from 'ai-sdk-letta';
 import { RuntimeFault, type Run, type RunAuthor, type RunAutomation, type RunSource, type ThreadRuntime } from './runtime.js';
 import { contentDisposition } from './http.js';
 import type { Orchestrator, OrchestratorHandle } from './scheduler.js';
@@ -31,9 +31,19 @@ export type AutomationToken = {
   preApproved: string[];
   /** Reply mode of its turns on a team server. @default 'always' */
   replyMode?: ReplyMode;
+  /**
+   * The starting verdict of its turns' memory changes when they read untrusted
+   * content (web research, documents, tool output): `accept`, `flag` (kept,
+   * shown) or `ask_human` (removed until a person approves). The reviewer can
+   * only make it stricter. @default 'flag'
+   */
+  memoryFloor?: MemoryFloor;
   createdAt: string; createdBy: AutomationActor;
   lastUsedAt?: string; lastRunId?: string;
 };
+/** The starting verdicts a token may set for its untrusted memory writes. */
+export const MEMORY_FLOORS = Object.freeze(['accept', 'flag', 'ask_human'] as const);
+export type MemoryFloor = typeof MEMORY_FLOORS[number];
 /** A run started through the automation API (or by a scheduled task): its idempotency key and where it runs. */
 type ServiceRun = { id: string; tokenId?: string; scheduleId?: string; key?: string; fingerprint?: string; threadId?: string; createdAt: string; error?: string };
 /** A task the agent scheduled (`schedule_task`), held by an orchestrator until it fires. */
@@ -128,24 +138,33 @@ export class AutomationStore {
 
 /** Public view of a token (never its hash). */
 export const tokenSummary = (token: AutomationToken) => ({ id: token.id, name: token.name, via: token.via, hint: `…${token.hint}`, actor: { name: token.actor.name, ...(token.actor.login ? { login: token.actor.login } : {}) },
-  preApproved: [...token.preApproved], replyMode: token.replyMode ?? 'always', createdAt: token.createdAt, createdBy: { name: token.createdBy.name }, ...(token.lastUsedAt ? { lastUsedAt: token.lastUsedAt } : {}) });
+  preApproved: [...token.preApproved], replyMode: token.replyMode ?? 'always', memoryFloor: token.memoryFloor ?? DEFAULT_AUTOMATION_FLOOR, createdAt: token.createdAt, createdBy: { name: token.createdBy.name }, ...(token.lastUsedAt ? { lastUsedAt: token.lastUsedAt } : {}) });
 
 /**
  * Create a token for an agent. Returns its record and the secret, which is
  * never stored: show it once.
  */
 export function createToken(store: AutomationStore, input: unknown, context: { actor: AutomationActor; createdBy: AutomationActor; preApprovable: readonly string[] }): { token: AutomationToken; secret: string } {
-  const { name, via = 'api', preApproved = [], replyMode } = (input ?? {}) as { name?: unknown; via?: unknown; preApproved?: unknown; replyMode?: unknown };
+  const { name, via = 'api', preApproved = [], replyMode, memoryFloor } = (input ?? {}) as { name?: unknown; via?: unknown; preApproved?: unknown; replyMode?: unknown; memoryFloor?: unknown };
   if (typeof name !== 'string' || !visible(name, 80) || !AUTOMATION_VIAS.includes(via as AutomationVia) || !Array.isArray(preApproved) || preApproved.length > 50
-    || preApproved.some(tool => typeof tool !== 'string' || !context.preApprovable.includes(tool)) || (replyMode !== undefined && !REPLY_MODES.includes(replyMode as ReplyMode))) throw new RuntimeFault('invalid_input', 400);
+    || preApproved.some(tool => typeof tool !== 'string' || !context.preApprovable.includes(tool)) || (replyMode !== undefined && !REPLY_MODES.includes(replyMode as ReplyMode)) || (memoryFloor !== undefined && !MEMORY_FLOORS.includes(memoryFloor as MemoryFloor))) throw new RuntimeFault('invalid_input', 400);
   const secret = newSecret();
   const token: AutomationToken = { id: randomUUID(), name: visible(name, 80), via: via as AutomationVia, hash: sha256(secret), hint: secret.slice(-4), actor: { ...context.actor },
-    preApproved: [...new Set(preApproved as string[])], ...(replyMode ? { replyMode: replyMode as ReplyMode } : {}), createdAt: new Date().toISOString(), createdBy: { ...context.createdBy } };
+    preApproved: [...new Set(preApproved as string[])], ...(replyMode ? { replyMode: replyMode as ReplyMode } : {}), ...(memoryFloor ? { memoryFloor: memoryFloor as MemoryFloor } : {}), createdAt: new Date().toISOString(), createdBy: { ...context.createdBy } };
   store.update(state => {
     if (state.tokens.length >= AUTOMATION_LIMITS.tokensPerAgent) throw new RuntimeFault('capacity_reached');
     state.tokens.push(token);
   });
   return { token, secret };
+}
+/** Change a token's memory floor (its later turns use it). */
+export function setTokenMemoryFloor(store: AutomationStore, id: string, input: unknown): AutomationToken {
+  const floor = (input as { memoryFloor?: unknown } | undefined)?.memoryFloor;
+  if (!MEMORY_FLOORS.includes(floor as MemoryFloor)) throw new RuntimeFault('invalid_input', 400);
+  let updated: AutomationToken | undefined;
+  store.update(state => { const token = state.tokens.find(t => t.id === id); if (token) { token.memoryFloor = floor as MemoryFloor; updated = { ...token }; } });
+  if (!updated) throw new RuntimeFault('not_found', 404);
+  return updated;
 }
 /** Revoke (delete) a token. Turns it already started keep running. */
 export function revokeToken(store: AutomationStore, id: string): boolean {
@@ -340,7 +359,8 @@ export class AutomationService {
     const automation: RunAutomation = { source: { kind: 'automation', via: token.via, tokenId: token.id, name: token.name }, preApproved: token.preApproved,
       // Pre-approval covers calls on someone's own account (Atlassian) only when that person created the token.
       ...(token.createdBy.id === token.actor.id ? { onBehalfOf: token.actor.id } : {}),
-      ...(agent.replyModes ? { replyMode: (replyMode as ReplyMode | undefined) ?? token.replyMode ?? 'always' } : {}) };
+      ...(agent.replyModes ? { replyMode: (replyMode as ReplyMode | undefined) ?? token.replyMode ?? 'always' } : {}),
+      memoryFloor: token.memoryFloor ?? DEFAULT_AUTOMATION_FLOOR };
     void this.launch(agent, record, { text, title: typeof title === 'string' ? visible(title, 120) : token.name, newConversation: !!newConversation }, automation, author);
     return this.view(agent, record);
   }
@@ -844,6 +864,12 @@ export function automationAdminRoutes(service: AutomationService, agentId: (req:
     // A token acts for the person who creates it: nobody can make an automation act as someone else from the app.
     const { token, secret } = createToken(agent.store, req.body, { actor, createdBy: actor, preApprovable: agent.preApprovable });
     res.status(201).json({ token: { ...tokenSummary(token), active: true }, secret });
+  });
+  /** `{ memoryFloor: 'accept' | 'flag' | 'ask_human' }`: the token's starting verdict for untrusted memory writes. */
+  router.patch('/tokens/:id', json, (req, res) => {
+    const agent = agentOf(req);
+    const token = setTokenMemoryFloor(agent.store, String(req.params.id), req.body);
+    res.json({ token: tokenSummary(token) });
   });
   router.delete('/tokens/:id', (req, res) => {
     const agent = agentOf(req);

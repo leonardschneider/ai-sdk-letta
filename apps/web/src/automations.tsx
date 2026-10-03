@@ -5,7 +5,7 @@ import { ApiError, apiPath, errorCode, setCsrfHeader } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
 import { friendlyName } from './presentation.js';
-import { automationError, relativeTime, scheduleState, VIA_LABEL, type AutomationsData, type ScheduleView, type TokenView, type Via } from './automations-model.js';
+import { automationError, memoryFloorLabel, MEMORY_FLOOR_CHOICES, relativeTime, scheduleState, VIA_LABEL, type AutomationsData, type MemoryFloor, type ScheduleView, type TokenView, type Via } from './automations-model.js';
 
 /** A JSON call to the agent's `/automations` routes. */
 async function automationsApi<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
@@ -46,6 +46,10 @@ export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentN
     try { await automationsApi(`/tokens/${encodeURIComponent(token.id)}`, undefined, 'DELETE'); toast(`Revoked “${token.name}”. It no longer works.`); await load(); }
     catch (error) { toast(automationError(errorCode(error)), { tone: 'error' }); }
   }
+  async function setFloor(token: TokenView, memoryFloor: MemoryFloor) {
+    try { await automationsApi(`/tokens/${encodeURIComponent(token.id)}`, { memoryFloor }, 'PATCH'); toast(`“${token.name}”: ${memoryFloorLabel(memoryFloor)}.`); await load(); }
+    catch (error) { toast(automationError(errorCode(error)), { tone: 'error' }); }
+  }
   async function cancel(task: ScheduleView) {
     try { await automationsApi(`/schedules/${encodeURIComponent(task.id)}/cancel`, {}); toast('Cancelled the scheduled task.'); await load(); }
     catch (error) { toast(automationError(errorCode(error)), { tone: 'error' }); }
@@ -77,6 +81,11 @@ export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentN
                     {VIA_LABEL[token.via]} · <span className="mono">{token.hint}</span> · acts as {token.actor.name}
                     {token.preApproved.length ? ` · pre-approved: ${token.preApproved.map(friendlyName).join(', ')}` : ''}
                   </span>
+                  <label className="member-login token-floor">Memory changes after untrusted content:
+                    <select className="member-role token-floor-select" aria-label={`Memory changes of ${token.name} after reading untrusted content`} value={token.memoryFloor ?? 'flag'} onChange={event => void setFloor(token, event.target.value as MemoryFloor)}>
+                      {MEMORY_FLOOR_CHOICES.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+                    </select>
+                  </label>
                   <span className="member-login">{!token.active ? <span className="token-warning">{token.actor.login ? `Not working: ${token.actor.name} is no longer a member of this agent` : 'Not working on this server: it acts for someone who isn’t a member of this agent'}</span> : token.lastUsedAt ? <>Last used {relativeTime(token.lastUsedAt)}{token.lastRun && token.lastRun.status === 'decision_pending' ? <> · <span className="token-note">waiting for a decision</span></> : token.lastRun && token.lastRun.status !== 'completed' ? <> · <span className="token-warning">{token.lastRun.error === 'approval_required' ? 'last run needed approval' : token.lastRun.error === 'question_required' ? 'last run needed an answer' : `last run ${token.lastRun.status}`}</span></> : null}</> : 'Never used'}</span>
                 </span>
                 {token.lastRun && <button type="button" className="btn ghost small" onClick={() => { onClose(); onOpenThread(token.lastRun!.threadId); }}>Open</button>}
@@ -128,13 +137,14 @@ function CreateToken({ tools, replyModes, onCancel, onCreated }: { tools: readon
   const [via, setVia] = useState<Via>('n8n');
   const [preApproved, setPreApproved] = useState<string[]>([]);
   const [replyMode, setReplyMode] = useState('always');
+  const [memoryFloor, setMemoryFloor] = useState<MemoryFloor>('flag');
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState('');
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!name.trim() || saving) { if (!name.trim()) setProblem('Give the token a name, for example the workflow’s.'); return; }
     setSaving(true); setProblem('');
-    try { onCreated(await automationsApi<{ token: TokenView; secret: string }>('/tokens', { name: name.trim(), via, preApproved, ...(replyModes ? { replyMode } : {}) })); }
+    try { onCreated(await automationsApi<{ token: TokenView; secret: string }>('/tokens', { name: name.trim(), via, preApproved, memoryFloor, ...(replyModes ? { replyMode } : {}) })); }
     catch (error) { setProblem(automationError(errorCode(error))); }
     finally { setSaving(false); }
   }
@@ -152,6 +162,12 @@ function CreateToken({ tools, replyModes, onCancel, onCreated }: { tools: readon
         <option value="always">Always reply</option><option value="when-addressed">When mentioned or asked</option><option value="agent-decides">Agent decides</option>
       </select>
     </label>}
+    <label className="integration-field">Memory changes after untrusted content
+      <select className="member-role" value={memoryFloor} onChange={event => setMemoryFloor(event.target.value as MemoryFloor)}>
+        {MEMORY_FLOOR_CHOICES.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+      </select>
+      <span className="integration-help">When a run of this workflow reads web pages, documents or tool output and then changes the agent’s memory: {MEMORY_FLOOR_CHOICES.find(c => c.value === memoryFloor)!.help} Protected memory never changes in these runs.</span>
+    </label>
     <fieldset className="integration-field token-tools">
       <legend>Allowed without asking</legend>
       {tools.length

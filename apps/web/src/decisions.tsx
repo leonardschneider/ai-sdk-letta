@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
-import { Bell, Brain, Check, ChevronRight, CircleStop, CornerDownRight, Globe, LoaderCircle, Lock, Signpost } from 'lucide-react';
+import { Bell, Brain, Check, ChevronRight, CircleStop, CornerDownRight, Globe, LoaderCircle, Lock, MessageCircleQuestion, ShieldAlert, Signpost } from 'lucide-react';
 import { useAuiState } from '@assistant-ui/react';
 import { useToast } from './toasts.js';
-import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, mayReview, memoryDecisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
-import { DiffView } from './memory.js';
+import { ago, askedBy, bellCount, bellLabel, claimAnswers, claimSummary, decideError, decisionSummary, mayReview, memoryDecisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
+import { DiffView, DroppedView } from './memory.js';
 
 /* ------------------------------------------------------------------ */
 /* State shared with the conversation                                  */
@@ -73,7 +73,7 @@ export function DecisionBell({ decisions, showAgent, me, onOpen }: { decisions: 
         {!!count && <ul className="bell-list">
           {decisions.map(decision => <li key={decision.id}>
             <button type="button" className="bell-item" onClick={() => { setOpen(false); onOpen(decision); }}>
-              <span className="bell-item-icon" aria-hidden="true">{decision.kind === 'web-research' ? <Globe size={14}/> : decision.kind === 'memory-review' ? <Brain size={14}/> : <Signpost size={14}/>}</span>
+              <span className="bell-item-icon" aria-hidden="true">{decision.kind === 'web-research' ? <Globe size={14}/> : decision.kind === 'memory-review' ? <Brain size={14}/> : decision.kind === 'claim-confirmation' ? <MessageCircleQuestion size={14}/> : decision.kind === 'memory-notice' ? <ShieldAlert size={14}/> : <Signpost size={14}/>}</span>
               <span className="bell-item-body">
                 <span className="bell-item-question">{decision.question}</span>
                 <span className="bell-item-where">{showAgent ? `${decision.agent.name} · ` : ''}{decision.thread.title}</span>
@@ -285,6 +285,7 @@ export function MemoryReviewCard({ decision }: { decision: DecisionView }) {
       {memory.adminOnly && <span className="prov-chip" data-tone="flag"><Lock size={10} aria-hidden="true"/> admins only</span>}
     </span>}
     {decision.context && <p className="card-details">Jiminy{memory?.model ? ` (${memory.model})` : ''}: {decision.context}</p>}
+    {memory?.dropped?.length ? <DroppedView dropped={memory.dropped}/> : null}
     {memory?.diff && <DiffView diff={memory.diff}/>}
     {settled
       ? <p className="decision-who">{settled}{decision.decidedAt ? ` · ${ago(decision.decidedAt)}` : ''}</p>
@@ -294,5 +295,72 @@ export function MemoryReviewCard({ decision }: { decision: DecisionView }) {
             <button type="button" className="btn primary" disabled={busy} onClick={() => void submit('approve')}>{busy ? 'Sending…' : 'Approve: re-apply it'}</button>
           </div>
         : <p className="card-details">{memory?.adminOnly ? 'It changes a protected file: only an admin of this agent can decide.' : `Waiting for ${decision.reviewer?.name ?? 'the person whose message made it'}, or an admin.`}</p>}
+  </section>;
+}
+
+/**
+ * A claim confirmation: a memory change relies on something the agent was
+ * told this person said. Only they confirm (Yes re-applies it); an admin may
+ * only say No. Partly: their comment goes to the agent.
+ */
+export function ClaimCard({ decision }: { decision: DecisionView }) {
+  const { decide, me, admin } = useContext(DecisionsContext);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+  const sent = useRef(false);
+  useTick();
+  const claim = decision.claim;
+  const answers = claimAnswers(decision, me, !!admin);
+  const settled = claimSummary(decision, me);
+  const submit = async (choice: 'yes' | 'no' | 'partly') => {
+    if (sent.current) return;
+    if (choice === 'partly' && !note.trim()) { toast('Say what you did say, so the agent can remember that instead.', { tone: 'error' }); return; }
+    sent.current = true; setBusy(true);
+    try { await decide(decision.id, { choice, ...(note.trim() ? { comment: note.trim().slice(0, 1000) } : {}) }); }
+    catch (error) { sent.current = false; toast((error as Error).message, { tone: 'error' }); }
+    finally { setBusy(false); }
+  };
+  return <section className="card decision-card claim-card" id={`decision-${decision.id}`} aria-label={`Confirm: ${decision.question}`} aria-busy={busy || undefined}>
+    <header className="card-head"><MessageCircleQuestion size={16} aria-hidden="true"/><span>Did you say this?</span><span className="decision-asked">{ago(decision.createdAt)}</span></header>
+    <h2 className="card-title">{decision.question}</h2>
+    {claim && <span className="prov-chips">
+      <span className="prov-chip" data-tone="neutral">asked by {claim.requester.name}</span>
+      {decision.status === 'pending' ? <span className="prov-chip" data-tone="held">Held until {claim.person.name} answers</span>
+        : decision.choice?.id === 'yes' ? <span className="prov-chip" data-tone="ok">Confirmed by {claim.person.name}</span>
+        : <span className="prov-chip" data-tone="reverted">Not confirmed: kept removed</span>}
+      {claim.files.length ? <span className="prov-chip" data-tone="neutral">{claim.files.join(', ')}</span> : null}
+    </span>}
+    {decision.context && <p className="card-details">{decision.context}</p>}
+    {claim?.diff && <DiffView diff={claim.diff}/>}
+    {settled
+      ? <p className="decision-who">{settled}{decision.comment ? ` · “${decision.comment}”` : ''}{decision.decidedAt ? ` · ${ago(decision.decidedAt)}` : ''}</p>
+      : answers.length
+        ? <>
+            {answers.includes('partly') && <textarea className="other-field" aria-label="What you did say (optional; needed for Partly)" placeholder="What you did say (needed for Partly)…" maxLength={1000} rows={2} value={note} disabled={busy} onChange={e => setNote(e.target.value)}/>}
+            <div className="card-actions">
+              {answers.includes('partly') && <button type="button" className="btn ghost" disabled={busy} onClick={() => void submit('partly')}>Partly</button>}
+              <button type="button" className={answers.length === 1 ? 'btn primary' : 'btn ghost'} disabled={busy} onClick={() => void submit('no')}>{answers.length === 1 ? 'Reject (admin)' : 'No, I didn’t'}</button>
+              {answers.includes('yes') && <button type="button" className="btn primary" disabled={busy} onClick={() => void submit('yes')}>{busy ? 'Sending…' : 'Yes, I said that'}</button>}
+            </div>
+            {answers.length === 1 && <p className="card-details">Only {claim?.person.name ?? 'the person named'} can confirm it.</p>}
+          </>
+        : <p className="card-details">Waiting for {claim?.person.name ?? 'the person named'}: only they can confirm what they said.</p>}
+  </section>;
+}
+
+/** An unconfirmed claim: someone denied what a conversation attributed to them (for the requester and admins). */
+export function NoticeCard({ decision }: { decision: DecisionView }) {
+  const { decide } = useContext(DecisionsContext);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  useTick();
+  return <section className="card decision-card notice-card" id={`decision-${decision.id}`} aria-label={decision.question}>
+    <header className="card-head"><ShieldAlert size={16} aria-hidden="true"/><span>Unconfirmed claim</span><span className="decision-asked">{ago(decision.createdAt)}</span></header>
+    <h2 className="card-title">{decision.question}</h2>
+    {decision.context && <p className="card-details">{decision.context}</p>}
+    {decision.status === 'pending'
+      ? <div className="card-actions"><button type="button" className="btn ghost" disabled={busy} onClick={() => { setBusy(true); void decide(decision.id, { choice: 'dismiss' }).catch(error => toast((error as Error).message, { tone: 'error' })).finally(() => setBusy(false)); }}>Dismiss</button></div>
+      : <p className="decision-who">Dismissed</p>}
   </section>;
 }

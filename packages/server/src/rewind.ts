@@ -17,7 +17,7 @@ export type RewindTurn = { runId: string; input: string; startedAt?: string; kin
 /** A side effect outside the app that a rewind cannot undo. */
 export type ExternalEffect = { runId: string; tool: string; label: string; detail?: string };
 /** A decision or web research review a rewind withdraws. */
-export type RewindDecision = { id: string; question: string; kind?: 'web-research' | 'memory-review' };
+export type RewindDecision = { id: string; question: string; kind?: 'web-research' | 'memory-review' | 'claim-confirmation' | 'memory-notice' };
 /** A task the agent scheduled that a rewind cancels (`pending`), or that already ran (`fired`: listed as an external effect). */
 export type RewindSchedule = { id: string; at: string; prompt: string; state: 'pending' | 'fired' };
 /** What a rewind would do (`POST /v1/threads/:id/rewind/preview`). */

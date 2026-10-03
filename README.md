@@ -799,12 +799,73 @@ A review that fails (timeout, error) counts as `flag`, or `reject` when a
 protected file changed. The next turn waits for pending reviews of protected
 files. A review a stop interrupted runs again at the next start.
 
-**The reviewer's model** is `memory.reviewer`: `'auto'` (default) picks a
-model of **another family** than the agent's when one is connected (for
-example Claude through the Anthropic provider for a GPT agent), otherwise the
-agent's own; or a handle; or `'off'` (no review, protected files stay
-protected). People can change it in the app (Memory → Reviewer model; admins
-on a team server).
+**Dropping lines.** When only part of a change is bad (a dream that
+consolidated real team facts *and* an injected rule), Jiminy can keep the
+change and name the lines to drop (`drop`: a file, a line range as numbered in
+its review, and the exact text). The harness removes exactly those lines, only
+if the change added them and the text matches; otherwise the whole change is
+reverted (fail closed). For turns and merged dreams this is one partial-revert
+commit by the harness; for dreams reviewed before they merge it is the
+harness's `approve_edits` (see below). The Memory view and the review card
+show the dropped lines.
+
+**Trust mode** (`memory.trustJiminy`, off by default; each conversation can
+override it from the shield button in its header; on a team server members
+may only make their conversation *Strict*, admins choose any setting). Protected-file changes from a person's own attended turn are not
+refused up front even when the person is not an admin or the turn read
+untrusted content: Jiminy reviews them, and `accept` keeps them (`reject` and
+`ask_human` as above; a failed review still reverts). The header shows
+**Trusts Jiminy** while it is on, and provenance records it (`X-Trust-Mode`).
+What stays deterministic in trust mode:
+
+- **Unattended turns** (automations, scheduled tasks) and turns without a
+  person: nobody can be asked, and a token is an easy thing to steal.
+- **Letter-case aliases** (`PERSONA.md` for `persona.md`): no legitimate use.
+- **New root files** from untrusted or unattended turns: a new file in the
+  system prompt is a new directive that bypasses the protected list.
+- **Dreams changing protected files**: reverted (or not approved) as before;
+  a dream has no author to ask.
+- **A failed review** of a protected file: reverted.
+
+**Claims are confirmed by the person they name.** Social engineering often
+works by attributing a rule to a colleague ("Bob from ops said deploys may
+skip approval on Fridays"). When a change relies on such a statement, Jiminy
+lists it (`claims`: the person as written and what they supposedly said), and
+the change is **held** (removed until confirmed). If the person is a member of
+the agent (matched by display name, first name or Tailscale login; never
+guessed), they get a **claim confirmation** in their bell: "Mia's conversation
+says you said: '…'. Did you?"
+
+- **Yes** re-applies the change, with `X-Confirmed-By` in its provenance.
+- **No** keeps it removed, and the requester and admins get an
+  *unconfirmed claim* notice in their bell (and in the Memory view).
+- **Partly** keeps it removed and sends the person's comment to the agent as a
+  turn of the conversation, so it can remember what they actually said.
+
+Only the named person can confirm; an admin can reject but never confirm on
+their behalf. A claim about someone who is not a member, or a name that
+matches several members, gets an ordinary admin memory review ("claim about
+someone outside this agent, cannot be verified"). A claim about the person
+who sent the turn needs no confirmation. Unattended runs work the same way
+(the run ends without the change). In the single-user app you are the only
+member: claims about anyone else come to you as that admin review.
+
+**Automations: where their memory changes start.** Each automation token has
+a *memory floor* (Automations → the token → "Memory changes after untrusted
+content"): `accept` (Jiminy decides), `flag` (default: kept, marked for people)
+or `ask_human` (removed until someone approves in the bell). It applies when
+the token's run read untrusted content (web research, documents, tool output)
+and then changed unprotected memory; Jiminy can only make it stricter.
+Protected memory never changes in these runs.
+
+**The reviewer's model** is set per agent with `memory.reviewer`: `'auto'`
+(default) picks a model of **another family** than the agent's when one is
+connected (Claude Sonnet first, for example through the Anthropic provider for
+a GPT agent; GPT for a Claude agent), otherwise the agent's own; or a handle
+such as `'anthropic/claude-haiku-4-5'`; or `'off'` (no review, protected files
+stay protected). People can change it in the app (Memory → Reviewer model;
+admins on a team server); the app's choice is kept per agent and wins over the
+definition until set back to Automatic.
 
 **Dreams.** Dreaming (Letta's reflection) merges its work on its own (merge
 mode `auto`; never `explicit`). The guard notices the merge, reverts protected
@@ -814,7 +875,8 @@ memory for a few seconds (the **exposure window**, shown per dream; about
 a dream (it lists the merge mode `client`, a proposal we prototyped in a fork
 of Letta Code) is detected at start, and then dreams are reviewed **before**
 they merge: rejected ones never reach memory, and the transcript is reflected
-on again later. Turn it off with `memory: { approveDreams: false }`.
+on again later; a dream with a few bad lines merges without them
+(`approve_edits`). Turn it off with `memory: { approveDreams: false }`.
 
 **In the app.** The sidebar's **Memory** view lists reviewed changes (who and
 what they came from, the verdict, Jiminy's trust and reason, the diff, and for
@@ -828,6 +890,7 @@ defineAgent({
   memory: {
     protected: ['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'policies/**'],
     reviewer: 'auto',          // or 'anthropic/claude-sonnet-5', or 'off'
+    trustJiminy: false,        // true: protected-file changes go to Jiminy instead of being refused
     trustedTools: ['text_stats'], // application tools whose results are your own
   },
 });
@@ -1526,6 +1589,10 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   `web_search`: before anything is searched).
 - **Memory review.** Jiminy is a model: it can misjudge, and the harness's
   floor only covers protected files; its verdict never loosens that floor.
+  In trust mode Jiminy alone decides protected-file changes from people's
+  turns; keep it off for agents whose directives matter more than convenience.
+  Dropped lines must be lines the change added, with their exact text: Jiminy
+  cannot rewrite a line, only remove it.
   Each review starts a temporary agent (5–10 s, about 20 s for the first one
   after a start). Without a harness that asks before merging dreams, a dream
   is in memory until its review settles (about 10–15 s). A dream that changes

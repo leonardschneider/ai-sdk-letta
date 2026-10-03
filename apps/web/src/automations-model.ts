@@ -2,7 +2,9 @@
 
 export type Via = 'n8n' | 'conductor' | 'api';
 export const VIA_LABEL: Record<Via, string> = { n8n: 'n8n', conductor: 'Conductor', api: 'API' };
-export type TokenView = { id: string; name: string; via: Via; hint: string; actor: { name: string; login?: string }; preApproved: string[]; replyMode: string; createdAt: string; createdBy: { name: string }; lastUsedAt?: string; active: boolean;
+export type TokenView = { id: string; name: string; via: Via; hint: string; actor: { name: string; login?: string }; preApproved: string[]; replyMode: string;
+  /** Starting verdict of its runs' memory changes after reading untrusted content (absent on older servers: flag). */
+  memoryFloor?: MemoryFloor; createdAt: string; createdBy: { name: string }; lastUsedAt?: string; active: boolean;
   lastRun?: { id: string; threadId: string; status: string; error?: string } };
 export type ScheduleView = { id: string; at: string; prompt: string; conversation: 'current' | 'new'; threadId?: string; title?: string; actor: { name: string }; orchestrator: string; state: 'scheduling' | 'scheduled' | 'fired' | 'cancelled' | 'failed'; createdAt: string; firedAt?: string;
   run?: { id: string; threadId: string; status: string; error?: string } };
@@ -50,4 +52,17 @@ export function sourceLabel(source: { kind?: string; via?: string } | undefined)
   if (!source?.via) return undefined;
   const via = VIA_LABEL[source.via as Via] ?? 'API';
   return source.kind === 'schedule' ? `scheduled · ${via}` : `via ${via}`;
+}
+
+/** The starting verdict of an automation's memory changes when its run read untrusted content. */
+export type MemoryFloor = 'accept' | 'flag' | 'ask_human';
+/** The memory floor choices, as the Automations dialog lists them. */
+export const MEMORY_FLOOR_CHOICES: readonly { value: MemoryFloor; label: string; help: string }[] = [
+  { value: 'accept', label: 'Keep (reviewer decides)', help: 'Kept unless the reviewer objects.' },
+  { value: 'flag', label: 'Keep, flagged (default)', help: 'Kept and marked for people to look at; the reviewer can still revert it.' },
+  { value: 'ask_human', label: 'Hold for approval', help: 'Removed until someone approves it in the bell.' },
+];
+/** Short label of a token's memory floor: "memory: flagged". */
+export function memoryFloorLabel(floor: MemoryFloor | undefined): string {
+  return floor === 'accept' ? 'memory: reviewer decides' : floor === 'ask_human' ? 'memory: held for approval' : 'memory: flagged';
 }

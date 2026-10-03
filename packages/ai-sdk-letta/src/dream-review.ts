@@ -1,6 +1,6 @@
 import type { SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
 import type { AgentDefinition } from './definition.js';
-import { isProtectedPath, reviewFloor, failedReview } from './memory-guard.js';
+import { isIndexUpkeep, isProtectedPath, reviewFloor, failedReview } from './memory-guard.js';
 import { stricter, type JiminyVerdict, type MemoryReviewer, type Verdict } from './jiminy.js';
 import type { TurnProvenance } from './provenance.js';
 
@@ -49,7 +49,7 @@ export type DreamRequest = {
   type: 'reflection_merge_request'; request_id: string;
   agent_id: string; branch: string; base_head: string; head: string;
   commits: { sha: string; subject: string; author?: string }[];
-  diff_stat?: string; diff: string;
+  diff_stat?: string; diff: string; diff_truncated?: boolean;
   files: { path: string; status: 'A' | 'M' | 'D' }[];
   /** The transcript the dream read (path, and the message range). */
   transcript_payload?: string; message_range?: { start?: string; end?: string };
@@ -57,7 +57,9 @@ export type DreamRequest = {
   untrusted_tool_results?: number;
 };
 /** The client's answer (`reflection_merge_response`). */
-export type DreamResponse = { type: 'reflection_merge_response'; request_id: string; decision: 'approve' | 'reject' | 'approve_paths'; approve_paths?: string[]; reason?: string };
+export type DreamResponse = { type: 'reflection_merge_response'; request_id: string; decision: 'approve' | 'reject' | 'approve_paths' | 'approve_edits'; approve_paths?: string[];
+  /** `approve_edits`: lines removed from the branch before it merges (head line numbers, exact text). */
+  drop?: { path: string; start: number; end: number; text: string }[]; reason?: string };
 
 /** Validate a request from the harness (fixed shape; anything else is ignored). */
 export function parseDreamRequest(message: unknown): DreamRequest | undefined {
@@ -74,23 +76,38 @@ export function parseDreamRequest(message: unknown): DreamRequest | undefined {
  * protected file. Anything but accept or flag is a reject; a failed review
  * is a reject as well (the dream is retried later, nothing is lost).
  */
-export async function reviewDreamRequest(request: DreamRequest, options: { protected: readonly string[]; reviewer?: MemoryReviewer; directives: string; signal: AbortSignal }): Promise<{ response: DreamResponse; verdict: Verdict; jiminy?: JiminyVerdict & { model?: string }; error?: string; files: { path: string; protected: boolean; change: 'created' | 'modified' | 'deleted' }[] }> {
-  const files = request.files.map(f => ({ path: f.path, protected: isProtectedPath(f.path, options.protected), change: f.status === 'A' ? 'created' as const : f.status === 'D' ? 'deleted' as const : 'modified' as const }));
+export async function reviewDreamRequest(request: DreamRequest, options: { protected: readonly string[]; reviewer?: MemoryReviewer; directives: string; signal: AbortSignal;
+  /** Reads a file at the branch head (so Jiminy can name lines to drop). Without it, no lines are dropped. */
+  read?: (head: string, path: string) => Promise<string | undefined> }): Promise<{ response: DreamResponse; verdict: Verdict; jiminy?: JiminyVerdict & { model?: string }; error?: string; files: { path: string; protected: boolean; change: 'created' | 'modified' | 'deleted'; upkeep?: boolean }[] }> {
+  // MEMORY.md changed only by link lines (index upkeep) is reviewed with the rest, as after a merge (see isIndexUpkeep).
+  const fileDiff = (path: string) => { const start = request.diff.indexOf(`diff --git a/${path} b/${path}\n`); if (start < 0) return ''; const next = request.diff.indexOf('\ndiff --git ', start + 1); return request.diff.slice(start, next < 0 ? undefined : next); };
+  const files = request.files.map(f => {
+    const isProtected = isProtectedPath(f.path, options.protected);
+    const upkeep = isProtected && !request.diff_truncated && f.status === 'M' && isIndexUpkeep(f.path, fileDiff(f.path));
+    return { path: f.path, protected: isProtected, change: f.status === 'A' ? 'created' as const : f.status === 'D' ? 'deleted' as const : 'modified' as const, ...(upkeep ? { upkeep: true } : {}) };
+  });
   const provenance: Omit<TurnProvenance, 'conversationId'> = { actor: { kind: 'dreaming' }, sources: request.untrusted_tool_results ? [{ kind: 'tool', label: 'tool results in the reflected transcript' }] : [], writer: 'reflection' };
-  const unprotected = files.filter(f => !f.protected);
+  const unprotected = files.filter(f => !f.protected || f.upkeep);
   const floor = reviewFloor(unprotected, provenance).floor;
   let verdict: Verdict = floor;
   let jiminy: (JiminyVerdict & { model?: string }) | undefined;
   let error: string | undefined;
   if (options.reviewer && unprotected.length) {
-    try { jiminy = await options.reviewer({ files, diff: request.diff, provenance, directives: options.directives }, options.signal); verdict = stricter(floor, jiminy.verdict); }
+    const numbered: { path: string; text: string }[] = [];
+    if (options.read) for (const f of unprotected.filter(f => f.change !== 'deleted').slice(0, 10)) { const text = await options.read(request.head, f.path).catch(() => undefined); if (text !== undefined) numbered.push({ path: f.path, text: text.slice(0, 8000) }); }
+    try { jiminy = await options.reviewer({ files, diff: request.diff, provenance, directives: options.directives, ...(numbered.length ? { numbered } : {}) }, options.signal); verdict = stricter(floor, jiminy.verdict); }
     catch (e) { error = e instanceof Error && /^[a-z_]{1,40}$/.test(e.message) ? e.message : 'review_failed'; verdict = 'reject'; }
   } else if (!unprotected.length) verdict = 'reject';
-  if (files.some(f => f.protected) && verdict !== 'reject') verdict = stricter(verdict, failedReview([])); // at least flag
+  if (files.some(f => f.protected && !f.upkeep) && verdict !== 'reject') verdict = stricter(verdict, failedReview([])); // at least flag
+  // Lines Jiminy dropped: only in unprotected files (the harness checks they are added lines with this exact text).
+  const drop = jiminy?.drop?.filter(d => unprotected.some(f => f.path === d.path)) ?? [];
+  // One decision per merge: a dream that touched a protected file and also needs lines dropped is rejected (it is retried later).
+  if (drop.length && files.some(f => f.protected && !f.upkeep)) verdict = 'reject';
   const ok = verdict === 'accept' || verdict === 'flag';
-  const reason = (jiminy?.reason ?? error ?? (files.some(f => f.protected) ? 'protected memory files cannot change in a dream' : '')).slice(0, 300);
+  const reason = (jiminy?.reason ?? error ?? (files.some(f => f.protected && !f.upkeep) ? 'protected memory files cannot change in a dream' : '')).slice(0, 300);
   const response: DreamResponse = !ok ? { type: 'reflection_merge_response', request_id: request.request_id, decision: 'reject', ...(reason ? { reason } : {}) }
-    : files.some(f => f.protected) ? { type: 'reflection_merge_response', request_id: request.request_id, decision: 'approve_paths', approve_paths: unprotected.map(f => f.path), ...(reason ? { reason } : {}) }
+    : drop.length ? { type: 'reflection_merge_response', request_id: request.request_id, decision: 'approve_edits', drop, ...(reason ? { reason } : {}) }
+    : files.some(f => f.protected && !f.upkeep) ? { type: 'reflection_merge_response', request_id: request.request_id, decision: 'approve_paths', approve_paths: unprotected.map(f => f.path), ...(reason ? { reason } : {}) }
       : { type: 'reflection_merge_response', request_id: request.request_id, decision: 'approve', ...(reason ? { reason } : {}) };
-  return { response, verdict: ok && files.some(f => f.protected) ? 'flag' : verdict, ...(jiminy ? { jiminy } : {}), ...(error ? { error } : {}), files };
+  return { response, verdict: ok && files.some(f => f.protected && !f.upkeep) ? 'flag' : verdict, ...(jiminy ? { jiminy } : {}), ...(error ? { error } : {}), files };
 }

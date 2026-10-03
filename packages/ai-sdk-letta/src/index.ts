@@ -18,15 +18,15 @@ export {
   type AgentDefinition, type WebSearchSettings, type MemorySettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
 export { openLettaAgent, createLettaAgent, openAgentHost, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
-export { MemoryJournal, AGENT_EMAIL, REVIEW_EMAIL, harnessCommit, type MemoryRewindPlan, type TurnCommits } from './memory-journal.js';
+export { MemoryJournal, AGENT_EMAIL, REVIEW_EMAIL, harnessCommit, type MemoryRewindPlan, type TurnCommits, type LineDrop } from './memory-journal.js';
 export {
-  turnProvenance, withSource, sourceOfTool, adminClean, untrusted, provenanceTrailers, parseProvenanceTrailers, provenanceLabel, blameProvenance, sections, commitTrailers, PROVENANCE_TRAILERS, TRUSTED_TOOLS,
+  turnProvenance, trustEligible, withSource, sourceOfTool, adminClean, untrusted, provenanceTrailers, parseProvenanceTrailers, provenanceLabel, blameProvenance, sections, commitTrailers, PROVENANCE_TRAILERS, TRUSTED_TOOLS,
   type TurnProvenance, type ContentSource, type ProvenanceActor, type LineProvenance, type SectionProvenance,
 } from './provenance.js';
-export { MemoryGuard, isProtectedPath, isIndexUpkeep, reviewFloor, failedReview, DEFAULT_PROTECTED_MEMORY, DEFAULT_MEMORY_SAFETY, type MemoryReview, type MemoryRefusal, type MemoryGuardEvents, type MemoryGuardOptions, type MemorySafetySettings } from './memory-guard.js';
+export { MemoryGuard, matchClaimPerson, type ClaimMember, isProtectedPath, isIndexUpkeep, DEFAULT_AUTOMATION_FLOOR, reviewFloor, failedReview, DEFAULT_PROTECTED_MEMORY, DEFAULT_MEMORY_SAFETY, type MemoryReview, type MemoryRefusal, type MemoryGuardEvents, type MemoryGuardOptions, type MemorySafetySettings } from './memory-guard.js';
 export {
   lettaReviewer, sweepReviewers, reviewerSessionOptions, reviewPrompt, validateVerdict, stricter, chooseReviewerModel, modelFamily, VERDICTS, VERDICT_SCHEMA, JIMINY_INSTRUCTIONS, JIMINY_NAME, REVIEWER_PREFERENCES,
-  type Verdict, type JiminyVerdict, type ReviewRequest, type MemoryReviewer, type LettaReviewerOptions,
+  type Verdict, type JiminyVerdict, type JiminyDrop, type JiminyClaim, type ReviewRequest, type MemoryReviewer, type LettaReviewerOptions,
 } from './jiminy.js';
 export { dreamHookSupported, dreamHookCommand, parseDreamRequest, reviewDreamRequest, DREAM_HOOK_CAPABILITY, type DreamRequest, type DreamResponse } from './dream-review.js';
 export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenAgentsOf, transcriptsDirectory, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';

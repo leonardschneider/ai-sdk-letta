@@ -10,9 +10,9 @@ import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
-import { DecisionBell, DecisionsContext, MemoryReviewCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
+import { ClaimCard, DecisionBell, DecisionsContext, MemoryReviewCard, NoticeCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
-import { decideError, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
+import { decideError, mayReview, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
 import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
@@ -26,6 +26,8 @@ import { rewindError, type RewindSummary } from './rewind-model.js';
 import { LatexContext } from './markdown.js';
 import { resolveLatex, type LatexOverride } from './latex.js';
 import { LatexMenu } from './latex-menu.js';
+import { TrustMenu } from './trust-menu.js';
+import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
@@ -357,7 +359,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   /** Team mode: you may answer or stop the live turn if you sent it or are an admin. */
   const mayAct = !team || isAdmin || !liveAuthor || liveAuthor.id === team.user.id;
 
-  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride; replyMode?: ReplyModeOverride }) {
+  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride; replyMode?: ReplyModeOverride; trustJiminy?: TrustOverride }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
@@ -388,6 +390,11 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     catch (e) { toast(metadataError(e), { tone: 'error' }); }
   }
 
+  /** A conversation's trust mode override (memory review); admins only on a team server. */
+  async function setTrust(id: string, value: TrustOverride) {
+    try { await patch(id, { trustJiminy: value }); toast(value === 'on' ? 'This conversation now trusts Jiminy with protected memory.' : value === 'off' ? 'Protected memory is strict in this conversation.' : 'This conversation follows the agent’s setting.'); }
+    catch (e) { toast(errorCode(e) === 'admin_required' ? 'Only an admin can change how protected memory is handled.' : metadataError(e), { tone: 'error' }); }
+  }
   /** A conversation's LaTeX override; the open conversation re-renders at once. */
   async function setLatex(id: string, value: LatexOverride) {
     try { await patch(id, { latex: value }); } catch (e) { toast(metadataError(e), { tone: 'error' }); }
@@ -688,9 +695,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [threadDecisions, team, isAdmin]);
-  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending' && d.kind !== 'memory-review') : undefined;
+  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending' && d.kind !== 'memory-review' && d.kind !== 'claim-confirmation' && d.kind !== 'memory-notice') : undefined;
   // Memory reviews of this conversation (held changes, and the ones decided while you watched): cards after the messages.
-  const memoryReviews = !current.draft ? [...threadDecisions.values()].filter(d => d.kind === 'memory-review' && (d.status === 'pending' || (d.decidedAt && Date.now() - Date.parse(d.decidedAt) < 10 * 60_000))) : [];
+  const memoryReviews = !current.draft ? [...threadDecisions.values()].filter(d => (d.kind === 'memory-review' || d.kind === 'claim-confirmation' || (d.kind === 'memory-notice' && mayReview(d, team?.user.id, !team || isAdmin))) && (d.status === 'pending' || (d.decidedAt && Date.now() - Date.parse(d.decidedAt) < 10 * 60_000))) : [];
   /** Open a decision from the bell: its conversation (switching agents on a team server). */
   const openDecision = useCallback((decision: FeedDecision) => {
     setDrawer(false);
@@ -738,6 +745,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
+            {memoryEnabled && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
@@ -752,7 +760,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                       {!readOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
-                {memoryReviews.map(decision => <MemoryReviewCard key={decision.id} decision={decision}/>)}
+                {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">
                 <div className="column footer-column">

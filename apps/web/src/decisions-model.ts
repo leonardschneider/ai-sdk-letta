@@ -12,9 +12,11 @@ export type DecisionView = {
   cancelledAt?: string; cancelReason?: 'withdrawn' | 'superseded' | 'archived'; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
   /** A web search result waiting for review (only `reviewer`, or an admin, may decide it); `stale`: "Search again" is offered. */
-  kind?: 'web-research' | 'memory-review'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  kind?: 'web-research' | 'memory-review' | 'claim-confirmation' | 'memory-notice'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  /** A claim the named person is asked to confirm (`claim-confirmation`), or an unconfirmed claim (`memory-notice`). */
+  claim?: { reviewId: string; person: { id: string; name: string }; requester: { id?: string; name: string }; statements: string[]; files: string[]; diff: string; answer?: 'yes' | 'no' | 'partly'; outcome?: string };
   /** A memory change held for a person (`memory-review`): removed until approved. `adminOnly`: it touches protected files. */
-  memory?: { reviewId: string; files: { path: string; protected: boolean; change: string }[]; diff: string; provenance: string; protected: boolean; adminOnly: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
+  memory?: { reviewId: string; files: { path: string; protected: boolean; change: string }[]; diff: string; provenance: string; protected: boolean; adminOnly: boolean; dropped?: { path: string; start: number; end: number; text: string }[]; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
 };
 /** A pending decision in the notification bell: with its agent and conversation. */
 export type FeedDecision = DecisionView & { agent: { id: string; name: string }; thread: { id: string; title: string } };
@@ -117,6 +119,7 @@ export function requestedId(result: unknown): string | undefined {
 /** Whether someone may review a web research or memory decision: the person whose turn it was, or an admin (protected memory: admins only; single-user app: always). */
 export function mayReview(decision: Pick<DecisionView, 'kind' | 'reviewer' | 'memory'>, me: string | undefined, admin: boolean): boolean {
   if (me === undefined || admin) return true;
+  if (decision.kind === 'claim-confirmation' || decision.kind === 'memory-notice') return decision.reviewer?.id === me;
   if (decision.kind === 'memory-review') return !decision.memory?.adminOnly && decision.reviewer?.id === me;
   return decision.kind !== 'web-research' || decision.reviewer?.id === me;
 }
@@ -126,4 +129,22 @@ export function memoryDecisionSummary(decision: Pick<DecisionView, 'status' | 'd
   const who = personName(decision.decidedBy, me);
   const failed = decision.memory?.outcome === 'failed';
   return decision.choice?.id === 'approve' ? `Approved by ${who}${failed ? ': re-applying failed' : decision.memory?.outcome === 'reapplied' ? ': re-applied' : ''}` : `Rejected by ${who}: kept removed`;
+}
+
+/**
+ * What a person may answer to a claim confirmation: the named person
+ * confirms or not (Yes, No, Partly); an admin may only reject (No); nobody
+ * else answers. The single-user app (`me` undefined): you are the only member.
+ */
+export function claimAnswers(decision: Pick<DecisionView, 'claim'>, me: string | undefined, admin: boolean): readonly ('yes' | 'no' | 'partly')[] {
+  if (!decision.claim) return [];
+  if (me === undefined || decision.claim.person.id === me) return ['yes', 'no', 'partly'];
+  return admin ? ['no'] : [];
+}
+/** The outcome line of a claim confirmation: "Bob confirmed it: re-applied", "Bob said no: kept removed". */
+export function claimSummary(decision: Pick<DecisionView, 'status' | 'decidedBy' | 'choice' | 'claim' | 'comment'>, me?: string): string | undefined {
+  if (decision.status !== 'decided' || !decision.claim) return undefined;
+  const who = capital(personName(decision.decidedBy, me));
+  const answer = decision.choice?.id;
+  return answer === 'yes' ? `${who} confirmed it: re-applied` : answer === 'partly' ? `${who} said partly: kept removed; the agent got their comment` : `${who} said no: kept removed${decision.decidedBy?.id !== decision.claim.person.id ? ' (rejected by an admin)' : ''}`;
 }

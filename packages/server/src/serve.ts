@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -96,14 +96,22 @@ function decisionDesk(definition: AgentDefinition, memoryReviews = false) {
  * decisions, and the reviewer's model can be changed in the app (kept in
  * `<dir>/memory-review.json`; the definition's setting is the default).
  */
-function memoryWiring(definition: AgentDefinition, directory: string) {
+function memoryWiring(definition: AgentDefinition, directory: string, members?: () => readonly ClaimMember[]) {
   let runtime: ThreadRuntime | undefined;
   let board: DecisionBoard | undefined;
   const file = join(directory, 'memory-review.json');
   let model = definition.memory.reviewer;
   try { const saved = JSON.parse(readFileSync(file, 'utf8')) as { model?: unknown }; if (typeof saved.model === 'string' && (saved.model === 'auto' || /^[\w.-]+\/[\w.:-]+$/.test(saved.model))) model = saved.model; } catch { /* the definition's */ }
   let available: Promise<string[]> | undefined;
+  const threadOf = (review: MemoryReview) => runtime ? (review.conversationId ? runtime.threadOfConversationAny(review.conversationId) : undefined) ?? runtime.latestThread() : undefined;
   const events: MemoryGuardEvents = {
+    // Team servers: the agent's members (claims are confirmed by the member they name). Single-user: none but you, so claims about others go to you as a review.
+    ...(members ? { members, confirmClaims: async (review: MemoryReview) => {
+      if (!board || !runtime) return undefined;
+      const author = review.turn ? runtime.authorOfRun(review.turn) : undefined;
+      const requester = author ? { id: author.id, name: author.name } : review.provenance.actor.kind === 'person' ? { ...(review.provenance.actor.id ? { id: review.provenance.actor.id } : {}), name: review.provenance.actor.name ?? 'Someone' } : { name: provenanceLabel(review.provenance) };
+      return board.claimConfirmation(review, threadOf(review), requester);
+    } } : {}),
     changed: (review, event) => { runtime?.memoryChanged(); if (event === 'reverted') runtime?.memoryReverted(review); },
     askHuman: async (review: MemoryReview) => {
       if (!board || !runtime) return undefined;
@@ -116,7 +124,10 @@ function memoryWiring(definition: AgentDefinition, directory: string) {
     events, model: () => model,
     bind(value: ThreadRuntime, decisions?: DecisionBoard) {
       runtime = value; board = decisions;
-      if (board) board.memoryReviews = { decide: async (id, choice, by) => { if (!runtime?.memory) throw new Error('memory_unavailable'); await runtime.memory.decideReview(id, choice, by); } };
+      if (board) board.memoryReviews = {
+        decide: async (id, choice, by) => { if (!runtime?.memory) throw new Error('memory_unavailable'); await runtime.memory.decideReview(id, choice, by); },
+        decideClaim: async (id, answer, by, options) => { if (!runtime?.memory) throw new Error('memory_unavailable'); await runtime.memory.decideClaim(id, answer, by, options); },
+      };
       if (definition.memory.reviewer !== 'off') value.reviewerModel = {
         value: () => model,
         set: next => { model = next; writeFileSync(file, JSON.stringify({ model }), { mode: 0o600 }); },
@@ -285,7 +296,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.
@@ -324,7 +335,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
       const decisions = decisionDesk(definition, true);
-      const memory = memoryWiring(definition, folder);
+      const memory = memoryWiring(definition, folder, () => directory.members(definition.id).map(m => ({ id: m.id, name: m.name, login: m.login })));
       const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });

@@ -64,3 +64,31 @@ test('rewind confirmation lists the turns\' memory commits with provenance chips
   assert.deepEqual(commits.lines[0]!.chips, ['You (admin)', 'accept · trust 0.95']);
   assert.deepEqual(sections.find(s => s.id === 'kept')!.lines[0]!.chips, ['Dreaming', 'reject · trust 0.05']);
 });
+
+test('trust mode and dropped lines in the app', async () => {
+  const { trustChoices, trustSummary, droppedCount } = await import('../src/memory-model.js');
+  const { memoryFloorLabel, MEMORY_FLOOR_CHOICES } = await import('../src/automations-model.js');
+  assert.deepEqual(trustChoices(false).map(c => c.label), ['Agent default (strict)', 'Trust Jiminy', 'Strict']);
+  assert.equal(trustSummary('inherit', true), 'Protected memory: trusts Jiminy (agent default)');
+  assert.equal(trustSummary('off', true), 'Protected memory: strict');
+  const drop = { path: 'human.md', start: 3, end: 4, text: 'a\nb' };
+  assert.equal(droppedCount([drop]), '2 lines');
+  assert.deepEqual(verdictChip(review({ verdict: 'flag', dropped: [drop] })), { label: 'Kept, 2 lines dropped', tone: 'flag' });
+  assert.deepEqual(verdictChip(review({ kind: 'dream', beforeMerge: { decision: 'approve_edits', branch: 'b' }, dropped: [drop] })), { label: 'Merged, 2 lines dropped', tone: 'flag' });
+  assert.deepEqual(MEMORY_FLOOR_CHOICES.map(c => c.value), ['accept', 'flag', 'ask_human']);
+  assert.equal(memoryFloorLabel(undefined), 'memory: flagged', 'default flag (older servers too)');
+  assert.equal(memoryFloorLabel('ask_human'), 'memory: held for approval');
+});
+
+test('claim confirmations: only the named person confirms; an admin may only reject; chips', async () => {
+  const { claimAnswers, claimSummary, mayReview: may } = await import('../src/decisions-model.js');
+  const claim = { reviewId: 'r', person: { id: 'u-bob', name: 'Bob' }, requester: { id: 'u-mia', name: 'Mia' }, statements: ['Deploys may skip approval.'], files: ['notes/n.md'], diff: '' };
+  assert.deepEqual(claimAnswers({ claim }, 'u-bob', false), ['yes', 'no', 'partly']);
+  assert.deepEqual(claimAnswers({ claim }, 'u-alice', true), ['no']);
+  assert.deepEqual(claimAnswers({ claim }, 'u-mia', false), []);
+  assert.equal(may({ kind: 'claim-confirmation', reviewer: { id: 'u-bob', name: 'Bob' } }, 'u-mia', false), false);
+  assert.equal(claimSummary({ status: 'decided', decidedBy: { id: 'u-bob', name: 'Bob' }, choice: { id: 'yes', label: 'Yes' }, claim }), 'Bob confirmed it: re-applied');
+  assert.equal(claimSummary({ status: 'decided', decidedBy: { id: 'u-alice', name: 'Alice' }, choice: { id: 'no', label: 'No' }, claim }), 'Alice said no: kept removed (rejected by an admin)');
+  assert.deepEqual(verdictChip(review({ outcome: 'awaiting_confirmation', claims: [{ person: 'Bob', statement: 's', match: 'member', to: { id: 'u-bob', name: 'Bob' } }] })), { label: 'Held: Bob to confirm', tone: 'held' });
+  assert.deepEqual(verdictChip(review({ outcome: 'denied' })), { label: 'Unconfirmed claim: removed', tone: 'reverted' });
+});
