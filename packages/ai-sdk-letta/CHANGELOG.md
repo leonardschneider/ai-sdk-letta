@@ -1,5 +1,13 @@
 # ai-sdk-letta
 
+## 0.11.0
+
+### Minor Changes
+
+- ad1f04c: A web search review nobody answers in time becomes a decision instead of expiring: the result is kept on the server, the agent ends its turn, and the card (and the bell) keep it with Approve, Reject and Reject with note, without a time limit. Only the person whose turn searched, or an admin, may review it. The outcome reaches the agent once as a new turn: the result labelled as untrusted with its age, or that it was dismissed with the note. After `webSearch.staleAfterMs` (default 7 days) "Search again" asks the agent to search anew. Without a decision store (terminal UI, plain scripts) reviews still expire.
+- 3415ba6: Web search reviews get their own per-agent time limit (`webSearch.reviewTimeoutMs` on the definition, 10–280 s, default 280 s: the Letta harness ends a tool call after 5 minutes) instead of the shared approval budget. An unanswered review expires cleanly ("Web research expired"): the agent gets none of the result and the conversation stays usable. Generic support: `PreparedCall.expires`, `InteractionRequest.expiresAt`, and the HTTP runtime waits for such prompts until they expire.
+- cd9305c: Add web search with human review: `webSearchTools` (`web_search`) searches your own SearXNG (`SEARXNG_URL`), reads the best pages on the server with SSRF protection and Mozilla Readability, and has a tool-less, memory-less Letta sub-agent summarize them into validated, capped JSON (summary, claims with sources, relevance-filtered sources). A person reviews each result in the app (Approve, Reject, Reject with a note) before the agent sees it, labelled as untrusted web research; unattended runs fail with `approval_required` unless their token pre-approves `web_search`.
+
 ## 0.10.0
 
 ### Minor Changes
