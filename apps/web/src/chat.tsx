@@ -10,6 +10,7 @@ import { Avatar } from './team.js';
 import type { Listened, MessageAuthor as Author, MessageSource } from './messages.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
+import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -24,7 +25,7 @@ export type InteractionState = { request?: InteractionRequest; outcome?: string;
 export const AuthorContext = createContext<string | undefined>(undefined);
 export const InteractionContext = createContext<InteractionState>({ approvalTools: new Set(), answer: async () => {} });
 /** Outcomes that mean the answer was delivered; the dock then collapses into the inline line. */
-export const deliveredOutcome = (outcome?: string) => !!outcome && outcome.startsWith('Response received');
+export const deliveredOutcome = (outcome?: string) => !!outcome && (outcome.startsWith('Response received') || outcome.startsWith('Not reviewed in time'));
 
 /* ------------------------------------------------------------------ */
 /* Messages                                                            */
@@ -100,10 +101,10 @@ function UserBubble() {
 }
 
 /** Questions stay ungrouped so they read as part of the conversation. */
-const groupTools = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [] });
+const groupTools = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [], 'tool-call:web_search': [] });
 
 function AssistantParts() {
-  return <MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
+  return <><MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
     {({ part, children }) => {
       switch (part.type) {
         case 'group-tools': return part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</>;
@@ -113,7 +114,20 @@ function AssistantParts() {
         default: return <></>;
       }
     }}
-  </MessagePrimitive.GroupedParts>;
+  </MessagePrimitive.GroupedParts><WebSourcesUnderReply/></>;
+}
+
+/** The sources of approved web research, as links under the agent's reply (once it has written something after searching). */
+function WebSourcesUnderReply() {
+  const searches = useAuiState(s => {
+    const parts = s.message.parts;
+    let last = -1;
+    parts.forEach((p, i) => { if (p.type === 'tool-call' && p.toolName === 'web_search') last = i; });
+    if (last < 0 || !parts.slice(last + 1).some(p => p.type === 'text' && p.text.trim())) return '';
+    return JSON.stringify(parts.flatMap(p => p.type === 'tool-call' && p.toolName === 'web_search' && p.result !== undefined ? [{ argsText: p.argsText, result: p.result }] : []));
+  });
+  if (!searches) return null;
+  return <ReplySources results={JSON.parse(searches) as { argsText: string; result: unknown }[]}/>;
 }
 
 /**
@@ -157,7 +171,15 @@ function phaseOf(result: unknown, isError?: boolean): ToolPhase { return result 
 function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'ask_user') return <QuestionLine {...props}/>;
   if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
+  if (props.toolName === 'web_search') return <WebSearchPart {...props}/>;
   return <ToolLine {...props}/>;
+}
+
+function WebSearchPart({ toolCallId, argsText, result }: ToolPartProps) {
+  const active = useContext(InteractionContext);
+  const pending = isWebResearch(active.request) && active.request!.toolCallId === toolCallId && result === undefined;
+  const decided = pending && active.sent?.id === active.request?.id ? active.sent : undefined;
+  return <WebResearchLine toolCallId={toolCallId} argsText={argsText} result={result} pending={pending} {...(decided ? { decided } : {})}/>;
 }
 
 /** A quiet, expandable line. The expanded view is friendly first; raw data stays nested and collapsed. */
@@ -311,6 +333,7 @@ export function InteractionDock({ onDismiss }: { onDismiss(): void }) {
   if (!request) return null;
   if (deliveredOutcome(outcome)) return null;
   // Someone else's turn: say who can answer, without controls.
+  if (waitingFor && !outcome && isWebResearch(request)) return <div className="dock" data-kind={request.kind}><WebResearchWaiting request={request} waitingFor={waitingFor}/></div>;
   if (waitingFor && !outcome) return <div className="dock" data-kind={request.kind}>
     <section className="card waiting-card" aria-label={request.kind === 'approval' ? 'Permission requested' : 'Question asked'}>
       <header className="card-head">{request.kind === 'approval' ? <ShieldAlert size={16} aria-hidden="true"/> : <MessageCircleQuestion size={16} aria-hidden="true"/>}<span>{request.kind === 'approval' ? 'Permission requested' : 'Question asked'}</span></header>
@@ -319,7 +342,9 @@ export function InteractionDock({ onDismiss }: { onDismiss(): void }) {
     </section>
   </div>;
   return <div className="dock" data-kind={request.kind}>
-    {request.kind === 'approval'
+    {isWebResearch(request)
+      ? <WebResearchCard key={request.id} request={request} outcome={outcome} answer={answer} onDismiss={onDismiss}/>
+      : request.kind === 'approval'
       ? <ApprovalCard key={request.id} request={request} outcome={outcome} answer={answer} onDismiss={onDismiss}/>
       : <QuestionCard key={request.id} request={request} outcome={outcome} answer={answer} onDismiss={onDismiss}/>}
   </div>;

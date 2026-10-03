@@ -9,6 +9,13 @@ It includes the Atlassian Document Format JSON schema from
 Copyright Atlassian, licensed under the Apache License, Version 2.0, in
 src/adf-schema.json.
 
+The web search tool (src/web-fetch.ts, src/web-search.ts) follows ideas of
+mcp-searxng (https://github.com/ihor-sokoliuk/mcp-searxng, MIT) and Morphic
+(https://github.com/miurla/morphic, Apache-2.0); no code is copied from them.
+It uses SearXNG (AGPL-3.0) only as a separate service over HTTP and does not
+include it. Page text is extracted with @mozilla/readability (Apache-2.0)
+and linkedom (ISC), installed as dependencies.
+
 ai-sdk-letta is an independent project. It is not affiliated with, endorsed
 by, or sponsored by Letta or Vercel. "Letta" and "Vercel" are trademarks of
 their respective owners.

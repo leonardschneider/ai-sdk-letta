@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type TaskScheduler } from 'ai-sdk-letta';
+import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
@@ -29,6 +29,12 @@ export interface ServeOptions {
    * port, with per-trigger tokens managed in the app (Automations). Off unless set.
    */
   automation?: AutomationOptions;
+  /**
+   * Web search for agents with the `web_search` tool: the SearXNG base URL
+   * (or researcher options; see `OpenAgentOptions.webSearch`). Defaults to
+   * the `SEARXNG_URL` environment variable.
+   */
+  webSearch?: OpenAgentOptions['webSearch'];
 }
 
 /** The orchestrator `schedule_task` uses. `callbackUrl`: this server's automation API as the orchestrator reaches it (for example `http://host.docker.internal:4402` from Docker). */
@@ -61,9 +67,11 @@ export interface RunningServer {
  */
 function decisionDesk(definition: AgentDefinition) {
   let board: DecisionBoard | undefined;
-  const desk: DecisionDesk | undefined = decisionsEnabled(definition) ? {
+  // Agents with request_decision, and agents with web_search (a review nobody answers in time becomes a decision).
+  const desk: DecisionDesk | undefined = decisionsEnabled(definition) || webSearchEnabled(definition) ? {
     request: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.request(request, turn); },
     cancel: (turn, id) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.cancel(turn, id); },
+    review: (request, turn) => { if (!board) throw new Error('decisions_unavailable'); return board.desk.review!(request, turn); },
   } : undefined;
   return { desk, bind: (runtime: ThreadRuntime, directory: string, owner: string) => {
     if (!desk) return undefined;
@@ -72,13 +80,13 @@ function decisionDesk(definition: AgentDefinition) {
   } };
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch']): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages };
@@ -91,11 +99,11 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  * A host that keeps several conversations of one agent open at once (each its
  * own Letta session), for a shared runtime. The agent itself is opened on first use.
  */
-function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk): RuntimeHost {
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch']): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}) }).catch(error => { agent = undefined; throw error; });
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
@@ -156,7 +164,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const owner = 'local-gui';
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk), join(directory, 'state.json'), owner);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(directory, 'state.json'), owner);
     const board = decisions.bind(runtime, directory, owner);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
@@ -193,7 +201,7 @@ export async function startApiServer<TOOLS extends ToolSet>(definition: AgentDef
     const token = readFileSync(tokenPath, 'utf8').trim();
     const owner = options.owner ?? 'local-api';
     const port = options.port ?? DEFAULT_PORT + 1;
-    const runtime = new ThreadRuntime(host(definition, stateDirectory), join(directory, 'state.json'), owner);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, undefined, undefined, options.webSearch), join(directory, 'state.json'), owner);
     let stop: (() => Promise<void>) | undefined;
     const server = tokenApiApp(runtime, token, owner, port, () => stop!()).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
@@ -259,7 +267,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
       const decisions = decisionDesk(definition);
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length });
       runtimes.push(runtime);

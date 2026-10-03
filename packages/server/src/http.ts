@@ -202,11 +202,14 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.get('/v1/decisions/:id', (req, res) => res.json(board().get(req.params.id)));
   /**
    * Decide: `{ choice, comment? }` or `{ stop: true, comment? }`. Any member of
-   * the agent may decide, once: the first decider wins, later attempts get 409
+   * the agent may decide (web research reviews: only the person whose turn
+   * searched, or an admin), once: the first decider wins, later attempts get 409
    * `already_decided` with the decision as decided (who, what, when).
    */
   app.post('/v1/decisions/:id/decide', (req, res) => {
     const who = access ? access.author(req) : { id: LOCAL_USER_ID, name: 'You' };
+    // Web research keeps the review rule: the person whose turn searched, or an admin (403 otherwise).
+    if (access && !board().mayDecide(req.params.id, who, access.mayAct(req, {}))) throw new RuntimeFault('not_your_review', 403);
     try { res.json(board().decide(req.params.id, who, req.body)); }
     catch (error) { if (error instanceof DecisionConflict) return res.status(409).json({ error: error.code, decision: error.decision }); throw error; }
   });
@@ -304,23 +307,27 @@ export class DecisionFeed {
       signal?.addEventListener('abort', done, { once: true });
     });
   }
-  /** Pending decisions of the agents `visible` allows, oldest first. Decisions of archived conversations never show. */
-  pending(visible: (agentId: string) => boolean): FeedDecision[] {
-    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().flatMap(decision => {
+  /**
+   * Pending decisions of the agents `visible` allows, oldest first. Decisions
+   * of archived conversations never show; web research reviews show only to
+   * the people `mayReview` allows (the searcher and admins).
+   */
+  pending(visible: (agentId: string) => boolean, mayReview: (agentId: string, decision: PublicDecision) => boolean = () => true): FeedDecision[] {
+    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => decision.kind !== 'web-research' || mayReview(entry.agent.id, decision)).flatMap(decision => {
       const thread = entry.runtime.threadSummary(entry.owner, decision.threadId);
       return thread && !thread.archived ? [{ ...decision, agent: { ...entry.agent }, thread: { id: thread.id, title: thread.title } }] : [];
     })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 }
 /** `GET .../decisions?since=<version>`: `{ version, decisions }`, at once or when they change (about 25 seconds at most). */
-export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Request) => (agentId: string) => boolean): express.RequestHandler {
+export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Request) => (agentId: string) => boolean, mayReview?: (req: express.Request) => (agentId: string, decision: PublicDecision) => boolean): express.RequestHandler {
   return async (req, res) => {
     const since = req.query.since === undefined ? -1 : Number(req.query.since);
     if (!Number.isSafeInteger(since)) throw new RuntimeFault('invalid_cursor', 400);
     const control = new AbortController();
     res.on('close', () => control.abort());
     const version = since === feed.version ? await feed.waitForChange(since, 25_000, control.signal) : feed.version;
-    if (!res.writableEnded && !res.destroyed) res.json({ version, decisions: feed.pending(visible(req)) });
+    if (!res.writableEnded && !res.destroyed) res.json({ version, decisions: feed.pending(visible(req), mayReview?.(req)) });
   };
 }
 
@@ -489,7 +496,8 @@ export function teamApp(options: TeamAppOptions) {
     }, automation.endpoint);
     app.use('/api/agents/:agent/automations', member, (req, res, next) => { (req as unknown as Record<symbol, string>)[AGENT] = String(req.params.agent); routes(req, res, next); });
   }
-  app.get('/api/decisions', decisionFeedRoute(feed, req => { const user = who(req)?.user; return agentId => !!user && !!directory.role(agentId, user.id); }));
+  app.get('/api/decisions', decisionFeedRoute(feed, req => { const user = who(req)?.user; return agentId => !!user && !!directory.role(agentId, user.id); },
+    req => { const user = who(req)?.user; return (agentId, decision) => !!user && (directory.role(agentId, user.id) === 'admin' || decision.reviewer?.id === user.id); }));
   app.get('/api/agents/:agent/members', member, (req, res) => res.json({ members: directory.members(String(req.params.agent), actor(req).id), you: { role: (req as unknown as { role: string }).role } }));
   // Membership changes can change the reply mode in effect ("auto" depends on how many people share the agent): tell open pages.
   const membersChanged = (agentId: string) => agents.get(agentId)?.runtime.membersChanged();

@@ -19,6 +19,8 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
+import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
+import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -75,6 +77,14 @@ export interface OpenAgentOptions {
    * it the decision tools answer `decisions_unavailable`.
    */
   decisions?: DecisionDesk;
+  /**
+   * Web search for the `web_search` tool: a SearXNG base URL (with the
+   * default summarizer, a tool-less Letta sub-agent on the definition's
+   * model), or your own researcher options or {@link WebResearcher}.
+   * Defaults to the `SEARXNG_URL` environment variable. Without either, the
+   * tool answers `web_search_unavailable`.
+   */
+  webSearch?: string | (Partial<WebResearcherOptions> & Pick<WebResearcherOptions, 'search'>) | WebResearcher;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -179,7 +189,7 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'webSearch'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -255,6 +265,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       resources = await openResources(paths, identity.agentId, titles);
     }
     const persist = options.traces === false ? undefined : typeof options.traces === 'function' ? options.traces : fileTraceWriter(paths.traces);
+    const researcher = webSearchEnabled(definition) ? await webResearcher(definition, options.webSearch, join(paths.root, 'web-search'), backend) : undefined;
     // Per-user secrets (Atlassian tokens) live outside the resources, so neither the agent nor the sandbox can read them.
     const credentials = atlassianEnabled(definition) ? new CredentialStore(paths.credentials) : undefined;
     const defaultActor = options.defaultActor === undefined ? LOCAL_ACTOR : options.defaultActor ?? undefined;
@@ -330,11 +341,19 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
         const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
         const desk = options.decisions && decisionsEnabled(definition) ? options.decisions : undefined;
+        // Web search reviews not answered in time become decisions, also for agents without the decision tools.
+        const reviewDesk = researcher && options.decisions?.review ? options.decisions : undefined;
         // A requested decision pauses the work: the turn must end with a reply (never a silent "listened"), and no further tools run.
         const requested = () => { turnPaused = true; turnSilence = false; };
         const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
           ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
-          ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}) });
+          ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
+          ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, reviewTimeoutMs: definition.webSearch.reviewTimeoutMs, ...(turnActor ? { actor: turnActor } : {}),
+            // A result nobody reviewed in time waits as a decision (when the host keeps them); the rest of the turn pauses.
+            ...(reviewDesk ? { escalate: async (research: WebResearch, toolCallId: string) => {
+              const recorded = await reviewDesk.review!({ research, staleAfterMs: definition.webSearch.staleAfterMs }, { conversationId, toolCallId, ...(turnActor ? { actor: turnActor } : {}) });
+              requested(); return recorded;
+            } } : {}) } } : {}) });
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         const exposed = listening ? { ...definition.tools, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : definition.tools;
@@ -345,7 +364,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const bridge = createToolBridge({
           tools: exposed, permissions: listening ? { ...definition.permissions, [STAY_SILENT_TOOL]: 'allow' } : definition.permissions, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
           ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
-          toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}) },
+          toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
+            // A search (searching, reading, summarizing) has its own deadline; leave it room to report it.
+            ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           unattended: () => turnUnattended,
           paused: () => turnPaused,
@@ -411,6 +432,22 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       close,
     };
   } catch (error) { await close(); throw error; }
+}
+
+/**
+ * The researcher of the `web_search` tool, from the host option or
+ * `SEARXNG_URL`. The default summarizer is a fresh tool-less, memory-less
+ * Letta sub-agent per search on the definition's model (see
+ * `lettaSummarizer`); summarizers left by a crash are deleted first.
+ */
+async function webResearcher(definition: AgentDefinition, option: OpenAgentOptions['webSearch'], directory: string, backendDirectory: string): Promise<WebResearcher | undefined> {
+  if (option && typeof option === 'object' && 'research' in option) return option;
+  const configured = option ?? process.env.SEARXNG_URL?.trim();
+  if (!configured) return undefined;
+  const settings = typeof configured === 'string' ? { search: configured } : configured;
+  const summarize = settings.summarize ?? lettaSummarizer({ model: definition.model, directory, backendDirectory });
+  if (!settings.summarize) await sweepWebSummarizers({ directory, backendDirectory }).catch(() => 0);
+  return createWebResearcher({ ...settings, summarize });
 }
 
 /** Open an agent, or throw if no conversation was selected. */

@@ -4,7 +4,7 @@ import type { UIMessage, UserContent } from 'ai';
 import type { DecisionBoard } from './decisions.js';
 import {
   REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
-  decisionOutcomeNote,
+  decisionOutcomeNote, webResearchOutcomeNote,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
   type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
@@ -38,7 +38,9 @@ export type RunSource = { kind: 'automation' | 'schedule'; via: 'n8n' | 'conduct
  * which decision, what was decided and by whom. Shown in the app as a compact
  * "Decided by …" line instead of a message bubble.
  */
-export type RunDecision = { id: string; outcome: 'decided' | 'stopped'; question: string; by: { id: string; name: string }; choice?: { id: string; label: string }; comment?: string };
+export type RunDecision = { id: string; outcome: 'decided' | 'stopped'; question: string; by: { id: string; name: string }; choice?: { id: string; label: string }; comment?: string;
+  /** `web-research`: a web search result reviewed later (`choice.id` is `approve`, `reject` or `search_again`; `age`: how old the result was then). */
+  kind?: 'web-research'; age?: string };
 /** How an automation's turn runs: unattended (nobody is asked), with the tools pre-approved for it and the reply mode it asks for. */
 export type RunAutomation = { source: RunSource; preApproved: readonly string[]; onBehalfOf?: string; replyMode?: ReplyMode };
 /**
@@ -149,7 +151,9 @@ export class RuntimeFault extends Error {
 }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 /** Only app-defined, fixed failure codes (e.g. user_denied) are surfaced; never free-form error text. */
-const failureReasons = new Set(['approval_required', 'question_required', 'unattended_stopped', 'user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
+/** Time a self-expiring prompt (see `InteractionRequest.expiresAt`) is given beyond its expiry, for the tool to withdraw it. */
+const EXPIRY_MARGIN_MS = 15_000;
+const failureReasons = new Set(['review_expired', 'approval_required', 'question_required', 'unattended_stopped', 'user_denied', 'approval_cancelled', 'tool_denied', 'tool_cancelled', 'tool_timeout', 'tool_failed', 'invalid_arguments', 'interaction_unavailable', 'permission_denied', 'duplicate_or_limit', 'tool_output_limit']);
 /** HTTP status for a refused file. */
 const fileStatus = (code: string) => code === 'file_too_large' ? 413 : code === 'file_not_found' ? 404 : ['conversation_files_full', 'files_too_many', 'file_exists', 'resources_full'].includes(code) ? 409 : code === 'resources_busy' ? 503 : 400;
 /** A FileInputError as a fixed-code RuntimeFault; anything else unchanged. */
@@ -203,7 +207,7 @@ export function displayRun(run: Run): UIMessage[] {
 /** Run fields of an automation's turn. */
 const automationFields = (automation?: RunAutomation): Partial<Run> => automation ? { source: { ...automation.source }, unattended: { preApproved: [...automation.preApproved], ...(automation.onBehalfOf ? { onBehalfOf: automation.onBehalfOf } : {}) }, ...(automation.replyMode ? { replyModeOverride: automation.replyMode } : {}) } : {};
 /** What the browser may know about a decision's outcome turn (no user IDs beyond the decider's). */
-export const publicDecisionRun = (decision: RunDecision) => ({ id: decision.id, outcome: decision.outcome, question: decision.question, by: { ...decision.by }, ...(decision.choice ? { choice: { ...decision.choice } } : {}), ...(decision.comment ? { comment: decision.comment } : {}) });
+export const publicDecisionRun = (decision: RunDecision) => ({ id: decision.id, outcome: decision.outcome, question: decision.question, by: { ...decision.by }, ...(decision.choice ? { choice: { ...decision.choice } } : {}), ...(decision.comment ? { comment: decision.comment } : {}), ...(decision.kind ? { kind: decision.kind } : {}), ...(decision.age ? { age: decision.age } : {}) });
 /** What the browser may know about a run's source (no token ID). */
 export const publicSource = (source: RunSource) => ({ kind: source.kind, via: source.via, name: source.name });
 const sameImages = (a: RunImage[] = [], b: RunImage[] = []) => a.length === b.length && a.every((image, index) => image.sha256 === b[index]!.sha256);
@@ -1012,22 +1016,31 @@ export class ThreadRuntime {
     let timer = setTimeout(expire, remaining);
     // Human reading time does not consume inference time, but the whole turn
     // remains bounded even if the browser is abandoned or prompts repeat.
-    const hardTimer = setTimeout(expire, this.deadlineMs + this.humanWaitMs);
+    let hardDeadline = Date.now() + this.deadlineMs + this.humanWaitMs;
+    let hardTimer = setTimeout(expire, this.deadlineMs + this.humanWaitMs);
     let disconnect = () => {};
     try {
       disconnect = session.agent.interactions.connect((request, signal) => new Promise((resolve, reject) => {
         clearTimeout(timer);
         remaining = Math.max(1, remaining - (Date.now() - resumedAt));
         const waitingAt = Date.now();
-        timer = setTimeout(expire, Math.max(1, remainingWait));
+        // A prompt that expires on its own (a web search review) waits until then, plus a margin for the tool to
+        // withdraw it, instead of the shared human-wait budget; the turn's hard limit moves with it.
+        const expiresAt = request.expiresAt ? Date.parse(request.expiresAt) : NaN;
+        const ownExpiry = Number.isFinite(expiresAt) && expiresAt > waitingAt;
+        const wait = ownExpiry ? expiresAt - waitingAt + EXPIRY_MARGIN_MS : remainingWait;
+        timer = setTimeout(expire, Math.max(1, wait));
+        if (ownExpiry && waitingAt + wait + remaining > hardDeadline) {
+          clearTimeout(hardTimer); hardDeadline = waitingAt + wait + remaining; hardTimer = setTimeout(expire, hardDeadline - waitingAt);
+        }
         const resume = () => {
-          clearTimeout(timer); remainingWait -= Date.now() - waitingAt;
+          clearTimeout(timer); if (!ownExpiry) remainingWait -= Date.now() - waitingAt;
           resumedAt = Date.now(); timer = setTimeout(expire, remaining);
         };
         const abort = () => {
           if (lane.pending?.request.id === request.id) {
             lane.pending = undefined;
-            this.emit(run, 'interaction_ended', { id: request.id, code: timedOut ? 'timed_out' : 'cancelled' });
+            this.emit(run, 'interaction_ended', { id: request.id, code: timedOut ? 'timed_out' : ownExpiry && Date.now() >= expiresAt - 1000 ? 'expired' : 'cancelled' });
             resume();
           }
           reject(new RuntimeFault('interaction_cancelled'));
@@ -1054,7 +1067,7 @@ export class ThreadRuntime {
         ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
       // Automation turns are unattended: nothing prompts anyone (see UnattendedPolicy), and they carry their run ID to show their source in history.
       // What the agent should know about decisions: this turn brings one's outcome, or one is still pending in this conversation.
-      const reminder = run.decision ? decisionOutcomeNote(run.decision.outcome) : this.decisions?.pendingNote(run.threadId);
+      const reminder = run.decision ? (run.decision.kind === 'web-research' ? webResearchOutcomeNote(run.decision.choice?.id === 'approve' ? 'approve' : run.decision.choice?.id === 'search_again' ? 'search_again' : 'reject') : decisionOutcomeNote(run.decision.outcome)) : this.decisions?.pendingNote(run.threadId);
       const decision = { ...(reminder ? { reminder } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via } } : {};
       const result = await session.agent.stream(typeof content === 'string'

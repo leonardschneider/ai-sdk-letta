@@ -1,6 +1,6 @@
 /** Human label for a tool or field name, e.g. `fetchWeather_now` → "Fetch Weather now". */
 export function friendlyName(value: string): string {
-  return ({ ask_user: 'Question', request_decision: 'Decision request', cancel_decision: 'Withdraw decision', run_command: 'Command', run_command_online: 'Command with internet access', atlassian_request: 'Atlassian', atlassian_fetch: 'Atlassian fetch', atlassian_update: 'Atlassian update' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
+  return ({ ask_user: 'Question', request_decision: 'Decision request', cancel_decision: 'Withdraw decision', run_command: 'Command', run_command_online: 'Command with internet access', atlassian_request: 'Atlassian', atlassian_fetch: 'Atlassian fetch', atlassian_update: 'Atlassian update', web_search: 'Web search' } as Record<string, string>)[value] ?? value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
 }
 export function parseArgs(value?: string): Record<string, unknown> {
   try { const parsed: unknown = JSON.parse(value ?? '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
@@ -187,6 +187,7 @@ const reasonText: Record<string, string> = {
   approval_required: 'Not run: this turn was started by an automation and nobody could approve it. Pre-approve the tool for that automation, or do it here.',
   question_required: 'Not asked: this turn was started by an automation and nobody could answer.',
   unattended_stopped: 'Not run: the automation’s turn had already stopped for approval.',
+  review_expired: 'Nobody reviewed this in time, so it expired and the agent got none of it.',
   decision_pending: 'Not run: the agent had asked for a decision, so the work paused until someone decides.',
 };
 export function failureText(result: unknown): string {

@@ -11,11 +11,15 @@ export type DecisionView = {
   decidedBy?: DecisionPerson; choice?: DecisionOption; comment?: string; decidedAt?: string;
   cancelledAt?: string; cancelReason?: 'withdrawn' | 'superseded' | 'archived'; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
+  /** A web search result waiting for review (only `reviewer`, or an admin, may decide it); `stale`: "Search again" is offered. */
+  kind?: 'web-research'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
 };
 /** A pending decision in the notification bell: with its agent and conversation. */
 export type FeedDecision = DecisionView & { agent: { id: string; name: string }; thread: { id: string; title: string } };
 /** What a decision's outcome turn carries (`metadata.decision` of its message). */
-export type DecisionOutcome = { id: string; outcome: 'decided' | 'stopped'; question: string; by: { id: string; name: string }; choice?: { id: string; label: string }; comment?: string };
+export type DecisionOutcome = { id: string; outcome: 'decided' | 'stopped'; question: string; by: { id: string; name: string }; choice?: { id: string; label: string }; comment?: string;
+  /** `web-research`: a web search result reviewed later; `question` is its query, `age` how old it was then. */
+  kind?: 'web-research'; age?: string };
 
 /** "just now", "3 min ago", "2 h ago", "yesterday", "3 days ago", then a date. */
 export function ago(iso: string, now = Date.now()): string {
@@ -54,8 +58,13 @@ export function decisionSummary(decision: Pick<DecisionView, 'status' | 'decided
   return 'Withdrawn by the agent';
 }
 /** The line where a decision's outcome reached the agent: "Decided by Mia: CSV table", "Mia stopped this work". */
-export function outcomeSummary(outcome: Pick<DecisionOutcome, 'outcome' | 'by' | 'choice'>, me?: string): string {
+export function outcomeSummary(outcome: Pick<DecisionOutcome, 'outcome' | 'by' | 'choice'> & Partial<Pick<DecisionOutcome, 'kind' | 'age' | 'question'>>, me?: string): string {
   const who = personName(outcome.by, me);
+  if (outcome.kind === 'web-research') {
+    const id = outcome.choice?.id;
+    return id === 'approve' ? `Web research approved by ${who}${outcome.age ? ` · from ${outcome.age}` : ''}: ${outcome.question ?? ''}`
+      : id === 'search_again' ? `${capital(who)} asked for a new search: ${outcome.question ?? ''}` : `Web research dismissed by ${who}: ${outcome.question ?? ''}`;
+  }
   return outcome.outcome === 'stopped' ? `${capital(who)} stopped this work` : `Decided by ${who}: ${outcome.choice?.label ?? 'an option'}`;
 }
 /** Who asked, for the card and the bell: "Asked by Olivia", "Asked by you", "From n8n · Weekly report". */
@@ -80,6 +89,8 @@ export function decideError(code: string, decision?: DecisionView, me?: string):
     decision_cancelled: 'This decision is no longer open (the agent withdrew or replaced it). Nothing was sent.',
     conversation_archived: 'The conversation is archived. Restore it to decide.',
     invalid_input: 'Choose an option (comments up to 1,000 characters).',
+    not_your_review: 'Only the person whose message started this search, or an admin, can review it.',
+    not_stale: 'This result isn’t old enough to search again yet. Approve or reject it.',
     not_found: 'That decision is gone, or you no longer have access to this agent.',
     session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
   } as Record<string, string>)[code] ?? 'Couldn’t send your decision. Nothing was sent; try again.';
@@ -90,7 +101,8 @@ export function knownOutcome(metadata: unknown): DecisionOutcome | undefined {
   const value = (metadata as { decision?: Partial<DecisionOutcome> } | undefined)?.decision;
   if (!value || typeof value.id !== 'string' || (value.outcome !== 'decided' && value.outcome !== 'stopped') || typeof value.question !== 'string' || !value.by || typeof value.by.name !== 'string' || typeof value.by.id !== 'string') return undefined;
   const choice = value.choice && typeof value.choice.id === 'string' && typeof value.choice.label === 'string' ? { id: value.choice.id, label: value.choice.label } : undefined;
-  return { id: value.id, outcome: value.outcome, question: value.question, by: { id: value.by.id, name: value.by.name }, ...(choice ? { choice } : {}), ...(typeof value.comment === 'string' && value.comment ? { comment: value.comment } : {}) };
+  return { id: value.id, outcome: value.outcome, question: value.question, by: { id: value.by.id, name: value.by.name }, ...(choice ? { choice } : {}), ...(typeof value.comment === 'string' && value.comment ? { comment: value.comment } : {}),
+    ...(value.kind === 'web-research' ? { kind: 'web-research' as const } : {}), ...(typeof value.age === 'string' && value.age ? { age: value.age.slice(0, 40) } : {}) };
 }
 /** The decision ID a `request_decision` result names, if the call succeeded. */
 export function requestedId(result: unknown): string | undefined {
@@ -98,4 +110,9 @@ export function requestedId(result: unknown): string | undefined {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return undefined; } }
   const data = value as { requested?: unknown; id?: unknown } | undefined;
   return data && data.requested === true && typeof data.id === 'string' ? data.id : undefined;
+}
+
+/** Whether someone may review a web research decision: the person whose turn searched, or an admin (single-user app: always). */
+export function mayReview(decision: Pick<DecisionView, 'kind' | 'reviewer'>, me: string | undefined, admin: boolean): boolean {
+  return decision.kind !== 'web-research' || me === undefined || admin || decision.reviewer?.id === me;
 }

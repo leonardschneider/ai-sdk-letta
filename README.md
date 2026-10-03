@@ -154,7 +154,7 @@ Both run [`examples/basic`](examples/basic). The first run creates a Letta
 agent named "Example Assistant"; later runs reopen it. Useful variables:
 `LETTA_MODEL` (model handle), `AGENT_ID` (logical ID, for a throwaway agent),
 `AI_SDK_LETTA_STATE_DIR` (state directory), `TEXT_STATS_PERMISSION=ask` (try
-approvals), `DECISIONS=1` (try [decisions](#decisions)). Pass options after `--`, for example `npm run gui -- --port 4500`
+approvals), `DECISIONS=1` (try [decisions](#decisions)), `WEB_SEARCH=1` with `SEARXNG_URL` (try [web search](#web-search); `WEB_SEARCH_REVIEW_MS` and `WEB_SEARCH_STALE_MS` set the review time and when "Search again" is offered). Pass options after `--`, for example `npm run gui -- --port 4500`
 or `npm run tui -- --new "Planning"`.
 
 To build your own agent, follow [Building your own agent](docs/building-your-own-agent.md),
@@ -530,6 +530,128 @@ defineAgent({ ...,
 Without the server (a plain script), the tool answers `decisions_unavailable`
 and the agent asks in its reply instead. Step by step:
 [the guide](docs/building-your-own-agent.md#6a-decisions-that-can-wait).
+
+### Web search
+
+The agent can search the web, with a person reviewing every result before
+the agent sees it. Add the tool and point the server at a
+[SearXNG](https://docs.searxng.org) instance you run yourself:
+
+```ts
+import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...webSearchTools, lookup_order },                           // web_search
+  permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS, lookup_order: 'ask' },  // web_search: 'ask' (never 'allow')
+});
+```
+
+```sh
+docker compose -f docs/searxng/compose.yaml up -d   # SearXNG on 127.0.0.1:8888 (pinned image, JSON enabled)
+SEARXNG_URL=http://127.0.0.1:8888 WEB_SEARCH=1 npm run gui
+```
+
+How a search works (`web_search({ query, purpose? })`):
+
+1. **The server searches** SearXNG's JSON API (up to 8 results; unsafe or
+   duplicate URLs dropped) and **reads the best 5 pages itself**: `http(s)`
+   only, never a private, loopback, link-local or otherwise internal address
+   (checked for every address a name resolves to, and again after every
+   redirect; the connection goes to the address that was checked), 12 s and
+   2 MB per page, no cookies, an honest user agent. Mozilla Readability (on
+   linkedom) extracts each page's readable text (scripts, styles, navigation
+   and hidden text left out), capped at 6,000 characters.
+2. **An isolated sub-agent summarizes.** A fresh, hidden Letta agent on the
+   same model gets the query, the purpose and the pages (as JSON data, with
+   instructions that page content is never to be followed), and answers with
+   JSON: a summary, claims citing their sources, and a relevance (0–1) and
+   one-line note per source. It has **no tools** (no server tools, toolset
+   `none`, an empty allow-list, every permission request denied; the session
+   must report no tools before anything is sent) and **no memory** (created
+   without MemFS, opened `stateless`). It is deleted right after the search,
+   with its conversation and the empty memory folder the local backend
+   creates; one left by a crash is deleted at the next start. It never
+   touches the main agent's memory, conversations, resources, sandbox or
+   integrations.
+3. **Our code validates and caps** the answer: the schema must match;
+   sources are only those that were read (the summarizer cannot add URLs);
+   sources below a relevance of 0.5 are dropped, then claims left without a
+   source and sources no claim cites; summary at most 1,200 characters, up
+   to 8 claims and 8 sources. Raw page text never reaches the main agent.
+   The whole search is bounded to 60 s.
+4. **A person reviews the result** in the app: a card with the query, the
+   summary, the claims with their sources as links, and how many sources
+   were dropped. **Approve**, **Reject**, or **Reject with a note**. Like
+   every approval, only the person whose message started the turn, or an
+   admin, can answer. The search line then collapses to "Web research
+   approved: …" or "Web research dismissed: …", and the sources of approved
+   research are listed as links under the agent's reply. The terminal UI
+   shows the same result as text (`y` approve, `n` reject).
+5. **Delivery.** Approved: the agent receives the summary, claims and
+   sources inside an `untrusted: true` result with a notice that it is web
+   content to weigh, never instructions to follow. Rejected: the agent is
+   told the search was dismissed (with the note, if any) and sees none of it.
+   A search that finds nothing relevant asks nobody and says so.
+
+**A review nobody answers in time becomes a decision.** How long the review
+card waits in the turn is a per-agent setting, `webSearch: { reviewTimeoutMs }`
+(10,000–280,000 ms; default 280,000). Answered in time, the agent continues in
+the same turn. Otherwise, just before the Letta harness ends the tool call
+(it ends every application tool call 300 s after it starts and refuses
+longer timeouts, so the turn itself cannot wait longer):
+
+- the result is kept on the server, with the conversation's
+  [decisions](#decisions) (`decisions.json`, 0600, survives restarts); the
+  agent still has none of it, is told the research awaits review, and ends
+  its turn. The conversation stays usable;
+- the card stays where the search was made, and the bell lists it, with
+  **Approve**, **Reject** and **Reject with note**, and no time limit. Unlike
+  other decisions, only the person whose message started the search, or an
+  admin of the agent, may review it (others get 403 and do not see it in the
+  bell);
+- the outcome reaches the agent once, as a new turn (the decisions' outcome
+  path): approved, the result labelled as untrusted web research with its age
+  ("from 2 hours ago"); rejected, that it was dismissed, with the note;
+- once the result is older than `webSearch.staleAfterMs` (default 7 days) the
+  card also offers **Search again**, which asks the agent to search anew.
+
+It never replaces the conversation's own pending decision, and
+`cancel_decision` does not withdraw it. Without a decision store (the terminal
+UI, or `openLettaAgent` used without the server) an unanswered review still
+expires: the agent is told "Web research expired" and gets none of it.
+
+```ts
+defineAgent({ ..., tools: { ...webSearchTools }, permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS },
+  webSearch: { reviewTimeoutMs: 120_000, staleAfterMs: 2 * 86_400_000 } });  // 2 minutes in the turn; "Search again" after 2 days
+```
+
+**Unattended runs** (automations) cannot be reviewed: `web_search` fails with
+`approval_required` before anything is searched, unless the automation's
+token pre-approves `web_search`; then results are delivered without review,
+labelled as unreviewed (`reviewed: false`). That suits an automated scraper or
+a scheduled digest whose output a person reads later anyway; pre-approve it
+only for automations whose prompts you control.
+
+Configure the search with `SEARXNG_URL`, or `webSearch` in the server and
+`openAgentHost` options (a URL, or `{ search, summarize?, limits? }` to use
+another engine or summarizer; `limits` changes the time and count bounds
+and the relevance threshold). Without it, the tool answers
+`web_search_unavailable`.
+
+**SearXNG** ([`docs/searxng`](docs/searxng)): the compose file runs the
+official image, pinned by tag and digest, published on 127.0.0.1 only,
+read-only, with dropped capabilities, and `settings.yml` enables the `json`
+format. The limiter (bot protection for public instances; it needs a Valkey
+server) is off: the instance has one client, on loopback, which bounds its
+own searches. Turn it on if you ever expose the instance. Set
+`SEARXNG_SECRET` to your own random string. SearXNG is licensed under the
+AGPL-3.0; ai-sdk-letta never bundles or links it: it runs as a separate
+service, and the server only talks to it over HTTP. The page reading
+follows ideas of [mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng)
+(MIT) and [Morphic](https://github.com/miurla/morphic) (Apache-2.0); no code
+is copied from them.
+
+Step by step: [the guide](docs/building-your-own-agent.md#7-optional-built-ins-files-shell-images-atlassian-web-search).
 
 ### Shell commands (sandbox)
 
@@ -1074,6 +1196,12 @@ single-user agent before it is given up (`start_timeout`).
   first. Redirects are never followed with a token, and the app's own
   Atlassian previews never let the browser contact Atlassian (or Sentry: the
   renderer's error reporting is built out).
+- **Web content is reviewed and isolated.** `web_search` reads pages on the
+  server, never from private or internal addresses (checked on every
+  redirect); a tool-less, memory-less sub-agent summarizes them; the result
+  is validated and capped, and a person approves it before the agent sees it,
+  labelled as untrusted (see [Web search](#web-search)). Raw page text never
+  reaches the agent.
 - **Files are confined** to the agent's [resources](#resources); the file
   tools only read, and the sandbox mounts the work tree but never its git
   history.
@@ -1087,7 +1215,8 @@ single-user agent before it is given up (`start_timeout`).
   origin and a per-person CSRF token. Each agent's routes answer 404 to
   non-members (the same as an unknown agent); answering approvals and
   questions, and stopping a reply, need the person who sent the message or an
-  admin of that agent (403 otherwise); only admins change members.
+  admin of that agent (403 otherwise); only admins change members. Web
+  search reviews that became decisions keep that rule.
   Decisions are seen and decided by the agent's members only (404 for anyone
   else); any member may decide, and who did is recorded. The notification
   feed (`/api/decisions`) lists only the agents you belong to.
@@ -1171,6 +1300,19 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 
 ## Limitations
 
+- **Web search.** It needs your own SearXNG (Letta Code's `web_search` and
+  `fetch_webpage` are Letta server tools, not available on the local
+  backend). Results are as good as SearXNG's engines (some rate-limit or
+  show CAPTCHAs) and the pages it can read: no JavaScript-rendered pages,
+  only HTML and plain text, the first 5 results. The summarizer is a model:
+  it can misjudge relevance or be misled by a page; the review is the
+  safeguard, and the agent is told the content is untrusted. Each search
+  takes a few seconds more for the sub-agent to start (a search took 20–30 s
+  live). A review waits in the turn at most about 4 min 50 s after its search
+  began (the harness's 5-minute cap on a tool call); after that it waits as a
+  decision, and the answer arrives as a new turn. In unattended runs, `'ask'` tools that
+  are not pre-approved are now refused before their preparation runs (for
+  `web_search`: before anything is searched).
 - **Local backend only.** `openLettaAgent` uses the Agent SDK `local` backend.
   Letta Cloud and remote App Servers are not supported by `LettaAgent` yet
   (the provider package does support them).

@@ -5,6 +5,42 @@ import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 
+/** Per-agent settings of the `web_search` tool. */
+export interface WebSearchSettings {
+  /**
+   * How long a person has to review a web search result before it expires
+   * (the agent is then told "Web research expired" and gets none of it; the
+   * conversation stays usable). Also bounded by the Letta harness, which
+   * ends any application tool call 5 minutes after it starts: the search
+   * itself counts, so a review never lasts beyond about 4 min 50 s after the
+   * search began. @default 280000 (the maximum)
+   *
+   * A result nobody reviews in time becomes a decision (on servers that keep
+   * decisions): the agent ends its turn, and the result waits, without a
+   * time limit, until the person who asked (or an admin) reviews it.
+   */
+  reviewTimeoutMs: number;
+  /**
+   * A result waiting as a decision that is older than this can also be
+   * answered with "Search again" (the agent then searches anew). @default 604800000 (7 days)
+   */
+  staleAfterMs: number;
+}
+/** Bounds of {@link WebSearchSettings.reviewTimeoutMs}. */
+export const WEB_SEARCH_REVIEW_LIMITS = Object.freeze({
+  minTimeoutMs: 10_000,
+  /** The Letta harness ends an application tool call after 300 s (it refuses longer timeouts); 20 s are kept for the search and the reply. */
+  maxTimeoutMs: 280_000,
+  defaultTimeoutMs: 280_000,
+  /** Longest a review may last after the search started (the harness ends the call at 300 s). */
+  callBudgetMs: 290_000,
+  /** Bounds of {@link WebSearchSettings.staleAfterMs}: one minute to one year; default 7 days. */
+  minStaleMs: 60_000,
+  maxStaleMs: 366 * 86_400_000,
+  defaultStaleMs: 7 * 86_400_000,
+});
+export const DEFAULT_WEB_SEARCH: Readonly<WebSearchSettings> = Object.freeze({ reviewTimeoutMs: WEB_SEARCH_REVIEW_LIMITS.defaultTimeoutMs, staleAfterMs: WEB_SEARCH_REVIEW_LIMITS.defaultStaleMs });
+
 /** How a single application tool call is authorized. */
 export type ToolPermission = 'allow' | 'ask' | 'deny';
 
@@ -74,6 +110,8 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
    * but may only listen. Each conversation can override it. @default 'auto'
    */
   replyMode?: ReplyModeSetting;
+  /** Settings of the `web_search` tool, e.g. `{ reviewTimeoutMs: 120_000 }`. @default { reviewTimeoutMs: 280000 } */
+  webSearch?: Partial<WebSearchSettings>;
 }
 
 /** A validated, immutable agent definition. */
@@ -89,6 +127,7 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly sandbox?: ResolvedSandboxConfig;
   readonly ui: Readonly<AgentUiSettings>;
   readonly replyMode: ReplyModeSetting;
+  readonly webSearch: Readonly<WebSearchSettings>;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -128,6 +167,8 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
     permissions[ASK_USER_TOOL] ??= 'allow';
     if (permissions[ASK_USER_TOOL] === 'ask') throw new Error('ask_user is already interactive; use "allow" or "deny"');
   }
+  // Every web search result is reviewed by a person (or pre-approved by an automation): never 'allow'.
+  if (permissions.web_search === 'allow') throw new Error('web_search results are reviewed by a person before the agent sees them; its permission must be "ask" or "deny"');
   // Network commands always need a human: approval is the only network switch.
   if (permissions.run_command_online === 'allow') throw new Error('run_command_online uses the network; its permission must be "ask" or "deny"');
   const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(input.sandbox);
@@ -141,10 +182,27 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const ui = resolveUi(input.ui);
   const replyMode = input.replyMode ?? 'auto';
   if (!REPLY_MODE_SETTINGS.includes(replyMode)) throw new Error(`replyMode must be one of: ${REPLY_MODE_SETTINGS.join(', ')}`);
+  const webSearch = resolveWebSearch(input.webSearch);
   return Object.freeze({
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch,
   });
+}
+
+function resolveWebSearch(input: unknown): Readonly<WebSearchSettings> {
+  if (input === undefined) return DEFAULT_WEB_SEARCH;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('webSearch must be an object such as { reviewTimeoutMs: 120000 }');
+  const unknown = Object.keys(input).filter(key => key !== 'reviewTimeoutMs' && key !== 'staleAfterMs');
+  if (unknown.length) throw new Error(`Unknown webSearch setting(s): ${unknown.join(', ')}. Supported: reviewTimeoutMs, staleAfterMs.`);
+  const { reviewTimeoutMs = DEFAULT_WEB_SEARCH.reviewTimeoutMs, staleAfterMs = DEFAULT_WEB_SEARCH.staleAfterMs } = input as { reviewTimeoutMs?: unknown; staleAfterMs?: unknown };
+  const { minTimeoutMs, maxTimeoutMs, minStaleMs, maxStaleMs } = WEB_SEARCH_REVIEW_LIMITS;
+  if (typeof reviewTimeoutMs !== 'number' || !Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs < minTimeoutMs || reviewTimeoutMs > maxTimeoutMs) {
+    throw new Error(`webSearch.reviewTimeoutMs must be ${minTimeoutMs}–${maxTimeoutMs} ms: the Letta harness ends an application tool call (the search and its review) after 5 minutes`);
+  }
+  if (typeof staleAfterMs !== 'number' || !Number.isInteger(staleAfterMs) || staleAfterMs < minStaleMs || staleAfterMs > maxStaleMs) {
+    throw new Error(`webSearch.staleAfterMs must be ${minStaleMs}–${maxStaleMs} ms`);
+  }
+  return Object.freeze({ reviewTimeoutMs, staleAfterMs });
 }
 
 function resolveUi(input: unknown): Readonly<AgentUiSettings> {
