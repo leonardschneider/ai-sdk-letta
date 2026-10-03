@@ -1,5 +1,16 @@
 # @ai-sdk-letta/server
 
+## 0.13.0
+
+### Minor Changes
+
+- d8442a1: Memory provenance and review (Jiminy). Every memory change is recorded with where it came from (who acted and their role, automation token or scheduled task, whether it ran unattended, and the untrusted content the turn read: web research, attachments, Jira or Confluence, tool output) in the memory ledger and git metadata (commit trailers, or a `refs/notes/provenance` note), never in memory files; the agent can read it with the new `memory_provenance` tool. Protected files (`persona.md`, `rules.md`, `goals.md`, `MEMORY.md`, `system/**` by default; `memory.protected` in the definition) change only in an admin's own turn with no untrusted content, under any letter case; a new root memory file is refused from untrusted or unattended turns; changes no turn made (dreams) are reverted from protected files at once. Jiminy, a temporary hidden tool-less reviewer agent (another model family than the agent's when one is connected; `memory.reviewer`), reviews every memory-changing turn and dream in the background and can only tighten the harness's decision: `reject` reverts the change, `ask_human` removes it until a person approves it in a new "Memory review" decision. Dreams keep merge mode `auto`; a Letta harness that can ask before merging a dream (merge mode `client`) is detected and used. `TurnActor` gets a `role`; team servers pass each author's role. The browser app gets a Memory view (reviews with provenance chips, diffs, the dream exposure window, refused writes, who wrote each part of a file, the reviewer model), memory review cards in the bell, toasts when a change is reverted, and provenance chips in the rewind confirmation. The web search summarizer (and the reviewer) now also delete the transcripts the Letta harness keeps for each temporary agent, and the crash sweep finds orphans by name and tag.
+
+### Patch Changes
+
+- Updated dependencies [d8442a1]
+  - ai-sdk-letta@0.13.0
+
 ## 0.12.0
 
 ### Minor Changes
