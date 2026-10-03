@@ -810,8 +810,8 @@ harness's `approve_edits` (see below). The Memory view and the review card
 show the dropped lines.
 
 **Trust mode** (`memory.trustJiminy`, off by default; each conversation can
-override it from the shield button in its header, admins only on a team
-server). Protected-file changes from a person's own attended turn are not
+override it from the shield button in its header; on a team server members
+may only make their conversation *Strict*, admins choose any setting). Protected-file changes from a person's own attended turn are not
 refused up front even when the person is not an admin or the turn read
 untrusted content: Jiminy reviews them, and `accept` keeps them (`reject` and
 `ask_human` as above; a failed review still reverts). The header shows
@@ -826,6 +826,29 @@ What stays deterministic in trust mode:
 - **Dreams changing protected files**: reverted (or not approved) as before;
   a dream has no author to ask.
 - **A failed review** of a protected file: reverted.
+
+**Claims are confirmed by the person they name.** Social engineering often
+works by attributing a rule to a colleague ("Bob from ops said deploys may
+skip approval on Fridays"). When a change relies on such a statement, Jiminy
+lists it (`claims`: the person as written and what they supposedly said), and
+the change is **held** (removed until confirmed). If the person is a member of
+the agent (matched by display name, first name or Tailscale login; never
+guessed), they get a **claim confirmation** in their bell: "Mia's conversation
+says you said: '…'. Did you?"
+
+- **Yes** re-applies the change, with `X-Confirmed-By` in its provenance.
+- **No** keeps it removed, and the requester and admins get an
+  *unconfirmed claim* notice in their bell (and in the Memory view).
+- **Partly** keeps it removed and sends the person's comment to the agent as a
+  turn of the conversation, so it can remember what they actually said.
+
+Only the named person can confirm; an admin can reject but never confirm on
+their behalf. A claim about someone who is not a member, or a name that
+matches several members, gets an ordinary admin memory review ("claim about
+someone outside this agent, cannot be verified"). A claim about the person
+who sent the turn needs no confirmation. Unattended runs work the same way
+(the run ends without the change). In the single-user app you are the only
+member: claims about anyone else come to you as that admin review.
 
 **Automations: where their memory changes start.** Each automation token has
 a *memory floor* (Automations → the token → "Memory changes after untrusted

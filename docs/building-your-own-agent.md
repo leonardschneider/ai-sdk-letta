@@ -616,7 +616,10 @@ refused up front: Jiminy reviews them and may keep them. Automations,
 scheduled tasks, new root files and letter-case aliases stay refused, and a
 failed review still reverts. Jiminy can also **drop lines**: keep a change but
 remove the lines it names (for example an injected rule in an otherwise good
-dream). Each **automation token** has a memory floor for runs that read
+dream). When a change relies on something attributed to a colleague ("Bob said …"),
+Jiminy lists the claim and the change is held until that member confirms it
+in their bell (only they can; outsiders and ambiguous names go to an admin).
+Each **automation token** has a memory floor for runs that read
 untrusted content (`flag` by default; `accept` or `ask_human`), set in the
 Automations dialog.
 

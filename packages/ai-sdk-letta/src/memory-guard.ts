@@ -6,7 +6,7 @@ import { AGENT_EMAIL, harnessCommit } from './memory-journal.js';
 import { changedBy, commitsSince, headOf, type GitRunner } from './revert.js';
 import { adminClean, trustEligible, blameProvenance, commitTrailers, parseProvenanceTrailers, PROVENANCE_TRAILERS, provenanceLabel, provenanceTrailers, sections, untrusted, type TurnProvenance } from './provenance.js';
 import type { DreamRequest, DreamResponse } from './dream-review.js';
-import { stricter, type JiminyDrop, type JiminyVerdict, type MemoryReviewer, type Verdict } from './jiminy.js';
+import { stricter, type JiminyClaim, type JiminyDrop, type JiminyVerdict, type MemoryReviewer, type Verdict } from './jiminy.js';
 
 /**
  * Memory protection and review: the harness side of the agent's conscience.
@@ -123,10 +123,10 @@ export type MemoryReview = {
   status: 'pending' | 'done';
   /** The final verdict (floor and Jiminy's, the stricter), and how it came about. */
   verdict?: Verdict; floor?: Verdict; rule?: string;
-  jiminy?: Pick<JiminyVerdict, 'trust' | 'verdict' | 'reason' | 'alters_directives' | 'evidence' | 'drop'> & { model?: string; ms?: number; costUsd?: number };
+  jiminy?: Pick<JiminyVerdict, 'trust' | 'verdict' | 'reason' | 'alters_directives' | 'evidence' | 'drop' | 'claims'> & { model?: string; ms?: number; costUsd?: number };
   error?: string;
   /** What happened to the change: kept, reverted (`revert` commit), removed until a person decides, re-applied after approval. */
-  outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked';
+  outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked' | 'awaiting_confirmation' | 'confirmed' | 'denied' | 'partly';
   revert?: string; reapply?: string;
   /** The memory review decision (ask_human). */
   decision?: string;
@@ -141,12 +141,54 @@ export type MemoryReview = {
   paths?: string[];
   /** Lines Jiminy dropped while keeping the rest (`drop`), and the commit that removed them (or, before a merge, the harness's edit). */
   dropped?: JiminyDrop[]; dropCommit?: string;
+  /**
+   * Statements the change attributes to people, and whom each was put to
+   * (`member`: confirmation asked; `outsider`/`ambiguous`: an admin review
+   * instead; `self`: the requester's own words, nothing to confirm). `answer`:
+   * the named person's answer, with their comment.
+   */
+  claims?: (JiminyClaim & { match: 'member' | 'outsider' | 'ambiguous' | 'self'; to?: { id: string; name: string }; answer?: 'yes' | 'no' | 'partly'; comment?: string; at?: string })[];
 };
+
+/** A member of the agent, as claims are matched against. */
+export type ClaimMember = { id: string; name: string; login?: string };
+/**
+ * Who a claim names, among the agent's members: by login (or its part before
+ * the @) or by display name (full, or first name), case-insensitive. Never
+ * guesses: two or more candidates are `ambiguous`; none is `outsider`; the
+ * turn's own author is `self`.
+ */
+export function matchClaimPerson(person: string, members: readonly ClaimMember[], requester?: string): { match: 'member' | 'outsider' | 'ambiguous' | 'self'; member?: ClaimMember } {
+  const norm = (text: string) => text.normalize('NFKC').toLowerCase().replace(/^@/, '').replace(/\s+/g, ' ').trim();
+  // "Bob from ops", "Bob (ops lead)": the name is what comes before the role.
+  const wanted = norm(person).replace(/\s*(\(.*\)|,.*| from .*| of .*| at .*| on .*)$/, '').trim();
+  if (!wanted) return { match: 'outsider' };
+  const keys = (m: ClaimMember) => {
+    const name = norm(m.name);
+    const login = m.login ? norm(m.login) : '';
+    return new Set([name, name.split(' ')[0]!, ...(login ? [login, login.split('@')[0]!] : [])].filter(Boolean));
+  };
+  const found = members.filter(m => keys(m).has(wanted));
+  if (found.length > 1) return { match: 'ambiguous' };
+  if (!found.length) return { match: 'outsider' };
+  return found[0]!.id === requester ? { match: 'self', member: found[0]! } : { match: 'member', member: found[0]! };
+}
 
 /** What the guard tells the application (the server): a review settled, a change was reverted, a person must decide. */
 export interface MemoryGuardEvents {
   /** A review needs a person (`ask_human`): open a memory review decision. Resolves with its ID. */
   askHuman?(review: MemoryReview): Promise<string | undefined>;
+  /**
+   * The members a claim can name (see {@link matchClaimPerson}). Without it,
+   * claims are not confirmed by their author: they get an admin review.
+   */
+  members?(): readonly ClaimMember[];
+  /**
+   * A claim names a member: open a claim confirmation decision for them
+   * (`review.claims[i].to`). Resolves with its ID; `undefined` falls back to
+   * an admin review.
+   */
+  confirmClaims?(review: MemoryReview): Promise<string | undefined>;
   /** Something changed (a review started or settled, a revert): refresh views. `reverted`: a change was reverted (show a toast). */
   changed?(review: MemoryReview, event: 'started' | 'settled' | 'reverted'): void;
 }
@@ -390,7 +432,7 @@ export class MemoryGuard {
       const started = Date.now();
       try {
         const answer = await reviewer({ files: review.files, diff, provenance: review.provenance, directives: this.directives(), numbered: await this.numbered(review.files) }, AbortSignal.timeout(this.settings.reviewTimeoutMs));
-        review.jiminy = { trust: answer.trust, verdict: answer.verdict, reason: answer.reason, alters_directives: answer.alters_directives, evidence: answer.evidence, ...(answer.drop ? { drop: answer.drop } : {}), ...(answer.model ? { model: answer.model } : {}), ms: Date.now() - started, ...(typeof answer.costUsd === 'number' ? { costUsd: answer.costUsd } : {}) };
+        review.jiminy = { trust: answer.trust, verdict: answer.verdict, reason: answer.reason, alters_directives: answer.alters_directives, evidence: answer.evidence, ...(answer.drop ? { drop: answer.drop } : {}), ...(answer.claims ? { claims: answer.claims } : {}), ...(answer.model ? { model: answer.model } : {}), ms: Date.now() - started, ...(typeof answer.costUsd === 'number' ? { costUsd: answer.costUsd } : {}) };
         verdict = stricter(floor, answer.verdict);
         // Keep the change but drop the lines Jiminy named (partial revert); if they do not apply exactly, the whole change goes.
         if (answer.drop?.length && (verdict === 'accept' || verdict === 'flag')) {
@@ -407,6 +449,34 @@ export class MemoryGuard {
     } else if (!reviewer && floor === 'accept') verdict = 'accept';
     review.verdict = verdict;
     if (this.closed) { review.status = 'done'; review.error ??= 'closed'; return; }
+    // Claims attributed to people: the named member confirms (the change is held meanwhile); anyone else, an admin review.
+    const claims = review.jiminy?.claims?.length && verdict !== 'reject' && review.kind === 'turn' ? this.matchClaims(review.jiminy.claims, review.provenance.actor.id) : [];
+    if (claims.length && claims.some(c => c.match !== 'self')) {
+      review.claims = claims;
+      // One confirmer per change: claims naming several members go to an admin too.
+      const named = new Set(claims.filter(c => c.match === 'member').map(c => c.to!.id));
+      const toMember = claims.every(c => c.match === 'member' || c.match === 'self') && named.size === 1 && !!this.options.events?.confirmClaims;
+      await this.hold(review, toMember ? 'Memory review: held until confirmed' : 'Memory review: removed until approved');
+      verdict = review.verdict = 'ask_human';
+      if (toMember) {
+        review.outcome = 'awaiting_confirmation';
+        try { const id = await this.options.events!.confirmClaims!(structuredClone(review)); if (id) review.decision = id; }
+        catch (error) { this.options.log?.(`memory review ${review.id}: could not ask for confirmation (${error instanceof Error ? error.message : String(error)})`); }
+      }
+      if (!review.decision) {
+        review.outcome = 'removed';
+        review.rule = claims.some(c => c.match === 'ambiguous') ? 'claim names someone who cannot be told apart from another member: an admin decides'
+          : claims.some(c => c.match === 'outsider') ? 'claim about someone outside this agent, cannot be verified' : 'claims name several people: an admin decides';
+        try { const id = await this.options.events?.askHuman?.(structuredClone(review)); if (id) review.decision = id; }
+        catch (error) { this.options.log?.(`memory review ${review.id}: could not open a decision (${error instanceof Error ? error.message : String(error)})`); }
+      }
+      review.status = 'done'; review.settledAt = new Date().toISOString();
+      this.persist();
+      this.options.events?.changed?.(structuredClone(review), 'settled');
+      this.options.events?.changed?.(structuredClone(review), 'reverted');
+      return;
+    }
+    if (claims.length) review.claims = claims;
     if (verdict === 'accept' || verdict === 'flag') review.outcome = 'kept';
     else {
       // reject and ask_human: the change is removed now (ask_human until a person approves it).
@@ -444,6 +514,49 @@ export class MemoryGuard {
       { [PROVENANCE_TRAILERS.review]: review.id, ...(review.turn ? { 'X-Turn': review.turn } : {}), ...provenanceTrailers({ ...review.provenance, approvedBy: { id: by.id, name: by.name } }) });
     if (reapplied.commit) review.reapply = reapplied.commit;
     review.outcome = 'reapplied'; review.settledAt = new Date().toISOString();
+    this.persist();
+    this.options.events?.changed?.(structuredClone(review), 'settled');
+    return structuredClone(review);
+  }
+
+  private matchClaims(claims: readonly JiminyClaim[], requester?: string): NonNullable<MemoryReview['claims']> {
+    const members = this.options.events?.members?.() ?? [];
+    return claims.map(claim => { const { match, member } = matchClaimPerson(claim.person, members, requester); return { ...claim, match, ...(member ? { to: { id: member.id, name: member.name } } : {}) }; });
+  }
+  /** Remove a change (revert commit) until someone decides. */
+  private async hold(review: MemoryReview, subject: string) {
+    const reverted = await this.options.journal.revertCommits(`review-${review.id}`, review.commits, `${subject} (${review.files.map(f => f.path).join(', ').slice(0, 120)})`,
+      { [PROVENANCE_TRAILERS.review]: review.id, ...provenanceTrailers({ actor: { kind: 'harness' }, sources: [], writer: 'harness' }) }, review.paths ? new Set(review.paths) : undefined);
+    if (reverted.commit) review.revert = reverted.commit;
+  }
+  /**
+   * The person a claim named answered (claim confirmation). Only they may:
+   * `by` must be the member the claim was put to (an admin may only `no`).
+   * `yes`: the change is re-applied with `X-Confirmed-By`; `no`: it stays
+   * removed (an unconfirmed claim, shown to the requester and admins);
+   * `partly`: it stays removed and the agent gets the person's comment.
+   * Idempotent.
+   * @throws `not_found`, `not_pending`, `not_the_named_person`
+   */
+  async decideClaim(id: string, answer: 'yes' | 'no' | 'partly', by: { id: string; name: string }, options: { comment?: string; admin?: boolean } = {}): Promise<MemoryReview> {
+    const review = this.reviews.find(r => r.id === id);
+    if (!review) throw new Error('not_found');
+    if (review.outcome === 'confirmed' || review.outcome === 'denied' || review.outcome === 'partly') return structuredClone(review);
+    if (review.outcome !== 'awaiting_confirmation') throw new Error('not_pending');
+    const named = review.claims?.filter(c => c.match === 'member') ?? [];
+    const theirs = named.some(c => c.to?.id === by.id);
+    if (!theirs && !(options.admin && answer === 'no')) throw new Error('not_the_named_person');
+    const at = new Date().toISOString();
+    const comment = options.comment?.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, 1000);
+    for (const claim of review.claims ?? []) if (claim.match === 'member' && (claim.to?.id === by.id || options.admin)) Object.assign(claim, { answer, at, ...(comment ? { comment } : {}) });
+    if (answer === 'yes') {
+      const reapplied = review.revert ? await this.options.journal.revertCommits(`confirm-${review.id}`, [review.revert],
+        `Memory review: re-applied after confirmation (${review.files.map(f => f.path).join(', ').slice(0, 120)})`,
+        { [PROVENANCE_TRAILERS.review]: review.id, ...(review.turn ? { 'X-Turn': review.turn } : {}), ...provenanceTrailers({ ...review.provenance, confirmedBy: { id: by.id, name: by.name } }) }) : undefined;
+      if (reapplied?.commit) review.reapply = reapplied.commit;
+      review.outcome = 'confirmed';
+    } else review.outcome = answer === 'no' ? 'denied' : 'partly';
+    review.settledAt = at;
     this.persist();
     this.options.events?.changed?.(structuredClone(review), 'settled');
     return structuredClone(review);

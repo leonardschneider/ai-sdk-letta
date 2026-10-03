@@ -5,7 +5,7 @@ export type MemoryFile = { path: string; protected: boolean; change: 'created' |
 export type MemoryReviewView = {
   id: string; kind: 'turn' | 'dream'; files: MemoryFile[]; status: 'pending' | 'done';
   verdict?: 'accept' | 'flag' | 'ask_human' | 'reject'; floor?: string; rule?: string;
-  outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked';
+  outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked' | 'awaiting_confirmation' | 'confirmed' | 'denied' | 'partly';
   decision?: string; mergedAt?: string; createdAt: string; settledAt?: string; error?: string;
   beforeMerge?: { decision: 'approve' | 'reject' | 'approve_paths' | 'approve_edits'; paths?: string[]; branch: string };
   provenance: string; threadId?: string; diff?: string;
@@ -13,6 +13,8 @@ export type MemoryReviewView = {
   exposureMs?: number;
   /** Lines the reviewer dropped while keeping the rest (`path`, line range, exact text). */
   dropped?: DroppedLines[];
+  /** Statements the change attributed to people, whom they were put to, and the answer. */
+  claims?: { person: string; statement: string; match: 'member' | 'outsider' | 'ambiguous' | 'self'; to?: { id: string; name: string }; answer?: 'yes' | 'no' | 'partly'; comment?: string }[];
 };
 /** Lines a reviewer dropped from a change. */
 export type DroppedLines = { path: string; start: number; end: number; text: string };
@@ -29,9 +31,13 @@ export type ProvenanceSection = { lines: string; from: number; to: number; by: s
 export type ChipTone = 'ok' | 'flag' | 'held' | 'reverted' | 'pending' | 'neutral';
 
 /** The verdict chip of a review: "Accepted", "Flagged", "Removed until approved", "Reverted", "Approved and re-applied", "Reviewing…". */
-export function verdictChip(review: Pick<MemoryReviewView, 'status' | 'verdict' | 'outcome' | 'beforeMerge' | 'error' | 'dropped'>): { label: string; tone: ChipTone } {
+export function verdictChip(review: Pick<MemoryReviewView, 'status' | 'verdict' | 'outcome' | 'beforeMerge' | 'error' | 'dropped' | 'claims'>): { label: string; tone: ChipTone } {
   if (review.status === 'pending') return { label: 'Reviewing…', tone: 'pending' };
   if (review.outcome === 'blocked') return { label: 'Blocked before merging', tone: 'reverted' };
+  if (review.outcome === 'awaiting_confirmation') return { label: `Held: ${review.claims?.find(c => c.match === 'member')?.to?.name ?? 'someone'} to confirm`, tone: 'held' };
+  if (review.outcome === 'confirmed') return { label: `Confirmed by ${review.claims?.find(c => c.answer === 'yes')?.to?.name ?? 'them'}`, tone: 'ok' };
+  if (review.outcome === 'denied') return { label: 'Unconfirmed claim: removed', tone: 'reverted' };
+  if (review.outcome === 'partly') return { label: 'Partly confirmed: removed', tone: 'flag' };
   if (review.outcome === 'reapplied') return { label: 'Approved and re-applied', tone: 'ok' };
   if (review.outcome === 'kept_removed') return { label: 'Rejected by a person', tone: 'reverted' };
   if (review.outcome === 'removed') return { label: 'Removed until approved', tone: 'held' };

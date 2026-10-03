@@ -186,7 +186,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off', replyMode: 'inherit' | 'always' | 'when-addressed' | 'agent-decides' (shared runtimes) }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
   app.patch('/v1/threads/:id', async (req, res) => {
     // Trust mode loosens the protected-file rule: on a team server, only admins change it.
-    if (access && req.body && typeof req.body === 'object' && 'trustJiminy' in req.body && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    // Members may only make it stricter (Strict); turning trust on, or back to the agent's setting, is for admins.
+    if (access && req.body && typeof req.body === 'object' && 'trustJiminy' in req.body && (req.body as { trustJiminy?: unknown }).trustJiminy !== 'off' && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
     const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary);
   });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
@@ -235,8 +236,10 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/decisions/:id/decide', (req, res) => {
     const who = access ? access.author(req) : { id: LOCAL_USER_ID, name: 'You' };
     // Web research and memory reviews keep their rule: the person whose turn it was, or an admin (protected memory: admins only; 403 otherwise).
-    if (access && !board().mayDecide(req.params.id, who, access.mayAct(req, {}))) throw new RuntimeFault('not_your_review', 403);
-    try { res.json(board().decide(req.params.id, who, req.body)); }
+    const admin = access ? access.mayAct(req, {}) : true;
+    if (access && !board().mayDecide(req.params.id, who, admin)) throw new RuntimeFault('not_your_review', 403);
+    // A claim is confirmed only by the person it names (single-user app: claims never name anyone but you).
+    try { res.json(board().decide(req.params.id, who, req.body, { admin: access ? admin : false })); }
     catch (error) { if (error instanceof DecisionConflict) return res.status(409).json({ error: error.code, decision: error.decision }); throw error; }
   });
   /**
@@ -343,7 +346,7 @@ export class DecisionFeed {
    * the people `mayReview` allows (the searcher and admins).
    */
   pending(visible: (agentId: string) => boolean, mayReview: (agentId: string, decision: PublicDecision) => boolean = () => true): FeedDecision[] {
-    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => (decision.kind !== 'web-research' && decision.kind !== 'memory-review') || mayReview(entry.agent.id, decision)).flatMap(decision => {
+    return this.agents.filter(entry => visible(entry.agent.id)).flatMap(entry => entry.board.pending().filter(decision => !decision.kind || mayReview(entry.agent.id, decision)).flatMap(decision => {
       const thread = entry.runtime.threadSummary(entry.owner, decision.threadId);
       return thread && !thread.archived ? [{ ...decision, agent: { ...entry.agent }, thread: { id: thread.id, title: thread.title } }] : [];
     })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));

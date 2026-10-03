@@ -148,7 +148,7 @@ export interface RewindHooks {
   cancelSchedules(runIds: ReadonlySet<string>): Promise<string[]>;
 }
 /** A memory review as the app shows it. */
-export type PublicMemoryReview = Pick<MemoryReview, 'id' | 'kind' | 'files' | 'status' | 'verdict' | 'floor' | 'rule' | 'outcome' | 'decision' | 'mergedAt' | 'createdAt' | 'settledAt' | 'error' | 'beforeMerge' | 'dropped'> & {
+export type PublicMemoryReview = Pick<MemoryReview, 'id' | 'kind' | 'files' | 'status' | 'verdict' | 'floor' | 'rule' | 'outcome' | 'decision' | 'mergedAt' | 'createdAt' | 'settledAt' | 'error' | 'beforeMerge' | 'dropped' | 'claims'> & {
   provenance: string; threadId?: string; diff?: string;
   jiminy?: { trust: number; verdict: string; reason: string; model?: string; ms?: number };
   /** Dreams merged before review: how long the change was in memory before the review settled (ms). */
@@ -160,7 +160,7 @@ function publicReview(review: MemoryReview, runtime: ThreadRuntime): PublicMemor
   return { id: review.id, kind: review.kind, files: structuredClone(review.files), status: review.status, provenance: provenanceLabel(review.provenance), createdAt: review.createdAt,
     ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.floor ? { floor: review.floor } : {}), ...(review.rule ? { rule: review.rule } : {}), ...(review.outcome ? { outcome: review.outcome } : {}), ...(review.decision ? { decision: review.decision } : {}),
     ...(review.mergedAt ? { mergedAt: review.mergedAt } : {}), ...(review.settledAt ? { settledAt: review.settledAt } : {}), ...(review.error ? { error: review.error } : {}), ...(review.beforeMerge ? { beforeMerge: structuredClone(review.beforeMerge) } : {}),
-    ...(threadId ? { threadId } : {}), ...(review.diff ? { diff: review.diff } : {}), ...(review.dropped?.length ? { dropped: structuredClone(review.dropped) } : {}),
+    ...(threadId ? { threadId } : {}), ...(review.diff ? { diff: review.diff } : {}), ...(review.dropped?.length ? { dropped: structuredClone(review.dropped) } : {}), ...(review.claims?.length ? { claims: structuredClone(review.claims) } : {}),
     ...(review.jiminy ? { jiminy: { trust: review.jiminy.trust, verdict: review.jiminy.verdict, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}), ...(review.jiminy.ms ? { ms: review.jiminy.ms } : {}) } } : {}),
     ...(exposure !== undefined ? { exposureMs: exposure } : {}) };
 }

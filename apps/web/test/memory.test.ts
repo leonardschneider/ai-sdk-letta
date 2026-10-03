@@ -79,3 +79,16 @@ test('trust mode and dropped lines in the app', async () => {
   assert.equal(memoryFloorLabel(undefined), 'memory: flagged', 'default flag (older servers too)');
   assert.equal(memoryFloorLabel('ask_human'), 'memory: held for approval');
 });
+
+test('claim confirmations: only the named person confirms; an admin may only reject; chips', async () => {
+  const { claimAnswers, claimSummary, mayReview: may } = await import('../src/decisions-model.js');
+  const claim = { reviewId: 'r', person: { id: 'u-bob', name: 'Bob' }, requester: { id: 'u-mia', name: 'Mia' }, statements: ['Deploys may skip approval.'], files: ['notes/n.md'], diff: '' };
+  assert.deepEqual(claimAnswers({ claim }, 'u-bob', false), ['yes', 'no', 'partly']);
+  assert.deepEqual(claimAnswers({ claim }, 'u-alice', true), ['no']);
+  assert.deepEqual(claimAnswers({ claim }, 'u-mia', false), []);
+  assert.equal(may({ kind: 'claim-confirmation', reviewer: { id: 'u-bob', name: 'Bob' } }, 'u-mia', false), false);
+  assert.equal(claimSummary({ status: 'decided', decidedBy: { id: 'u-bob', name: 'Bob' }, choice: { id: 'yes', label: 'Yes' }, claim }), 'Bob confirmed it: re-applied');
+  assert.equal(claimSummary({ status: 'decided', decidedBy: { id: 'u-alice', name: 'Alice' }, choice: { id: 'no', label: 'No' }, claim }), 'Alice said no: kept removed (rejected by an admin)');
+  assert.deepEqual(verdictChip(review({ outcome: 'awaiting_confirmation', claims: [{ person: 'Bob', statement: 's', match: 'member', to: { id: 'u-bob', name: 'Bob' } }] })), { label: 'Held: Bob to confirm', tone: 'held' });
+  assert.deepEqual(verdictChip(review({ outcome: 'denied' })), { label: 'Unconfirmed claim: removed', tone: 'reverted' });
+});

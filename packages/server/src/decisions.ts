@@ -46,9 +46,17 @@ export type DecisionRecord = {
    * result is older than `staleAfterMs`, `search_again`. Only the person whose
    * turn searched (`requestedBy.person`), or an admin, may decide it.
    */
-  kind?: 'web-research' | 'memory-review';
+  kind?: 'web-research' | 'memory-review' | 'claim-confirmation' | 'memory-notice';
   research?: WebResearch;
   staleAfterMs?: number;
+  /**
+   * `claim-confirmation`: a held memory change relies on something a member
+   * supposedly said; only that member (`claim.person`) may answer Yes (re-apply),
+   * No (keep removed, tell the requester and admins) or Partly (keep removed,
+   * their comment goes to the agent). Admins may answer No, never Yes.
+   * `memory-notice`: an unconfirmed claim, for the requester and admins to see.
+   */
+  claim?: ClaimView;
   /**
    * `memory-review`: a memory change Jiminy held for a person (`ask_human`).
    * It is removed from memory until decided: `approve` re-applies it,
@@ -57,6 +65,8 @@ export type DecisionRecord = {
    */
   memory?: MemoryReviewView;
 };
+/** What a claim confirmation (or an unconfirmed-claim notice) shows. */
+export type ClaimView = { reviewId: string; person: { id: string; name: string }; requester: { id?: string; name: string }; statements: string[]; files: string[]; diff: string; answer?: 'yes' | 'no' | 'partly'; outcome?: string };
 /** What a memory review decision shows (the review, without internals). */
 export type MemoryReviewView = { reviewId: string; files: MemoryReview['files']; diff: string; provenance: string; protected: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string;
   /** Lines the reviewer had already dropped (the rest is what is held). */
@@ -77,7 +87,9 @@ export type PublicDecision = {
   cancelledAt?: string; cancelReason?: string; supersededBy?: string;
   resume?: { runId: string; state: string; error?: string };
   /** A web search result waiting for review (see {@link DecisionRecord.kind}), the person who may review it (or an admin), and whether "Search again" is offered. */
-  kind?: 'web-research' | 'memory-review'; research?: WebResearch; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  kind?: 'web-research' | 'memory-review' | 'claim-confirmation' | 'memory-notice'; research?: WebResearch; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
+  /** A claim to confirm (`claim-confirmation`: `reviewer` is the named person) or an unconfirmed claim (`memory-notice`: `reviewer` is the requester; admins see it too). */
+  claim?: ClaimView;
   /** A memory change held for a person (see {@link DecisionRecord.memory}); `adminOnly`: it touches protected files. */
   memory?: MemoryReviewView & { adminOnly: boolean };
 };
@@ -88,8 +100,16 @@ export const WEB_RESEARCH_OPTIONS: readonly DecisionOption[] = Object.freeze([
 ]);
 const isResearch = (record: DecisionRecord) => record.kind === 'web-research';
 const isMemory = (record: DecisionRecord) => record.kind === 'memory-review';
-/** Decisions kept apart from the conversation's one pending decision (reviews of web research or memory). */
-const isReview = (record: DecisionRecord) => isResearch(record) || isMemory(record);
+const isClaim = (record: DecisionRecord) => record.kind === 'claim-confirmation';
+const isNotice = (record: DecisionRecord) => record.kind === 'memory-notice';
+/** Decisions kept apart from the conversation's one pending decision (reviews of web research or memory, claim confirmations, notices). */
+const isReview = (record: DecisionRecord) => isResearch(record) || isMemory(record) || isClaim(record) || isNotice(record);
+/** The answers to a claim confirmation. */
+export const CLAIM_OPTIONS: readonly DecisionOption[] = Object.freeze([
+  { id: 'yes', label: 'Yes, I said that' }, { id: 'no', label: 'No, I didn’t' }, { id: 'partly', label: 'Partly' },
+]);
+/** The one option of an unconfirmed-claim notice. */
+export const NOTICE_OPTIONS: readonly DecisionOption[] = Object.freeze([{ id: 'dismiss', label: 'Dismiss' }]);
 /** The options of a memory review decision. */
 export const MEMORY_REVIEW_OPTIONS: readonly DecisionOption[] = Object.freeze([
   { id: 'approve', label: 'Approve: re-apply it' }, { id: 'reject', label: 'Reject: keep it removed' },
@@ -155,7 +175,49 @@ export class DecisionBoard {
    * Memory reviews: what to do when a memory review decision is decided
    * (the server binds the agent's memory guard).
    */
-  memoryReviews?: { decide(reviewId: string, choice: 'approve' | 'reject', by: { id: string; name: string }): Promise<unknown> };
+  memoryReviews?: { decide(reviewId: string, choice: 'approve' | 'reject', by: { id: string; name: string }): Promise<unknown>;
+    /** A claim confirmation was answered (see `MemoryGuard.decideClaim`). */
+    decideClaim?(reviewId: string, answer: 'yes' | 'no' | 'partly', by: { id: string; name: string }, options: { comment?: string; admin?: boolean }): Promise<unknown> };
+
+  /**
+   * A held memory change relies on something `review.claims` attributes to a
+   * member: ask that member (only them) in a claim confirmation decision, in
+   * the conversation of the turn that made the change.
+   */
+  claimConfirmation(review: MemoryReview, threadId: string | undefined, requester: { id?: string; name: string }): string | undefined {
+    const claims = review.claims?.filter(c => c.match === 'member' && c.to) ?? [];
+    if (!threadId || !claims.length) return undefined;
+    const existing = this.state.decisions.find(d => d.claim?.reviewId === review.id && isClaim(d));
+    if (existing) return existing.id;
+    const person = claims[0]!.to!;
+    const statements = claims.map(c => visible(c.statement, 400));
+    const bare = (s: string) => s.replace(/[.!\s]+$/, '');
+    const quote = statements.map(s => `“${bare(s)}”`).join(' and ');
+    const record: DecisionRecord = {
+      id: randomUUID(), threadId, conversationId: review.conversationId ?? '', toolCallId: `claim:${review.id}`,
+      question: visible(`${requester.name}’s conversation says you said: ${quote}. Did you?`, DECISION_LIMITS.maxQuestionCharacters),
+      options: CLAIM_OPTIONS.map(o => ({ ...o })), context: visible(`The agent wanted to remember this. The change is held until you answer; only you can confirm it.`, DECISION_LIMITS.maxContextCharacters), allowComment: true,
+      requestedBy: { ...(requester.id ? { person: { id: requester.id, name: requester.name } } : {}) },
+      createdAt: new Date().toISOString(), status: 'pending', kind: 'claim-confirmation',
+      claim: { reviewId: review.id, person: { ...person }, requester: { ...requester }, statements, files: review.files.map(f => f.path), diff: (review.diff ?? '').slice(0, 8000) },
+    };
+    this.state.decisions.push(record);
+    this.forget();
+    this.save(); this.changed();
+    return record.id;
+  }
+  /** Someone named in a claim said they did not say it: a notice for the requester and admins (dismissed by any of them). */
+  private claimNotice(claim: DecisionRecord, by: DecisionPerson, comment?: string) {
+    const c = claim.claim!;
+    const record: DecisionRecord = {
+      id: randomUUID(), threadId: claim.threadId, conversationId: claim.conversationId, toolCallId: `claim-notice:${c.reviewId}`,
+      question: visible(`Unconfirmed claim: ${c.person.name} says they did not say “${c.statements[0]!.replace(/[.!\s]+$/, '')}”`, DECISION_LIMITS.maxQuestionCharacters),
+      options: NOTICE_OPTIONS.map(o => ({ ...o })), context: visible(`${c.requester.name}’s conversation attributed it to ${c.person.name}${by.id !== c.person.id ? `; ${by.name} (admin) rejected it` : ''}. The memory change stays removed.${comment ? ` Comment: ${comment}` : ''}`, DECISION_LIMITS.maxContextCharacters), allowComment: false,
+      requestedBy: { ...claim.requestedBy }, createdAt: new Date().toISOString(), status: 'pending', kind: 'memory-notice',
+      claim: { ...structuredClone(c), answer: 'no' },
+    };
+    this.state.decisions.push(record);
+  }
   /**
    * A memory change held for a person (Jiminy answered ask_human): one
    * decision per review, in the conversation of the turn that made it (a
@@ -244,6 +306,8 @@ export class DecisionBoard {
     const record = this.record(id);
     // Memory reviews of protected files (persona, rules, goals): admins only.
     if (isMemory(record) && record.memory?.protected) return admin;
+    // Claim confirmations: the named person, or an admin (who may only answer No: see decide).
+    if (isClaim(record)) return admin || record.claim?.person.id === who.id;
     return !isReview(record) || admin || (!!record.requestedBy.person && record.requestedBy.person.id === who.id);
   }
   private cancel(conversationId: string, id?: string): string | undefined {
@@ -280,6 +344,8 @@ export class DecisionBoard {
         ...(record.requestedBy.person ? { reviewer: { id: record.requestedBy.person.id, name: record.requestedBy.person.name } } : {}) } : {}),
       ...(isMemory(record) && record.memory ? { kind: 'memory-review' as const, memory: { ...structuredClone(record.memory), adminOnly: record.memory.protected },
         ...(record.requestedBy.person && !record.memory.protected ? { reviewer: { id: record.requestedBy.person.id, name: record.requestedBy.person.name } } : {}) } : {}),
+      ...(isClaim(record) && record.claim ? { kind: 'claim-confirmation' as const, claim: structuredClone(record.claim), reviewer: { ...record.claim.person } } : {}),
+      ...(isNotice(record) && record.claim ? { kind: 'memory-notice' as const, claim: structuredClone(record.claim), ...(record.requestedBy.person ? { reviewer: { ...record.requestedBy.person } } : {}) } : {}),
     };
   }
   /** Pending decisions of conversations that are not archived, oldest first. */
@@ -319,10 +385,37 @@ export class DecisionBoard {
    * `already_decided`) with the decision as decided. The outcome is then sent
    * to the agent as a new turn of the conversation.
    */
-  decide(id: string, who: DecisionPerson, input: unknown): PublicDecision {
+  decide(id: string, who: DecisionPerson, input: unknown, options: { admin?: boolean } = {}): PublicDecision {
     const record = this.record(id);
     const { choice, stop, comment } = (input ?? {}) as { choice?: unknown; stop?: unknown; comment?: unknown };
     if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['choice', 'stop', 'comment'].includes(key))) throw new RuntimeFault('invalid_input', 400);
+    if (isNotice(record)) {
+      if (stop !== undefined || choice !== 'dismiss' || comment !== undefined) throw new RuntimeFault('invalid_input', 400);
+      if (record.status !== 'pending') throw new DecisionConflict(this.view(record));
+      Object.assign(record, { status: 'decided', decidedBy: { id: who.id, name: visible(who.name, 120) || 'Someone' }, choice, decidedAt: new Date().toISOString() });
+      this.save(); this.changed();
+      return this.view(record);
+    }
+    if (isClaim(record)) {
+      // Yes / No / Partly, with an optional comment (Partly: what they did say). Only the named person confirms; an admin may only say No.
+      if (stop !== undefined || !['yes', 'no', 'partly'].includes(choice as string) || (comment !== undefined && (typeof comment !== 'string' || comment.length > DECISION_LIMITS.maxCommentCharacters))) throw new RuntimeFault('invalid_input', 400);
+      const named = record.claim!.person.id === who.id;
+      if (!named && !(options.admin && choice === 'no')) throw new RuntimeFault('not_the_named_person', 403);
+      if (record.status !== 'pending') throw new DecisionConflict(this.view(record));
+      const note = typeof comment === 'string' ? commentText(comment) : '';
+      const person = { id: who.id, name: visible(who.name, 120) || 'Someone', ...(who.login ? { login: who.login } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) };
+      Object.assign(record, { status: 'decided', decidedBy: person, choice, ...(note ? { comment: note } : {}), decidedAt: new Date().toISOString(),
+        // Partly: what they did say goes to the agent as a turn of the conversation.
+        ...(choice === 'partly' ? { resume: { runIds: [randomUUID()], state: 'pending' } } : {}) });
+      record.claim!.answer = choice as 'yes' | 'no' | 'partly';
+      if (choice === 'no') this.claimNotice(record, person, note || undefined);
+      this.save(); this.changed();
+      void this.memoryReviews?.decideClaim?.(record.claim!.reviewId, choice as 'yes' | 'no' | 'partly', { id: who.id, name: person.name }, { ...(note ? { comment: note } : {}), ...(named ? {} : { admin: true }) }).then(
+        () => { record.claim!.outcome = choice === 'yes' ? 'reapplied' : 'kept_removed'; this.save(); this.changed(); },
+        () => { record.claim!.outcome = 'failed'; this.save(); this.changed(); });
+      if (choice === 'partly') void this.deliver(record.id);
+      return this.view(record);
+    }
     if (isMemory(record)) {
       // Approve (re-apply) or Reject (keep removed); no comment, no stop, and no agent turn follows.
       if (stop !== undefined || (choice !== 'approve' && choice !== 'reject') || comment !== undefined) throw new RuntimeFault('invalid_input', 400);
@@ -410,6 +503,10 @@ export class DecisionBoard {
   /** The outcome message (what the agent receives, and the app shows as a compact line). */
   outcomeText(record: DecisionRecord): string {
     if (isResearch(record)) return webResearchMessage(this.researchOutcome(record));
+    if (isClaim(record)) {
+      const c = record.claim!;
+      return `[Memory] ${c.person.name} was asked to confirm what this conversation attributed to them (${c.statements.map(s => `“${s}”`).join('; ')}) and answered: partly.${record.comment ? ` In their words: ${record.comment}` : ''} The memory change that relied on it was not kept. If something should be remembered, write only what ${c.person.name} actually said, and attribute it to them.`;
+    }
     const choice = record.options.find(o => o.id === record.choice);
     // The single-user app's person is "You" on screen, "The user" to the agent.
     const by = !record.decidedBy ? 'Someone' : record.decidedBy.id === LOCAL_USER_ID ? 'The user' : record.decidedBy.name;

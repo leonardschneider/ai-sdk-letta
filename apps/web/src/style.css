@@ -935,3 +935,7 @@ body[data-resizing] iframe { pointer-events: none; }
 .token-floor { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .token-floor-select { height: 28px; font-size: 12.5px; padding: 0 6px; max-width: 100%; }
 @media (max-width: 760px) { .trust-badge { display: none; } }
+
+.memory-claims { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.claim-card { border-color: var(--warn-border); }
+.notice-card .card-head { color: var(--danger); }

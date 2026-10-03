@@ -10,9 +10,9 @@ import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
-import { DecisionBell, DecisionsContext, MemoryReviewCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
+import { ClaimCard, DecisionBell, DecisionsContext, MemoryReviewCard, NoticeCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
-import { decideError, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
+import { decideError, mayReview, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
 import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
@@ -695,9 +695,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [threadDecisions, team, isAdmin]);
-  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending' && d.kind !== 'memory-review') : undefined;
+  const pendingHere = !current.draft ? [...threadDecisions.values()].find(d => d.status === 'pending' && d.kind !== 'memory-review' && d.kind !== 'claim-confirmation' && d.kind !== 'memory-notice') : undefined;
   // Memory reviews of this conversation (held changes, and the ones decided while you watched): cards after the messages.
-  const memoryReviews = !current.draft ? [...threadDecisions.values()].filter(d => d.kind === 'memory-review' && (d.status === 'pending' || (d.decidedAt && Date.now() - Date.parse(d.decidedAt) < 10 * 60_000))) : [];
+  const memoryReviews = !current.draft ? [...threadDecisions.values()].filter(d => (d.kind === 'memory-review' || d.kind === 'claim-confirmation' || (d.kind === 'memory-notice' && mayReview(d, team?.user.id, !team || isAdmin))) && (d.status === 'pending' || (d.decidedAt && Date.now() - Date.parse(d.decidedAt) < 10 * 60_000))) : [];
   /** Open a decision from the bell: its conversation (switching agents on a team server). */
   const openDecision = useCallback((decision: FeedDecision) => {
     setDrawer(false);
@@ -760,7 +760,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
                       {!readOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
-                {memoryReviews.map(decision => <MemoryReviewCard key={decision.id} decision={decision}/>)}
+                {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">
                 <div className="column footer-column">

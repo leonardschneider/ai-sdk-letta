@@ -51,6 +51,8 @@ export type TurnProvenance = {
   writer: 'agent' | 'reflection' | 'harness';
   /** A person approved this change (a re-applied memory review). */
   approvedBy?: { id: string; name: string };
+  /** The person a claim in this change named confirmed it (a re-applied claim confirmation). */
+  confirmedBy?: { id: string; name: string };
   /**
    * The conversation trusts Jiminy: protected files are not refused up front
    * in this turn; the reviewer decides (see `MemoryGuard`, trust mode).
@@ -66,7 +68,7 @@ export type TurnProvenance = {
 /** Trailer keys of provenance. */
 export const PROVENANCE_TRAILERS = Object.freeze({
   actor: 'X-Actor', role: 'X-Actor-Role', via: 'X-Via', unattended: 'X-Unattended', sources: 'X-Sources', writer: 'X-Writer', approvedBy: 'X-Approved-By', review: 'X-Memory-Review', reverts: 'X-Reverts',
-  trustMode: 'X-Trust-Mode', automationFloor: 'X-Automation-Floor',
+  trustMode: 'X-Trust-Mode', automationFloor: 'X-Automation-Floor', confirmedBy: 'X-Confirmed-By',
 });
 
 const clean = (value: string, max = 120) => value.replace(/[\p{Cc}\p{Cf}\r\n,;=]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -143,6 +145,7 @@ export function provenanceTrailers(provenance: TurnProvenance): Record<string, s
     [PROVENANCE_TRAILERS.writer]: provenance.writer,
     [PROVENANCE_TRAILERS.approvedBy]: provenance.approvedBy ? `${clean(provenance.approvedBy.id)} (${clean(provenance.approvedBy.name, 60)})` : undefined,
     [PROVENANCE_TRAILERS.trustMode]: provenance.trustMode ? 'jiminy' : undefined,
+    [PROVENANCE_TRAILERS.confirmedBy]: provenance.confirmedBy ? `${clean(provenance.confirmedBy.id)} (${clean(provenance.confirmedBy.name, 60)})` : undefined,
     [PROVENANCE_TRAILERS.automationFloor]: provenance.automationFloor,
   };
 }
@@ -167,12 +170,13 @@ export function parseProvenanceTrailers(trailers: Readonly<Record<string, string
   const writer = trailers[PROVENANCE_TRAILERS.writer];
   const approved = /^([^ ]+) \((.*)\)$/.exec(trailers[PROVENANCE_TRAILERS.approvedBy] ?? '');
   const floor = trailers[PROVENANCE_TRAILERS.automationFloor];
-  return { actor, ...(trailers[PROVENANCE_TRAILERS.unattended] === 'yes' ? { unattended: true } : {}), sources, writer: writer === 'reflection' || writer === 'harness' ? writer : 'agent', ...(approved ? { approvedBy: { id: approved[1]!, name: approved[2]! } } : {}),
+  const confirmed = /^([^ ]+) \((.*)\)$/.exec(trailers[PROVENANCE_TRAILERS.confirmedBy] ?? '');
+  return { ...(confirmed ? { confirmedBy: { id: confirmed[1]!, name: confirmed[2]! } } : {}), actor, ...(trailers[PROVENANCE_TRAILERS.unattended] === 'yes' ? { unattended: true } : {}), sources, writer: writer === 'reflection' || writer === 'harness' ? writer : 'agent', ...(approved ? { approvedBy: { id: approved[1]!, name: approved[2]! } } : {}),
     ...(trailers[PROVENANCE_TRAILERS.trustMode] === 'jiminy' ? { trustMode: true } : {}), ...(floor === 'accept' || floor === 'flag' || floor === 'ask_human' ? { automationFloor: floor } : {}) };
 }
 
 /** A short, human line of a provenance: "Alice (admin) · web research, report.pdf", "n8n · unattended". */
-export function provenanceLabel(provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer' | 'approvedBy' | 'trustMode'>): string {
+export function provenanceLabel(provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer' | 'approvedBy' | 'trustMode' | 'confirmedBy'>): string {
   const { actor } = provenance;
   const who = provenance.writer === 'reflection' ? 'Dreaming' : provenance.writer === 'harness' ? 'The app' : actor.kind === 'person' ? `${actor.name ?? actor.id ?? 'Someone'}${actor.role ? ` (${actor.role})` : ''}`
     : actor.kind === 'automation' || actor.kind === 'schedule' ? `${actor.kind === 'schedule' ? 'Scheduled task' : actor.via ?? 'Automation'}${actor.name ? ` “${actor.name}”` : ''}` : 'The agent';
@@ -180,6 +184,7 @@ export function provenanceLabel(provenance: Pick<TurnProvenance, 'actor' | 'unat
   if (provenance.unattended) parts.push('unattended');
   if (provenance.sources.length) parts.push(`read ${provenance.sources.map(s => s.label ?? s.kind).slice(0, 3).join(', ')}${provenance.sources.length > 3 ? ` +${provenance.sources.length - 3}` : ''}`);
   if (provenance.approvedBy) parts.push(`approved by ${provenance.approvedBy.name}`);
+  if (provenance.confirmedBy) parts.push(`confirmed by ${provenance.confirmedBy.name}`);
   if (provenance.trustMode && provenance.actor.kind === 'person') parts.push('trusts Jiminy');
   return parts.join(' · ');
 }

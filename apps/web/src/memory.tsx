@@ -56,6 +56,9 @@ function ReviewItem({ review, onOpenThread }: { review: MemoryReviewView; onOpen
       {review.rule && <p className="memory-review-line"><strong>Rule:</strong> {review.rule}</p>}
       {review.error && <p className="memory-review-line muted">The review failed ({review.error}); the safe default was applied.</p>}
       {exposure && <p className="memory-review-line">{exposure}</p>}
+      {review.claims?.length ? <ul className="memory-claims" aria-label="Claims">{review.claims.map((claim, i) => <li key={i} className="memory-review-line">
+        <strong>Claim:</strong> {claim.person} said “{claim.statement}” · {claim.match === 'member' ? `asked ${claim.to?.name ?? claim.person}${claim.answer ? `: answered ${claim.answer}${claim.comment ? ` (“${claim.comment}”)` : ''}` : ', waiting'}` : claim.match === 'self' ? 'their own words' : claim.match === 'ambiguous' ? 'several members match: an admin decides' : 'not a member: cannot be verified'}
+      </li>)}</ul> : null}
       {review.dropped?.length ? <DroppedView dropped={review.dropped}/> : null}
       {review.diff && <DiffView diff={review.diff}/>}
     </div>}

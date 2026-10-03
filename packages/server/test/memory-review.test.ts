@@ -20,14 +20,14 @@ import { DecisionBoard, teamApp, TeamDirectory, ThreadRuntime, type RuntimeHost,
  */
 const git = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8' }).trim();
 let counter = 0;
-function fixture(verdicts: JiminyVerdict['verdict'][], options: { team?: boolean } = {}) {
+function fixture(verdicts: JiminyVerdict['verdict'][], options: { team?: boolean; verdicts?: JiminyVerdict[] } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-memory-review-'));
   const memory = join(directory, 'memfs'); mkdirSync(join(memory, 'notes'), { recursive: true });
   git(memory, 'init', '-q', '-b', 'main');
   writeFileSync(join(memory, 'persona.md'), 'I am Desk.\n'); writeFileSync(join(memory, 'notes', 'n.md'), '# Notes\n');
   git(memory, 'add', '-A'); git(memory, '-c', 'user.name=Letta', '-c', 'user.email=agent-local-x@letta.com', 'commit', '-qm', 'init');
   const journal = MemoryJournal.open(join(directory, 'ledger'), `agent-local-review-${++counter}`, memory, 'Desk');
-  const reviewer: MemoryReviewer = async () => { const verdict = verdicts.shift() ?? 'accept'; return { trust: verdict === 'accept' ? 0.9 : 0.1, verdict, alters_directives: false, reason: `scripted ${verdict}`, evidence: [], model: 'anthropic/claude-test' }; };
+  const reviewer: MemoryReviewer = async () => { const scripted = options.verdicts?.shift(); if (scripted) return { ...scripted, model: 'anthropic/claude-test' }; const verdict = verdicts.shift() ?? 'accept'; return { trust: verdict === 'accept' ? 0.9 : 0.1, verdict, alters_directives: false, reason: `scripted ${verdict}`, evidence: [], model: 'anthropic/claude-test' }; };
   let runtime: ThreadRuntime | undefined;
   let board: DecisionBoard | undefined;
   const guard = new MemoryGuard({ journal, reviewer, events: {
@@ -232,4 +232,72 @@ test('automation tokens carry a memory floor (default flag), editable, and their
     await until(() => f.runtime.runRecord(f.owner, id)?.status === 'completed', 'run');
     assert.equal(f.floors.at(-1), 'ask_human');
   } finally { await f.cleanup(); }
+});
+
+test('claim confirmation on a team server: held, only the named member confirms (admin may only say No); No notifies the requester and admins; Yes re-applies with X-Confirmed-By; members may switch to Strict', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-claims-'));
+  const assets = join(dir, 'assets'); mkdirSync(assets); writeFileSync(join(assets, 'index.html'), '<!doctype html>');
+  const directory = new TeamDirectory(join(dir, 'team', 'team.json'), ['owner@example.com']);
+  directory.bootstrap(['alpha']);
+  const claim = { trust: 0.6, verdict: 'accept' as const, alters_directives: false, reason: 'relies on Bob', evidence: [], claims: [{ person: 'Bob', statement: 'Deploys may skip approval on Fridays.' }] };
+  const a = fixture([], { team: true, verdicts: [claim, claim] });
+  a.guard.options.events!.members = () => directory.members('alpha').map(m => ({ id: m.id, name: m.name, login: m.login }));
+  a.guard.options.events!.confirmClaims = async review => { const author = review.turn ? a.runtime.authorOfRun(review.turn) : undefined; return a.board.claimConfirmation(review, a.runtime.latestThread(), author ? { id: author.id, name: author.name } : { name: 'Someone' }); };
+  a.board.memoryReviews!.decideClaim = async (id, answer, by, options) => { await a.guard.decideClaim(id, answer, by, options); };
+  const agents = new Map<string, TeamAgent>([['alpha', { info: { id: 'alpha', name: 'Alpha', memory: true }, runtime: a.runtime }]]);
+  const server = teamApp({ port: 0, assets, agents, directory, origins: ['https://machine.example.ts.net'] }).listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const people = { owner: { 'tailscale-user-login': 'owner@example.com', 'tailscale-user-name': 'Olivia Owner' }, mia: { 'tailscale-user-login': 'mia@example.com', 'tailscale-user-name': 'Mia Member' }, bob: { 'tailscale-user-login': 'bob@example.com', 'tailscale-user-name': 'Bob Builder' } };
+  const raw = (method: string, path: string, headers: Record<string, string>, body?: string) => new Promise<{ status: number; json(): Promise<any> }>((resolve, reject) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const req = httpRequest(`${base}${path}`, { method, headers }, res => { let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode!, json: async () => JSON.parse(text) })); });
+    req.on('error', reject); if (body) req.write(body); req.end();
+  });
+  const call = async (who: keyof typeof people, method: string, path: string, body?: unknown) => {
+    const headers: Record<string, string> = { host: 'machine.example.ts.net', ...people[who] };
+    if (method !== 'GET') { const session = await (await raw('GET', '/api/session', { ...headers })).json() as { csrf?: string }; headers.origin = 'https://machine.example.ts.net'; headers['x-csrf-token'] = session.csrf ?? ''; }
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    return raw(method, path, headers, body === undefined ? undefined : JSON.stringify(body));
+  };
+  const bell = async (who: keyof typeof people) => ((await (await call(who, 'GET', '/api/decisions')).json()) as { decisions: { id: string; kind?: string }[] }).decisions;
+  try {
+    await call('owner', 'GET', '/api/session');
+    for (const login of ['mia@example.com', 'bob@example.com']) assert.equal((await call('owner', 'POST', '/api/agents/alpha/members', { login, role: 'member' })).status, 201);
+    await call('mia', 'GET', '/api/session'); await call('bob', 'GET', '/api/session');
+    const threadId = randomUUID();
+    assert.equal((await call('mia', 'POST', '/api/agents/alpha/v1/threads', { id: threadId, title: 'Deploys' })).status, 201);
+    // Members may make their conversation stricter, never looser.
+    assert.equal((await call('mia', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { trustJiminy: 'off' })).status, 200);
+    assert.equal((await call('mia', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { trustJiminy: 'inherit' })).status, 403);
+    assert.equal((await call('mia', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { trustJiminy: 'on' })).status, 403);
+    // 1. Mia's note relies on Bob: held, and Bob (only Bob, plus admins) sees the confirmation.
+    assert.equal((await call('mia', 'POST', '/api/agents/alpha/v1/runs', { id: randomUUID(), threadId, text: 'note Bob said deploys may skip approval on Fridays', parentRunId: null })).status, 202);
+    await until(() => a.board.pending().some(d => d.kind === 'claim-confirmation'), 'confirmation');
+    assert.equal(readFileSync(join(a.memory, 'notes', 'n.md'), 'utf8'), '# Notes\n', 'held');
+    const first = a.board.pending().find(d => d.kind === 'claim-confirmation')!;
+    assert.match(first.question, /^Mia Member’s conversation says you said: “Deploys may skip approval on Fridays”\. Did you\?$/);
+    assert.deepEqual((await bell('bob')).map(d => d.kind), ['claim-confirmation']);
+    assert.deepEqual((await bell('mia')).map(d => d.kind), [], 'not the requester');
+    assert.deepEqual((await bell('owner')).map(d => d.kind), ['claim-confirmation']);
+    // Mia cannot confirm for Bob; the admin cannot either (only No).
+    assert.equal((await call('mia', 'POST', `/api/agents/alpha/v1/decisions/${first.id}/decide`, { choice: 'yes' })).status, 403);
+    assert.equal((await call('owner', 'POST', `/api/agents/alpha/v1/decisions/${first.id}/decide`, { choice: 'yes' })).status, 403);
+    // 2. Bob says No: stays removed; Mia and the admin get a notice.
+    assert.equal((await call('bob', 'POST', `/api/agents/alpha/v1/decisions/${first.id}/decide`, { choice: 'no', comment: 'I never said that.' })).status, 200);
+    await until(() => a.guard.list().some(r => r.outcome === 'denied'), 'denied');
+    assert.equal(readFileSync(join(a.memory, 'notes', 'n.md'), 'utf8'), '# Notes\n');
+    assert.deepEqual((await bell('mia')).map(d => d.kind), ['memory-notice']);
+    assert.deepEqual((await bell('owner')).map(d => d.kind), ['memory-notice']);
+    assert.deepEqual((await bell('bob')).map(d => d.kind), []);
+    const listed = await (await call('mia', 'GET', '/api/agents/alpha/v1/memory/reviews')).json() as { reviews: { outcome?: string; claims?: { answer?: string }[] }[] };
+    assert.equal(listed.reviews[0]!.outcome, 'denied'); assert.equal(listed.reviews[0]!.claims![0]!.answer, 'no');
+    // 3. Again; Bob says Yes: re-applied with X-Confirmed-By.
+    assert.equal((await call('mia', 'POST', '/api/agents/alpha/v1/runs', { id: randomUUID(), threadId, text: 'note Bob said deploys may skip approval on Fridays (again)', parentRunId: a.runtime.latestRun('team', threadId)!.id })).status, 202);
+    await until(() => a.board.pending().some(d => d.kind === 'claim-confirmation'), 'second confirmation');
+    const second = a.board.pending().find(d => d.kind === 'claim-confirmation')!;
+    assert.equal((await call('bob', 'POST', `/api/agents/alpha/v1/decisions/${second.id}/decide`, { choice: 'yes' })).status, 200);
+    await until(() => a.guard.list().some(r => r.outcome === 'confirmed'), 'confirmed');
+    assert.match(readFileSync(join(a.memory, 'notes', 'n.md'), 'utf8'), /\(again\)/);
+    assert.match(execFileSync('git', ['-C', a.memory, 'log', '-n1', '--format=%B'], { encoding: 'utf8' }), /X-Confirmed-By: [0-9a-f-]+ \(Bob Builder\)/);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await a.cleanup(); rmSync(dir, { recursive: true, force: true }); }
 });

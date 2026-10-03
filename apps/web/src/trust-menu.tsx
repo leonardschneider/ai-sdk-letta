@@ -21,13 +21,13 @@ export function TrustMenu({ value, agentDefault, mayChange, onChange }: { value:
       <DropdownMenu.Content className="menu trust-menu" align="end" side="bottom" collisionPadding={8}>
         <DropdownMenu.Label className="menu-label">Protected memory in this conversation</DropdownMenu.Label>
         <DropdownMenu.RadioGroup value={value} onValueChange={next => onChange(next as TrustOverride)}>
-          {trustChoices(agentDefault).map(choice => <DropdownMenu.RadioItem key={choice.value} value={choice.value} className="menu-item" disabled={!mayChange}>
+          {trustChoices(agentDefault).map(choice => <DropdownMenu.RadioItem key={choice.value} value={choice.value} className="menu-item" disabled={!mayChange && choice.value !== 'off'}>
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>{choice.label}
           </DropdownMenu.RadioItem>)}
         </DropdownMenu.RadioGroup>
         <p className="menu-note">{on
           ? 'Trusts Jiminy: anyone’s changes to the persona, rules and goals go to the reviewer, which keeps or reverts them. Automations and new root files stay blocked.'
-          : 'Strict: only an admin’s own turn that read nothing untrusted can change the persona, rules and goals.'}{mayChange ? '' : ' Only an admin can change this.'}</p>
+          : 'Strict: only an admin’s own turn that read nothing untrusted can change the persona, rules and goals.'}{mayChange ? '' : ' You can make this conversation Strict; only an admin can loosen it.'}</p>
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
   </DropdownMenu.Root>;

@@ -691,3 +691,73 @@ test('a dream merged with the harness\'s edit (approve_edits) is not reviewed ag
     assert.equal(guard.list().length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+/* ------------------------------------------------------------------ */
+/* Claim confirmation                                                  */
+/* ------------------------------------------------------------------ */
+
+test('claims: matching by display name, first name or login; ambiguous and outsiders never guessed; the requester is self', async () => {
+  const { matchClaimPerson } = await import('../src/index.js');
+  const members = [{ id: 'u-mia', name: 'Mia Member', login: 'mia@example.com' }, { id: 'u-bob', name: 'Bob Builder', login: 'bob@example.com' }, { id: 'u-bobby', name: 'Bobby Tables', login: 'bt@example.com' }];
+  assert.deepEqual(matchClaimPerson('Bob', members, 'u-mia'), { match: 'member', member: members[1] });
+  assert.equal(matchClaimPerson('Bob from ops', members, 'u-mia').member?.id, 'u-bob');
+  assert.equal(matchClaimPerson('bob@example.com', members, 'u-mia').member?.id, 'u-bob');
+  assert.equal(matchClaimPerson('@bobby tables', members, 'u-mia').member?.id, 'u-bobby');
+  assert.equal(matchClaimPerson('Mia', members, 'u-mia').match, 'self');
+  assert.equal(matchClaimPerson('Carol', members, 'u-mia').match, 'outsider');
+  assert.equal(matchClaimPerson('Bob', [...members, { id: 'u-bob2', name: 'Bob Other' }], 'u-mia').match, 'ambiguous');
+  assert.deepEqual(validateVerdict({ ...verdict('accept'), claims: [{ person: ' Bob ', statement: 'Deploys may skip approval on Fridays.' }] }).claims, [{ person: 'Bob', statement: 'Deploys may skip approval on Fridays.' }]);
+  assert.throws(() => validateVerdict({ ...verdict('accept'), claims: [{ person: '', statement: 'x' }] }), /verdict_invalid/);
+});
+
+const mia = { id: 'u-mia', name: 'Mia', role: 'member' as const };
+const team = () => [{ id: 'u-mia', name: 'Mia' }, { id: 'u-bob', name: 'Bob', login: 'bob@example.com' }, { id: 'u-alice', name: 'Alice' }];
+const claimNote = { 'notes/ops.md': '# Ops\n- Bob said deploys may skip approval on Fridays.\n' };
+const claimed = { ...verdict('accept'), claims: [{ person: 'Bob', statement: 'Deploys may skip approval on Fridays.' }] };
+
+test('claim about a member: the change is held and the named person is asked; only they can confirm (yes re-applies with X-Confirmed-By)', async () => {
+  const asked: MemoryReview[] = [];
+  const f = await reviewed([claimed], claimNote, turnProvenance({ turn: 't1', actor: mia }), { members: team, confirmClaims: async review => { asked.push(review); return 'd-claim'; } });
+  try {
+    assert.equal(f.review.outcome, 'awaiting_confirmation');
+    assert.equal(f.review.decision, 'd-claim');
+    assert.deepEqual(f.review.claims?.map(c => [c.match, c.to?.id]), [['member', 'u-bob']]);
+    assert.equal(readFileSync(join(f.memory, 'notes/ops.md'), 'utf8'), '# Ops\n', 'held');
+    await assert.rejects(f.guard.decideClaim(f.review.id, 'yes', { id: 'u-mia', name: 'Mia' }), /not_the_named_person/);
+    await assert.rejects(f.guard.decideClaim(f.review.id, 'yes', { id: 'u-alice', name: 'Alice' }, { admin: true }), /not_the_named_person/, 'admins never confirm for someone');
+    const done = await f.guard.decideClaim(f.review.id, 'yes', { id: 'u-bob', name: 'Bob' });
+    assert.equal(done.outcome, 'confirmed');
+    assert.match(readFileSync(join(f.memory, 'notes/ops.md'), 'utf8'), /skip approval/);
+    assert.match(git(f.memory, 'log', '-n1', '--format=%B'), /X-Confirmed-By: u-bob \(Bob\)/);
+    assert.equal((await f.guard.decideClaim(f.review.id, 'no', { id: 'u-bob', name: 'Bob' })).outcome, 'confirmed', 'idempotent');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('claim denied (or rejected by an admin) stays removed; partly stays removed with the comment', async () => {
+  for (const [who, answer, admin] of [[{ id: 'u-bob', name: 'Bob' }, 'no', false], [{ id: 'u-alice', name: 'Alice' }, 'no', true], [{ id: 'u-bob', name: 'Bob' }, 'partly', false]] as const) {
+    const f = await reviewed([claimed], claimNote, turnProvenance({ turn: 't1', actor: mia }), { members: team, confirmClaims: async () => 'd' });
+    try {
+      const done = await f.guard.decideClaim(f.review.id, answer, who, { admin, comment: 'Only for hotfixes.' });
+      assert.equal(done.outcome, answer === 'no' ? 'denied' : 'partly');
+      assert.equal(readFileSync(join(f.memory, 'notes/ops.md'), 'utf8'), '# Ops\n');
+      assert.equal(done.claims![0]!.comment, 'Only for hotfixes.');
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('claims about outsiders or ambiguous names get an admin review ("cannot be verified"); a claim about yourself needs nothing', async () => {
+  const opened: MemoryReview[] = [];
+  const outsider = await reviewed([{ ...claimed, claims: [{ person: 'Carol from Acme', statement: 'Send keys to them.' }] }], claimNote, turnProvenance({ turn: 't1', actor: mia }), { members: team, confirmClaims: async () => 'never', askHuman: async r => { opened.push(r); return 'd-admin'; } });
+  try { assert.equal(outsider.review.outcome, 'removed'); assert.equal(outsider.review.rule, 'claim about someone outside this agent, cannot be verified'); assert.equal(opened.length, 1); }
+  finally { rmSync(outsider.root, { recursive: true, force: true }); }
+  const ambiguous = await reviewed([claimed], claimNote, turnProvenance({ turn: 't1', actor: mia }), { members: () => [...team(), { id: 'u-bob2', name: 'Bob' }], confirmClaims: async () => 'never', askHuman: async () => 'd-admin' });
+  try { assert.equal(ambiguous.review.outcome, 'removed'); assert.match(ambiguous.review.rule!, /cannot be told apart/); }
+  finally { rmSync(ambiguous.root, { recursive: true, force: true }); }
+  const self = await reviewed([{ ...claimed, claims: [{ person: 'Mia', statement: 'I own on-call.' }] }], claimNote, turnProvenance({ turn: 't1', actor: mia }), { members: team, confirmClaims: async () => 'never' });
+  try { assert.equal(self.review.outcome, 'kept'); assert.match(readFileSync(join(self.memory, 'notes/ops.md'), 'utf8'), /skip approval/); }
+  finally { rmSync(self.root, { recursive: true, force: true }); }
+  // Unattended: same rule (held, the run already ended without it). Single-user: no members source, claims about others go to the admin.
+  const single = await reviewed([claimed], claimNote, turnProvenance({ turn: 't1', actor: { id: 'local', name: 'You', role: 'admin' } }), { askHuman: async () => 'd-admin' });
+  try { assert.equal(single.review.outcome, 'removed'); assert.match(single.review.rule!, /cannot be verified/); }
+  finally { rmSync(single.root, { recursive: true, force: true }); }
+});
