@@ -160,7 +160,9 @@ export interface ToolBridgeOptions {
  * `source`: what started it (`n8n`, `conductor`, `api`); `kind`, `token`
  * and `name`: the automation token or scheduled task, for memory provenance.
  */
-export type UnattendedPolicy = { readonly preApproved: readonly string[]; readonly onBehalfOf?: string; readonly source?: string; readonly kind?: 'automation' | 'schedule'; readonly token?: string; readonly name?: string };
+export type UnattendedPolicy = { readonly preApproved: readonly string[]; readonly onBehalfOf?: string; readonly source?: string; readonly kind?: 'automation' | 'schedule'; readonly token?: string; readonly name?: string;
+  /** The verdict floor of this automation's untrusted memory writes (see `reviewFloor`). @default 'flag' */
+  readonly memoryFloor?: 'accept' | 'flag' | 'ask_human' };
 /** Fixed codes of calls refused in an unattended turn. */
 export const UNATTENDED_CODES = Object.freeze(['approval_required', 'question_required', 'unattended_stopped'] as const);
 export type UnattendedCode = typeof UNATTENDED_CODES[number];

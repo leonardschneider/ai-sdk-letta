@@ -14,12 +14,17 @@ import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './
  *   handle, `'auto'` (a model of another family than the agent's when one is
  *   connected, else the agent's), or `'off'` (no review).
  * - `reviewTimeoutMs`: most time one review may take.
+ * - `trustJiminy`: trust mode. Protected-file changes from a person's
+ *   attended turn that is not an admin turn with no untrusted content are
+ *   not refused up front; Jiminy reviews them (accept keeps them; reject and
+ *   ask_human as usual). Automations, schedules, new root files and letter
+ *   case aliases stay refused. Each conversation can override it. @default false
  * - `approveDreams`: when the Letta harness supports it (a capability it
  *   advertises), dreams are reviewed before they are merged into memory.
  *   Otherwise, and when `false`, they are reviewed right after.
  */
 export interface MemorySettings {
-  protected: readonly string[]; reviewer: string; reviewTimeoutMs: number; approveDreams: boolean;
+  protected: readonly string[]; reviewer: string; reviewTimeoutMs: number; approveDreams: boolean; trustJiminy: boolean;
   /**
    * Application tools whose results are the app's own (computed, not
    * written by someone else), so reading them does not make a turn
@@ -28,7 +33,7 @@ export interface MemorySettings {
   trustedTools: readonly string[];
 }
 /** Memory settings used when a definition sets none. */
-export const DEFAULT_MEMORY: Readonly<MemorySettings> = Object.freeze({ protected: Object.freeze(['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'system/**']), reviewer: 'auto', reviewTimeoutMs: 90_000, approveDreams: true, trustedTools: Object.freeze([]) as readonly string[] });
+export const DEFAULT_MEMORY: Readonly<MemorySettings> = Object.freeze({ protected: Object.freeze(['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'system/**']), reviewer: 'auto', reviewTimeoutMs: 90_000, approveDreams: true, trustJiminy: false, trustedTools: Object.freeze([]) as readonly string[] });
 
 /** Per-agent settings of the `web_search` tool. */
 export interface WebSearchSettings {
@@ -222,15 +227,16 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
 function resolveMemory(input: unknown): Readonly<MemorySettings> {
   if (input === undefined) return DEFAULT_MEMORY;
   if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('memory must be an object such as { reviewer: "auto" }');
-  const unknown = Object.keys(input).filter(key => !['protected', 'reviewer', 'reviewTimeoutMs', 'approveDreams', 'trustedTools'].includes(key));
-  if (unknown.length) throw new Error(`Unknown memory setting(s): ${unknown.join(', ')}. Supported: protected, reviewer, reviewTimeoutMs, approveDreams, trustedTools.`);
-  const { protected: patterns = DEFAULT_MEMORY.protected, reviewer = DEFAULT_MEMORY.reviewer, reviewTimeoutMs = DEFAULT_MEMORY.reviewTimeoutMs, approveDreams = DEFAULT_MEMORY.approveDreams, trustedTools = DEFAULT_MEMORY.trustedTools } = input as Partial<Record<keyof MemorySettings, unknown>>;
+  const unknown = Object.keys(input).filter(key => !['protected', 'reviewer', 'reviewTimeoutMs', 'approveDreams', 'trustJiminy', 'trustedTools'].includes(key));
+  if (unknown.length) throw new Error(`Unknown memory setting(s): ${unknown.join(', ')}. Supported: protected, reviewer, reviewTimeoutMs, approveDreams, trustJiminy, trustedTools.`);
+  const { protected: patterns = DEFAULT_MEMORY.protected, reviewer = DEFAULT_MEMORY.reviewer, reviewTimeoutMs = DEFAULT_MEMORY.reviewTimeoutMs, approveDreams = DEFAULT_MEMORY.approveDreams, trustJiminy = DEFAULT_MEMORY.trustJiminy, trustedTools = DEFAULT_MEMORY.trustedTools } = input as Partial<Record<keyof MemorySettings, unknown>>;
   if (!Array.isArray(trustedTools) || trustedTools.some(t => typeof t !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(t))) throw new Error('memory.trustedTools must be tool names');
   if (!Array.isArray(patterns) || patterns.length > 100 || patterns.some(p => typeof p !== 'string' || !/^[\w .@-]+(?:\/[\w .@-]+)*(?:\/\*\*)?$/.test(p) || p.split('/').some(part => part === '..' || part === '.' || part.startsWith('.')))) throw new Error('memory.protected must be up to 100 memory paths such as "persona.md" or "policies/**"');
   if (typeof reviewer !== 'string' || !(reviewer === 'auto' || reviewer === 'off' || /^[\w.-]+\/[\w.:-]+$/.test(reviewer))) throw new Error('memory.reviewer must be "auto", "off" or a model handle such as "anthropic/claude-sonnet-5"');
   if (typeof reviewTimeoutMs !== 'number' || !Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs < 5000 || reviewTimeoutMs > 600_000) throw new Error('memory.reviewTimeoutMs must be 5000–600000');
   if (typeof approveDreams !== 'boolean') throw new Error('memory.approveDreams must be true or false');
-  return Object.freeze({ protected: Object.freeze([...patterns as string[]]), reviewer, reviewTimeoutMs, approveDreams, trustedTools: Object.freeze([...trustedTools as string[]]) });
+  if (typeof trustJiminy !== 'boolean') throw new Error('memory.trustJiminy must be true or false');
+  return Object.freeze({ protected: Object.freeze([...patterns as string[]]), reviewer, reviewTimeoutMs, approveDreams, trustJiminy, trustedTools: Object.freeze([...trustedTools as string[]]) });
 }
 
 function resolveWebSearch(input: unknown): Readonly<WebSearchSettings> {

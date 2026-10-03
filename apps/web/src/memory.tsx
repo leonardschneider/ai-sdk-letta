@@ -4,7 +4,7 @@ import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
 import { ago } from './decisions-model.js';
-import { exposureLine, filesLine, memoryError, refusalReason, revertToast, reviewerOptions, sourceChip, trustChip, verdictChip, type MemoryData, type MemoryRevert, type MemoryReviewView, type ProvenanceSection } from './memory-model.js';
+import { droppedCount, exposureLine, filesLine, memoryError, refusalReason, revertToast, reviewerOptions, sourceChip, trustChip, verdictChip, type MemoryData, type MemoryRevert, type MemoryReviewView, type ProvenanceSection } from './memory-model.js';
 
 /** A row at the foot of the sidebar: opens the Memory view. */
 export function MemoryRow({ onOpen, pending }: { onOpen(): void; pending: number }) {
@@ -24,6 +24,14 @@ export function ReviewChips({ review }: { review: MemoryReviewView }) {
     <span className="prov-chip" data-tone={verdict.tone}>{verdict.label}</span>
     {trust && <span className="prov-chip" data-tone="neutral" title={review.jiminy?.model ? `Reviewed by ${review.jiminy.model}` : undefined}>{trust}</span>}
   </span>;
+}
+
+/** Lines the reviewer dropped from a change (kept out of memory while the rest stays). */
+export function DroppedView({ dropped }: { dropped: readonly { path: string; start: number; end: number; text: string }[] }) {
+  return <div className="memory-dropped" aria-label={`Dropped by the reviewer: ${droppedCount(dropped)}`}>
+    <p className="memory-dropped-head">Dropped by the reviewer ({droppedCount(dropped)}); the rest was kept:</p>
+    {dropped.map(drop => <pre key={`${drop.path}:${drop.start}`} className="memory-dropped-lines"><span className="mono muted">{drop.path} {drop.start === drop.end ? `line ${drop.start}` : `lines ${drop.start}–${drop.end}`}</span>{'\n'}{drop.text.split('\n').map((line, i) => <span key={i} className="diff-line" data-kind="del">{line || ' '}{'\n'}</span>)}</pre>)}
+  </div>;
 }
 
 /** A diff as lines, added and removed lines marked (text only, never HTML). */
@@ -48,6 +56,7 @@ function ReviewItem({ review, onOpenThread }: { review: MemoryReviewView; onOpen
       {review.rule && <p className="memory-review-line"><strong>Rule:</strong> {review.rule}</p>}
       {review.error && <p className="memory-review-line muted">The review failed ({review.error}); the safe default was applied.</p>}
       {exposure && <p className="memory-review-line">{exposure}</p>}
+      {review.dropped?.length ? <DroppedView dropped={review.dropped}/> : null}
       {review.diff && <DiffView diff={review.diff}/>}
     </div>}
   </li>;

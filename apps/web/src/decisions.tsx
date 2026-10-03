@@ -4,7 +4,7 @@ import { Bell, Brain, Check, ChevronRight, CircleStop, CornerDownRight, Globe, L
 import { useAuiState } from '@assistant-ui/react';
 import { useToast } from './toasts.js';
 import { ago, askedBy, bellCount, bellLabel, decideError, decisionSummary, mayReview, memoryDecisionSummary, outcomeSummary, requestedId, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
-import { DiffView } from './memory.js';
+import { DiffView, DroppedView } from './memory.js';
 
 /* ------------------------------------------------------------------ */
 /* State shared with the conversation                                  */
@@ -285,6 +285,7 @@ export function MemoryReviewCard({ decision }: { decision: DecisionView }) {
       {memory.adminOnly && <span className="prov-chip" data-tone="flag"><Lock size={10} aria-hidden="true"/> admins only</span>}
     </span>}
     {decision.context && <p className="card-details">Jiminy{memory?.model ? ` (${memory.model})` : ''}: {decision.context}</p>}
+    {memory?.dropped?.length ? <DroppedView dropped={memory.dropped}/> : null}
     {memory?.diff && <DiffView diff={memory.diff}/>}
     {settled
       ? <p className="decision-who">{settled}{decision.decidedAt ? ` · ${ago(decision.decidedAt)}` : ''}</p>

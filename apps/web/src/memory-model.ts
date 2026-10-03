@@ -7,11 +7,15 @@ export type MemoryReviewView = {
   verdict?: 'accept' | 'flag' | 'ask_human' | 'reject'; floor?: string; rule?: string;
   outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked';
   decision?: string; mergedAt?: string; createdAt: string; settledAt?: string; error?: string;
-  beforeMerge?: { decision: 'approve' | 'reject' | 'approve_paths'; paths?: string[]; branch: string };
+  beforeMerge?: { decision: 'approve' | 'reject' | 'approve_paths' | 'approve_edits'; paths?: string[]; branch: string };
   provenance: string; threadId?: string; diff?: string;
   jiminy?: { trust: number; verdict: string; reason: string; model?: string; ms?: number };
   exposureMs?: number;
+  /** Lines the reviewer dropped while keeping the rest (`path`, line range, exact text). */
+  dropped?: DroppedLines[];
 };
+/** Lines a reviewer dropped from a change. */
+export type DroppedLines = { path: string; start: number; end: number; text: string };
 /** A memory write the guard refused (protected file, or a new root file from an untrusted turn). */
 export type MemoryRefusalView = { path: string; code: 'protected_memory' | 'new_root_file' | string; tool: string; at: string; provenance?: string; threadId?: string };
 export type MemoryData = { reviews: MemoryReviewView[]; refused?: MemoryRefusalView[]; reviewer?: { model: string; available: string[] } };
@@ -25,13 +29,14 @@ export type ProvenanceSection = { lines: string; from: number; to: number; by: s
 export type ChipTone = 'ok' | 'flag' | 'held' | 'reverted' | 'pending' | 'neutral';
 
 /** The verdict chip of a review: "Accepted", "Flagged", "Removed until approved", "Reverted", "Approved and re-applied", "Reviewing…". */
-export function verdictChip(review: Pick<MemoryReviewView, 'status' | 'verdict' | 'outcome' | 'beforeMerge' | 'error'>): { label: string; tone: ChipTone } {
+export function verdictChip(review: Pick<MemoryReviewView, 'status' | 'verdict' | 'outcome' | 'beforeMerge' | 'error' | 'dropped'>): { label: string; tone: ChipTone } {
   if (review.status === 'pending') return { label: 'Reviewing…', tone: 'pending' };
   if (review.outcome === 'blocked') return { label: 'Blocked before merging', tone: 'reverted' };
   if (review.outcome === 'reapplied') return { label: 'Approved and re-applied', tone: 'ok' };
   if (review.outcome === 'kept_removed') return { label: 'Rejected by a person', tone: 'reverted' };
   if (review.outcome === 'removed') return { label: 'Removed until approved', tone: 'held' };
   if (review.outcome === 'reverted') return { label: 'Reverted', tone: 'reverted' };
+  if (review.dropped?.length) return { label: `${review.beforeMerge ? 'Merged' : 'Kept'}, ${droppedCount(review.dropped)} dropped`, tone: 'flag' };
   if (review.verdict === 'flag') return { label: review.error ? 'Kept · review failed' : 'Flagged', tone: 'flag' };
   if (review.beforeMerge?.decision === 'approve_paths') return { label: 'Partly approved before merging', tone: 'flag' };
   if (review.beforeMerge) return { label: 'Approved before merging', tone: 'ok' };
@@ -91,4 +96,22 @@ export function memoryError(code: string): string {
 export function reviewerOptions(available: readonly string[], current: string): { value: string; label: string }[] {
   const models = [...new Set([...available, ...(current !== 'auto' ? [current] : [])])].sort();
   return [{ value: 'auto', label: 'Automatic (prefers another model family)' }, ...models.map(model => ({ value: model, label: model }))];
+}
+
+/** "1 line", "3 lines": how many lines a list of drops removes. */
+export function droppedCount(drops: readonly DroppedLines[]): string {
+  const lines = drops.reduce((sum, d) => sum + d.end - d.start + 1, 0);
+  return lines === 1 ? '1 line' : `${lines} lines`;
+}
+
+/** A conversation's trust mode override (memory review). */
+export type TrustOverride = 'inherit' | 'on' | 'off';
+/** The three choices, naming what "Agent default" means now. */
+export function trustChoices(agentDefault: boolean): { value: TrustOverride; label: string }[] {
+  return [{ value: 'inherit', label: `Agent default (${agentDefault ? 'trusts Jiminy' : 'strict'})` }, { value: 'on', label: 'Trust Jiminy' }, { value: 'off', label: 'Strict' }];
+}
+/** "Protected memory: strict (agent default)", "Protected memory: trusts Jiminy". */
+export function trustSummary(value: TrustOverride, agentDefault: boolean): string {
+  const on = value === 'inherit' ? agentDefault : value === 'on';
+  return `Protected memory: ${on ? 'trusts Jiminy' : 'strict'}${value === 'inherit' ? ' (agent default)' : ''}`;
 }

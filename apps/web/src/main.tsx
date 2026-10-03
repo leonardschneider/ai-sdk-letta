@@ -26,6 +26,8 @@ import { rewindError, type RewindSummary } from './rewind-model.js';
 import { LatexContext } from './markdown.js';
 import { resolveLatex, type LatexOverride } from './latex.js';
 import { LatexMenu } from './latex-menu.js';
+import { TrustMenu } from './trust-menu.js';
+import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
@@ -357,7 +359,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   /** Team mode: you may answer or stop the live turn if you sent it or are an admin. */
   const mayAct = !team || isAdmin || !liveAuthor || liveAuthor.id === team.user.id;
 
-  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride; replyMode?: ReplyModeOverride }) {
+  async function patch(id: string, body: { title?: string; archived?: boolean; latex?: LatexOverride; replyMode?: ReplyModeOverride; trustJiminy?: TrustOverride }) {
     const updated = await api<ThreadSummary>(`/v1/threads/${id}`, body, 'PATCH');
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
@@ -388,6 +390,11 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     catch (e) { toast(metadataError(e), { tone: 'error' }); }
   }
 
+  /** A conversation's trust mode override (memory review); admins only on a team server. */
+  async function setTrust(id: string, value: TrustOverride) {
+    try { await patch(id, { trustJiminy: value }); toast(value === 'on' ? 'This conversation now trusts Jiminy with protected memory.' : value === 'off' ? 'Protected memory is strict in this conversation.' : 'This conversation follows the agent’s setting.'); }
+    catch (e) { toast(errorCode(e) === 'admin_required' ? 'Only an admin can change how protected memory is handled.' : metadataError(e), { tone: 'error' }); }
+  }
   /** A conversation's LaTeX override; the open conversation re-renders at once. */
   async function setLatex(id: string, value: LatexOverride) {
     try { await patch(id, { latex: value }); } catch (e) { toast(metadataError(e), { tone: 'error' }); }
@@ -738,6 +745,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
+            {memoryEnabled && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>

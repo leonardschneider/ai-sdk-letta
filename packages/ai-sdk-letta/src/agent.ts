@@ -38,7 +38,9 @@ export interface AgentPresentation {
  * unattended, and the untrusted content its message carries (attachments,
  * and the `sources` the call named).
  */
-export interface TurnInfo { otid?: string; actor?: TurnActor; unattended?: UnattendedPolicy; sources?: ContentSource[] }
+export interface TurnInfo { otid?: string; actor?: TurnActor; unattended?: UnattendedPolicy; sources?: ContentSource[];
+  /** The conversation trusts Jiminy for this turn (see `MemorySettings.trustJiminy`); undefined: the agent's setting. */
+  trustJiminy?: boolean }
 
 /** Durable delivery hooks: `begin` before sending, `complete` after a confirmed finish. */
 export interface DeliveryHooks { begin(): void; complete(): void }
@@ -149,6 +151,12 @@ export type LettaCallOptions = {
    * its memory provenance. Attachments are counted already.
    */
   sources?: ContentSource[];
+  /**
+   * Trust mode for this turn (the conversation's override of the agent's
+   * `memory.trustJiminy`): protected-file changes go to Jiminy instead of
+   * being refused up front. Undefined: the agent's setting.
+   */
+  trustJiminy?: boolean;
 };
 /**
  * The note an unattended turn starts with (display history never shows it).
@@ -434,10 +442,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
     if (this.busy) throw new Error('A turn is already running');
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder', 'sources'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder', 'sources', 'trustJiminy'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
     if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
     if (options.reminder !== undefined && typeof options.reminder !== 'string') throw new Error('Invalid reminder');
+    if (options.trustJiminy !== undefined && typeof options.trustJiminy !== 'boolean') throw new Error('Invalid trustJiminy');
     if (options.sources !== undefined && (!Array.isArray(options.sources) || options.sources.length > 20 || options.sources.some(source => !source || !['web', 'attachment', 'atlassian', 'tool'].includes(source.kind)))) throw new Error('Invalid sources');
     if (options.unattended !== undefined && (!options.unattended || typeof options.unattended !== 'object' || !Array.isArray(options.unattended.preApproved) || options.unattended.preApproved.some(name => typeof name !== 'string'))) throw new Error('Invalid unattended policy');
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
@@ -459,11 +468,12 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}), ...(options.actor.role === 'admin' || options.actor.role === 'member' ? { role: options.actor.role } : {}) }) : this.defaultActor;
     // The same policy object for the whole turn (the bridge remembers a refusal per object).
     const unattended = options.unattended ? Object.freeze({ preApproved: Object.freeze([...options.unattended.preApproved]), ...(typeof options.unattended.onBehalfOf === 'string' ? { onBehalfOf: options.unattended.onBehalfOf } : {}), ...(typeof options.unattended.source === 'string' ? { source: options.unattended.source } : {}),
-      ...(options.unattended.kind === 'automation' || options.unattended.kind === 'schedule' ? { kind: options.unattended.kind } : {}), ...(typeof options.unattended.token === 'string' ? { token: options.unattended.token } : {}), ...(typeof options.unattended.name === 'string' ? { name: options.unattended.name } : {}) }) : undefined;
+      ...(options.unattended.kind === 'automation' || options.unattended.kind === 'schedule' ? { kind: options.unattended.kind } : {}), ...(typeof options.unattended.token === 'string' ? { token: options.unattended.token } : {}), ...(typeof options.unattended.name === 'string' ? { name: options.unattended.name } : {}),
+      ...(options.unattended.memoryFloor === 'accept' || options.unattended.memoryFloor === 'flag' || options.unattended.memoryFloor === 'ask_human' ? { memoryFloor: options.unattended.memoryFloor } : {}) }) : undefined;
     // Attachments and images are content the person did not necessarily write: untrusted for memory provenance.
     const attached: ContentSource[] = parsed.attachments.length ? [{ kind: 'attachment', label: parsed.attachments.length === 1 ? parsed.attachments[0]!.name || 'attachment' : `${parsed.attachments.length} attachments` }] : [];
     const sources = [...attached, ...(options.sources ?? []).map(source => ({ ...source }))];
-    const info: TurnInfo = { ...(options.otid ? { otid: options.otid } : {}), ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}), ...(sources.length ? { sources } : {}) };
+    const info: TurnInfo = { ...(options.otid ? { otid: options.otid } : {}), ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}), ...(sources.length ? { sources } : {}), ...(options.trustJiminy !== undefined ? { trustJiminy: options.trustJiminy } : {}) };
     try { this.beforeTurn?.(info); } catch { /* observer */ }
     // Attachments are stored before delivery; a turn that then fails leaves them in the folder (harmless, and listed).
     let turn: Awaited<ReturnType<typeof storeUserTurn>>;

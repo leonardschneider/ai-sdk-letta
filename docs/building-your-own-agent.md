@@ -604,9 +604,21 @@ export const guarded = defineAgent({
     protected: ['persona.md', 'rules.md', 'goals.md', 'MEMORY.md', 'house-rules/**'],
     // 'auto' (default): another model family than the agent's when one is connected.
     reviewer: 'auto',
+    // Trust mode (off by default): members' persona or rules changes go to Jiminy instead of being refused.
+    trustJiminy: false,
   },
 });
 ```
+
+In **trust mode** (`trustJiminy: true`, or per conversation from the shield
+button in its header), protected-file changes from a person's own turn are not
+refused up front: Jiminy reviews them and may keep them. Automations,
+scheduled tasks, new root files and letter-case aliases stay refused, and a
+failed review still reverts. Jiminy can also **drop lines**: keep a change but
+remove the lines it names (for example an injected rule in an otherwise good
+dream). Each **automation token** has a memory floor for runs that read
+untrusted content (`flag` by default; `accept` or `ask_human`), set in the
+Automations dialog.
 
 On a team server, a turn's role is its author's role in the agent; in the
 single-user app, you are the admin. Turns started by automations are
@@ -635,6 +647,9 @@ test('only an admin turn with no untrusted content may change persona.md', () =>
   assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: admin, sources: [{ kind: 'web', label: 'web research' }] }))?.code, 'protected_memory');
   assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: { id: 'bob', role: 'member' } }))?.code, 'protected_memory');
   assert.equal(guard.allows('Write', join(root, 'new-rules.md'), turnProvenance({ actor: admin, unattended: { source: 'n8n' } }))?.code, 'new_root_file');
+  // Trust mode: a member's change goes to Jiminy instead; an automation's never does.
+  assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: { id: 'bob', role: 'member' }, trustMode: true })), undefined);
+  assert.equal(guard.allows('Edit', persona, turnProvenance({ actor: admin, unattended: { source: 'n8n' }, trustMode: true }))?.code, 'protected_memory');
 });
 ```
 

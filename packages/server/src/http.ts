@@ -184,7 +184,11 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   /** Shared runtimes: you are typing in this conversation (`{ typing: true }`, a heartbeat) or stopped (`{ typing: false }`). Nothing else is accepted, never text. */
   app.post('/v1/threads/:id/typing', (req, res) => res.json(runtime.typing(owner, req.params.id, author(req), req.body)));
   // Body: any of { title, archived, latex: 'inherit' | 'on' | 'off', replyMode: 'inherit' | 'always' | 'when-addressed' | 'agent-decides' (shared runtimes) }. A rename also renames the conversation's folder; answer once that is done, so a refresh shows it.
-  app.patch('/v1/threads/:id', async (req, res) => { const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary); });
+  app.patch('/v1/threads/:id', async (req, res) => {
+    // Trust mode loosens the protected-file rule: on a team server, only admins change it.
+    if (access && req.body && typeof req.body === 'object' && 'trustJiminy' in req.body && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary);
+  });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
@@ -293,6 +297,8 @@ export interface GuiAgentInfo {
   decisions?: boolean;
   /** The agent's memory is reviewed (Jiminy): the app shows the Memory view and memory review decisions. */
   memory?: boolean;
+  /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
+  trustJiminy?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -383,7 +389,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
@@ -486,7 +492,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}), ...(info.trustJiminy ? { trustJiminy: true } : {}) }; };
   // Pending decisions of every agent you belong to (the notification bell).
   const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */

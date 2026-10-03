@@ -14,7 +14,7 @@ export type DecisionView = {
   /** A web search result waiting for review (only `reviewer`, or an admin, may decide it); `stale`: "Search again" is offered. */
   kind?: 'web-research' | 'memory-review'; research?: Record<string, unknown>; reviewer?: { id: string; name: string }; stale?: boolean; staleAt?: string;
   /** A memory change held for a person (`memory-review`): removed until approved. `adminOnly`: it touches protected files. */
-  memory?: { reviewId: string; files: { path: string; protected: boolean; change: string }[]; diff: string; provenance: string; protected: boolean; adminOnly: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
+  memory?: { reviewId: string; files: { path: string; protected: boolean; change: string }[]; diff: string; provenance: string; protected: boolean; adminOnly: boolean; dropped?: { path: string; start: number; end: number; text: string }[]; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
 };
 /** A pending decision in the notification bell: with its agent and conversation. */
 export type FeedDecision = DecisionView & { agent: { id: string; name: string }; thread: { id: string; title: string } };

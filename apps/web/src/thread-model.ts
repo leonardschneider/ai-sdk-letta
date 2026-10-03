@@ -3,6 +3,8 @@ import { nodesText, parseTitle, titleText } from 'ai-sdk-letta/title';
 
 /** A thread as listed by the server. `latex` is absent from older servers (treated as `'inherit'`). */
 export type ThreadSummary = { id: string; title: string; state: string; archived?: boolean; createdAt?: string; lastActivityAt?: string; latex?: 'inherit' | 'on' | 'off';
+  /** The conversation's trust mode override (memory review); absent: the agent's setting. */
+  trustJiminy?: 'on' | 'off';
   /** Team servers: who started it, the run in progress, and how many messages wait. */
   createdBy?: { id: string; login: string; name: string; avatar?: string }; running?: string; queued?: number;
   /** Team servers: the conversation's reply mode override, the mode in effect now, how many people share the agent, and who is typing. */

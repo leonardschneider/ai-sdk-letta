@@ -35,6 +35,8 @@ function fixture(verdicts: JiminyVerdict['verdict'][], options: { team?: boolean
     askHuman: async review => { const threadId = runtime!.threadOfConversationAny(review.conversationId ?? '') ?? runtime!.latestThread(); const author = review.turn ? runtime!.authorOfRun(review.turn) : undefined; return board!.memoryReview(review, threadId, author ? { id: author.id, name: author.name } : undefined); },
   } });
   const actors: (TurnActor | undefined)[] = [];
+  const trusts: (boolean | undefined)[] = [];
+  const floors: (string | undefined)[] = [];
   const conversations = new Map<string, UIMessage[]>();
   const host: RuntimeHost = {
     ...(options.team ? { parallel: true } : {}),
@@ -46,7 +48,7 @@ function fixture(verdicts: JiminyVerdict['verdict'][], options: { team?: boolean
       const turnIds = new WeakMap<object, string>();
       // Like the real hosts: the single-user app acts for its local user (its admin); team turns act for their author.
       const agent = new LettaAgent({ id: 'fixture', tools: {}, lettaAgentId: 'agent-local-review', interactions: new ToolInteractions(), ...(options.team ? { listening: true, name: 'Desk' } : { defaultActor: LOCAL_ACTOR }),
-        beforeTurn: turn => { const id = turn.otid ?? randomUUID(); turnIds.set(turn, id); actors.push(turn.actor); journal.beginTurn(id, conversationId, turnProvenance({ turn: id, conversationId, ...(turn.actor ? { actor: turn.actor } : {}) })); },
+        beforeTurn: turn => { const id = turn.otid ?? randomUUID(); turnIds.set(turn, id); actors.push(turn.actor); trusts.push(turn.trustJiminy); floors.push(turn.unattended?.memoryFloor); journal.beginTurn(id, conversationId, turnProvenance({ turn: id, conversationId, ...(turn.actor ? { actor: turn.actor } : {}), ...(turn.unattended ? { unattended: turn.unattended } : {}), ...(turn.trustJiminy ? { trustMode: true } : {}) })); },
         afterTurn: async turn => { const recorded = await journal.endTurn(turnIds.get(turn)!, conversationId); if (recorded) await guard.reviewTurn(recorded); },
         open: () => ({
           async send(message: SendMessage) { input = (typeof message === 'string' ? message : '').replace(/^(<system-reminder>[\s\S]*?<\/system-reminder>\n)+/, ''); },
@@ -66,7 +68,7 @@ function fixture(verdicts: JiminyVerdict['verdict'][], options: { team?: boolean
   board = new DecisionBoard(join(directory, 'decisions.json'), runtime, owner, { id: 'desk', name: 'Desk' });
   board.memoryReviews = { decide: async (id, choice, by) => { await guard.decideReview(id, choice, by); } };
   const rt = runtime; const b = board;
-  return { directory, memory, runtime: rt, board: b, guard, owner, actors,
+  return { directory, memory, runtime: rt, board: b, guard, owner, actors, trusts, floors,
     async turn(threadId: string, text: string, author?: RunAuthor) {
       const id = randomUUID();
       await rt.start(owner, { id, threadId, text, parentRunId: rt.latestRun(owner, threadId)?.id ?? null }, author);
@@ -182,5 +184,52 @@ test('team: turns carry their author\'s role; a member\'s change to a protected 
     const listed = await (await call('mia', 'GET', '/api/agents/alpha/v1/memory/reviews')).json() as { reviews: { outcome?: string }[] };
     assert.deepEqual(listed.reviews.map(r => r.outcome), ['reapplied', 'reverted']);
     assert.equal((await call('mia', 'PUT', '/api/agents/alpha/v1/memory/reviewer', { model: 'auto' })).status, 403);
+    // Trust mode loosens the protected-file rule: members cannot turn it on; admins can.
+    assert.equal((await call('mia', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { trustJiminy: 'on' })).status, 403);
+    assert.equal((await call('owner', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { trustJiminy: 'on' })).status, 200);
+    assert.equal((await call('mia', 'PATCH', `/api/agents/alpha/v1/threads/${threadId}`, { title: 'Persona v2' })).status, 200, 'other metadata stays open to members');
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await a.cleanup(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('trust mode per conversation: the override reaches the turn; on a team server only admins change it', async () => {
+  const f = fixture(['accept']);
+  try {
+    const threadId = await f.thread();
+    await f.turn(threadId, 'note a');
+    assert.equal(f.trusts.at(-1), undefined, 'no override: the agent setting applies');
+    assert.equal((f.runtime.updateMetadata(f.owner, threadId, { trustJiminy: 'on' }) as { trustJiminy?: string }).trustJiminy, 'on');
+    await f.turn(threadId, 'note b');
+    assert.equal(f.trusts.at(-1), true);
+    f.runtime.updateMetadata(f.owner, threadId, { trustJiminy: 'off' });
+    await f.turn(threadId, 'note c');
+    assert.equal(f.trusts.at(-1), false);
+    assert.equal((f.runtime.updateMetadata(f.owner, threadId, { trustJiminy: 'inherit' }) as { trustJiminy?: string }).trustJiminy, undefined);
+    assert.throws(() => f.runtime.updateMetadata(f.owner, threadId, { trustJiminy: true }), (e: { code?: string }) => e.code === 'invalid_input');
+  } finally { await f.cleanup(); }
+});
+
+test('automation tokens carry a memory floor (default flag), editable, and their runs pass it to the turn', async () => {
+  const { AutomationStore, createToken, setTokenMemoryFloor, tokenSummary } = await import('../src/index.js');
+  const dir = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-floor-'));
+  try {
+    const store = new AutomationStore(join(dir, 'automation.json'));
+    const me = { id: 'local', name: 'You' };
+    const { token } = createToken(store, { name: 'Nightly', via: 'n8n' }, { actor: me, createdBy: me, preApprovable: [] });
+    assert.equal(tokenSummary(token).memoryFloor, 'flag');
+    const strict = createToken(store, { name: 'Strict', via: 'n8n', memoryFloor: 'ask_human' }, { actor: me, createdBy: me, preApprovable: [] }).token;
+    assert.equal(tokenSummary(strict).memoryFloor, 'ask_human');
+    assert.throws(() => createToken(store, { name: 'Bad', memoryFloor: 'reject' }, { actor: me, createdBy: me, preApprovable: [] }), /invalid_input/);
+    assert.equal(tokenSummary(setTokenMemoryFloor(store, token.id, { memoryFloor: 'accept' })).memoryFloor, 'accept');
+    assert.throws(() => setTokenMemoryFloor(store, token.id, { memoryFloor: 'nope' }), /invalid_input/);
+    assert.throws(() => setTokenMemoryFloor(store, 'missing', { memoryFloor: 'flag' }), /not_found/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  // A run started with a floor passes it to the agent's turn.
+  const f = fixture(['accept']);
+  try {
+    const threadId = await f.thread();
+    const id = randomUUID();
+    await f.runtime.start(f.owner, { id, threadId, text: 'note from n8n', parentRunId: null }, undefined, { source: { kind: 'automation', via: 'n8n', tokenId: 't1', name: 'Nightly' }, preApproved: [], memoryFloor: 'ask_human' });
+    await until(() => f.runtime.runRecord(f.owner, id)?.status === 'completed', 'run');
+    assert.equal(f.floors.at(-1), 'ask_human');
+  } finally { await f.cleanup(); }
 });

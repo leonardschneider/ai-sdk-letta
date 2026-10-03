@@ -21,6 +21,8 @@ export type DisplayOverride = 'inherit' | 'on' | 'off';
 const DISPLAY_OVERRIDES: readonly DisplayOverride[] = ['inherit', 'on', 'off'];
 // createdAt/lastActivityAt/latex are optional: threads recorded before they existed stay valid (latex: inherit).
 type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'>; createdBy?: RunAuthor; replyMode?: ReplyMode;
+  /** Trust mode of this conversation (memory review; see `MemorySettings.trustJiminy`); absent: the agent's setting. */
+  trustJiminy?: Exclude<DisplayOverride, 'inherit'>;
   /** Letta conversations this thread used before a rewind replaced them (archived, kept for audit), oldest first. */
   previousConversations?: string[] };
 /** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
@@ -48,7 +50,9 @@ export type RunDecision = { id: string; outcome: 'decided' | 'stopped'; question
   /** `web-research`: a web search result reviewed later (`choice.id` is `approve`, `reject` or `search_again`; `age`: how old the result was then). */
   kind?: 'web-research'; age?: string };
 /** How an automation's turn runs: unattended (nobody is asked), with the tools pre-approved for it and the reply mode it asks for. */
-export type RunAutomation = { source: RunSource; preApproved: readonly string[]; onBehalfOf?: string; replyMode?: ReplyMode };
+export type RunAutomation = { source: RunSource; preApproved: readonly string[]; onBehalfOf?: string; replyMode?: ReplyMode;
+  /** The starting verdict of the turn's untrusted memory writes (the token's setting; schedules: the default). */
+  memoryFloor?: 'accept' | 'flag' | 'ask_human' };
 /**
  * A single user turn and the events observed while it ran. In a shared runtime
  * a run may first wait in its conversation's queue (`queued`); `author` names
@@ -66,7 +70,7 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** Started by an automation (see {@link RunSource}); such turns are unattended. */
   source?: RunSource;
   /** Unattended turns: tools whose approvals are given in advance, and by whom. */
-  unattended?: { preApproved: string[]; onBehalfOf?: string };
+  unattended?: { preApproved: string[]; onBehalfOf?: string; memoryFloor?: 'accept' | 'flag' | 'ask_human' };
   /** The reply mode an automation asked for (instead of the conversation's). */
   replyModeOverride?: ReplyMode;
   /** When the turn ended (completed, failed, cancelled or withdrawn). */
@@ -144,7 +148,7 @@ export interface RewindHooks {
   cancelSchedules(runIds: ReadonlySet<string>): Promise<string[]>;
 }
 /** A memory review as the app shows it. */
-export type PublicMemoryReview = Pick<MemoryReview, 'id' | 'kind' | 'files' | 'status' | 'verdict' | 'floor' | 'rule' | 'outcome' | 'decision' | 'mergedAt' | 'createdAt' | 'settledAt' | 'error' | 'beforeMerge'> & {
+export type PublicMemoryReview = Pick<MemoryReview, 'id' | 'kind' | 'files' | 'status' | 'verdict' | 'floor' | 'rule' | 'outcome' | 'decision' | 'mergedAt' | 'createdAt' | 'settledAt' | 'error' | 'beforeMerge' | 'dropped'> & {
   provenance: string; threadId?: string; diff?: string;
   jiminy?: { trust: number; verdict: string; reason: string; model?: string; ms?: number };
   /** Dreams merged before review: how long the change was in memory before the review settled (ms). */
@@ -156,7 +160,7 @@ function publicReview(review: MemoryReview, runtime: ThreadRuntime): PublicMemor
   return { id: review.id, kind: review.kind, files: structuredClone(review.files), status: review.status, provenance: provenanceLabel(review.provenance), createdAt: review.createdAt,
     ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.floor ? { floor: review.floor } : {}), ...(review.rule ? { rule: review.rule } : {}), ...(review.outcome ? { outcome: review.outcome } : {}), ...(review.decision ? { decision: review.decision } : {}),
     ...(review.mergedAt ? { mergedAt: review.mergedAt } : {}), ...(review.settledAt ? { settledAt: review.settledAt } : {}), ...(review.error ? { error: review.error } : {}), ...(review.beforeMerge ? { beforeMerge: structuredClone(review.beforeMerge) } : {}),
-    ...(threadId ? { threadId } : {}), ...(review.diff ? { diff: review.diff } : {}),
+    ...(threadId ? { threadId } : {}), ...(review.diff ? { diff: review.diff } : {}), ...(review.dropped?.length ? { dropped: structuredClone(review.dropped) } : {}),
     ...(review.jiminy ? { jiminy: { trust: review.jiminy.trust, verdict: review.jiminy.verdict, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}), ...(review.jiminy.ms ? { ms: review.jiminy.ms } : {}) } } : {}),
     ...(exposure !== undefined ? { exposureMs: exposure } : {}) };
 }
@@ -270,7 +274,7 @@ export function displayRun(run: Run): UIMessage[] {
 }
 
 /** Run fields of an automation's turn. */
-const automationFields = (automation?: RunAutomation): Partial<Run> => automation ? { source: { ...automation.source }, unattended: { preApproved: [...automation.preApproved], ...(automation.onBehalfOf ? { onBehalfOf: automation.onBehalfOf } : {}) }, ...(automation.replyMode ? { replyModeOverride: automation.replyMode } : {}) } : {};
+const automationFields = (automation?: RunAutomation): Partial<Run> => automation ? { source: { ...automation.source }, unattended: { preApproved: [...automation.preApproved], ...(automation.onBehalfOf ? { onBehalfOf: automation.onBehalfOf } : {}), ...(automation.memoryFloor ? { memoryFloor: automation.memoryFloor } : {}) }, ...(automation.replyMode ? { replyModeOverride: automation.replyMode } : {}) } : {};
 /** What the browser may know about a decision's outcome turn (no user IDs beyond the decider's). */
 export const publicDecisionRun = (decision: RunDecision) => ({ id: decision.id, outcome: decision.outcome, question: decision.question, by: { ...decision.by }, ...(decision.choice ? { choice: { ...decision.choice } } : {}), ...(decision.comment ? { comment: decision.comment } : {}), ...(decision.kind ? { kind: decision.kind } : {}), ...(decision.age ? { age: decision.age } : {}) });
 /** What the browser may know about a run's source (no token ID). */
@@ -436,9 +440,9 @@ export class ThreadRuntime {
   }
   /** Display metadata only; timestamps are omitted for legacy threads that never recorded them. */
   private summary(thread: Thread) {
-    const { id, title, state, archived, createdAt, lastActivityAt, latex } = thread;
+    const { id, title, state, archived, createdAt, lastActivityAt, latex, trustJiminy } = thread;
     const pendingDecision = this.decisions?.pending().find(d => d.threadId === id)?.id;
-    const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride, ...(pendingDecision ? { pendingDecision } : {}) };
+    const base = { id, title, state, archived, ...(createdAt ? { createdAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), latex: latex ?? 'inherit' as DisplayOverride, ...(trustJiminy ? { trustJiminy } : {}), ...(pendingDecision ? { pendingDecision } : {}) };
     if (!this.queueing) return base;
     // Reply modes: the conversation's override, the mode in effect now, and how many people share the agent.
     const modes = this.replyMode !== undefined ? { replyMode: (thread.replyMode ?? 'inherit') as ReplyModeOverride, replyModeInEffect: this.modeOf(thread), members: this.memberCount() } : {};
@@ -534,8 +538,9 @@ export class ThreadRuntime {
     const thread = this.thread(owner, id);
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RuntimeFault('invalid_input', 400);
     const fields = Object.keys(input);
-    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived' && key !== 'latex' && key !== 'replyMode')) throw new RuntimeFault('invalid_input', 400);
-    const patch = input as { title?: unknown; archived?: unknown; latex?: unknown; replyMode?: unknown };
+    if (!fields.length || fields.some(key => key !== 'title' && key !== 'archived' && key !== 'latex' && key !== 'replyMode' && key !== 'trustJiminy')) throw new RuntimeFault('invalid_input', 400);
+    const patch = input as { title?: unknown; archived?: unknown; latex?: unknown; replyMode?: unknown; trustJiminy?: unknown };
+    if (fields.includes('trustJiminy') && !DISPLAY_OVERRIDES.includes(patch.trustJiminy as DisplayOverride)) throw new RuntimeFault('invalid_input', 400);
     if (fields.includes('latex') && !DISPLAY_OVERRIDES.includes(patch.latex as DisplayOverride)) throw new RuntimeFault('invalid_input', 400);
     if (fields.includes('replyMode') && (this.replyMode === undefined || !REPLY_MODE_OVERRIDES.includes(patch.replyMode as ReplyModeOverride))) throw new RuntimeFault('invalid_input', 400);
     let title = thread.title;
@@ -556,6 +561,7 @@ export class ThreadRuntime {
     if (patch.archived === true) this.decisions?.archived(id);
     if (patch.latex === 'inherit') delete thread.latex; else if (patch.latex === 'on' || patch.latex === 'off') thread.latex = patch.latex;
     if (patch.replyMode === 'inherit') delete thread.replyMode; else if (fields.includes('replyMode')) thread.replyMode = patch.replyMode as ReplyMode;
+    if (patch.trustJiminy === 'inherit') delete thread.trustJiminy; else if (patch.trustJiminy === 'on' || patch.trustJiminy === 'off') thread.trustJiminy = patch.trustJiminy;
     this.save(); this.changed();
     // The conversation's folder follows its title (after the running turn, if any). A failure never fails the rename.
     if (retitled && this.host.attachmentsRoot && thread.agentId && thread.conversationId) {
@@ -1439,13 +1445,16 @@ export class ThreadRuntime {
       // What the agent should know about decisions: this turn brings one's outcome, or one is still pending in this conversation.
       const reminder = run.decision ? (run.decision.kind === 'web-research' ? webResearchOutcomeNote(run.decision.choice?.id === 'approve' ? 'approve' : run.decision.choice?.id === 'search_again' ? 'search_again' : 'reject') : decisionOutcomeNote(run.decision.outcome)) : this.decisions?.pendingNote(run.threadId);
       const decision = { ...(reminder ? { reminder } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
-      const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name } } : {};
+      const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name, ...(run.unattended?.memoryFloor ? { memoryFloor: run.unattended.memoryFloor } : {}) } } : {};
+      // Trust mode: the conversation's override of the agent's setting (undefined: the agent's).
+      const owning = this.state.threads.find(t => t.id === run.threadId);
+      const trust = owning?.trustJiminy !== undefined ? { trustJiminy: owning.trustJiminy === 'on' } : {};
       // An approved web research result arrives with this turn: untrusted content for memory provenance.
       const sources = run.decision?.kind === 'web-research' && run.decision.choice?.id === 'approve' ? { sources: [{ kind: 'web' as const, label: 'web research', reviewed: true }] } : {};
       const tag = { otid: run.id };
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources });
+        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }

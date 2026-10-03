@@ -58,7 +58,9 @@ export type DecisionRecord = {
   memory?: MemoryReviewView;
 };
 /** What a memory review decision shows (the review, without internals). */
-export type MemoryReviewView = { reviewId: string; files: MemoryReview['files']; diff: string; provenance: string; protected: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string };
+export type MemoryReviewView = { reviewId: string; files: MemoryReview['files']; diff: string; provenance: string; protected: boolean; verdict?: string; trust?: number; reason?: string; model?: string; kind: 'turn' | 'dream'; outcome?: string;
+  /** Lines the reviewer had already dropped (the rest is what is held). */
+  dropped?: { path: string; start: number; end: number; text: string }[] };
 type State = { version: 1; decisions: DecisionRecord[] };
 
 /** Bounds of the decisions of one agent. */
@@ -172,7 +174,7 @@ export class DecisionBoard {
       requestedBy: { ...(author ? { person: { id: author.id, name: author.name } } : {}) },
       createdAt: new Date().toISOString(), status: 'pending', kind: 'memory-review',
       memory: { reviewId: review.id, files: structuredClone(review.files), diff: (review.diff ?? '').slice(0, 8000), provenance: provenanceLabel(review.provenance), protected: isProtected, kind: review.kind,
-        ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.jiminy ? { trust: review.jiminy.trust, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}) } : {}), ...(review.outcome ? { outcome: review.outcome } : {}) },
+        ...(review.verdict ? { verdict: review.verdict } : {}), ...(review.jiminy ? { trust: review.jiminy.trust, reason: review.jiminy.reason, ...(review.jiminy.model ? { model: review.jiminy.model } : {}) } : {}), ...(review.outcome ? { outcome: review.outcome } : {}), ...(review.dropped?.length ? { dropped: structuredClone(review.dropped) } : {}) },
     };
     this.state.decisions.push(record);
     this.forget();

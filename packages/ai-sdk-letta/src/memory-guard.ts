@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import type { MemoryJournal, TurnCommits } from './memory-journal.js';
 import { AGENT_EMAIL, harnessCommit } from './memory-journal.js';
 import { changedBy, commitsSince, headOf, type GitRunner } from './revert.js';
-import { adminClean, blameProvenance, commitTrailers, parseProvenanceTrailers, PROVENANCE_TRAILERS, provenanceLabel, provenanceTrailers, sections, untrusted, type TurnProvenance } from './provenance.js';
+import { adminClean, trustEligible, blameProvenance, commitTrailers, parseProvenanceTrailers, PROVENANCE_TRAILERS, provenanceLabel, provenanceTrailers, sections, untrusted, type TurnProvenance } from './provenance.js';
 import type { DreamRequest, DreamResponse } from './dream-review.js';
-import { stricter, type JiminyVerdict, type MemoryReviewer, type Verdict } from './jiminy.js';
+import { stricter, type JiminyDrop, type JiminyVerdict, type MemoryReviewer, type Verdict } from './jiminy.js';
 
 /**
  * Memory protection and review: the harness side of the agent's conscience.
@@ -95,14 +95,19 @@ export type MemoryRefusal = { code: 'protected_memory' | 'new_root_file'; path: 
  * are rejected (they should have been refused or reverted already; this is
  * defence in depth). Everything else starts at `accept`.
  */
-export function reviewFloor(files: readonly { path: string; protected: boolean; upkeep?: boolean }[], provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer'>): { floor: Verdict; rule?: string } {
+export function reviewFloor(files: readonly { path: string; protected: boolean; upkeep?: boolean }[], provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer' | 'trustMode' | 'automationFloor'>): { floor: Verdict; rule?: string } {
   // Index upkeep (see isIndexUpkeep) is not a directive change.
   const touchesProtected = files.some(f => f.protected && !f.upkeep);
   if (touchesProtected && provenance.writer !== 'agent') return { floor: 'reject', rule: 'protected file changed outside a turn' };
-  if (touchesProtected && !adminClean(provenance)) return { floor: 'reject', rule: 'protected file changed outside an admin turn with no untrusted content' };
+  // Trust mode: an attended person's turn in a conversation that trusts Jiminy; Jiminy decides (it may still only tighten).
+  if (touchesProtected && !adminClean(provenance) && !trustEligible(provenance)) return { floor: 'reject', rule: 'protected file changed outside an admin turn with no untrusted content' };
+  // Unattended turns that read untrusted content start at their automation token's floor (default flag).
+  if (provenance.unattended && provenance.sources.length) return { floor: provenance.automationFloor ?? DEFAULT_AUTOMATION_FLOOR, rule: `unattended turn read untrusted content (automation floor ${provenance.automationFloor ?? DEFAULT_AUTOMATION_FLOOR})` };
   return { floor: 'accept' };
 }
-/** What a failed review counts as: `flag`, or `reject` when a protected file changed. */
+/** The starting verdict of an unattended turn's untrusted memory writes when its automation sets none. */
+export const DEFAULT_AUTOMATION_FLOOR = 'flag' as const;
+/** What a failed review counts as: `flag`, or `reject` when a protected file changed (also in trust mode: no review, no change). */
 export function failedReview(files: readonly { protected: boolean; upkeep?: boolean }[]): Verdict { return files.some(f => f.protected && !f.upkeep) ? 'reject' : 'flag'; }
 
 /** One review, as recorded and shown. */
@@ -118,7 +123,7 @@ export type MemoryReview = {
   status: 'pending' | 'done';
   /** The final verdict (floor and Jiminy's, the stricter), and how it came about. */
   verdict?: Verdict; floor?: Verdict; rule?: string;
-  jiminy?: Pick<JiminyVerdict, 'trust' | 'verdict' | 'reason' | 'alters_directives' | 'evidence'> & { model?: string; ms?: number; costUsd?: number };
+  jiminy?: Pick<JiminyVerdict, 'trust' | 'verdict' | 'reason' | 'alters_directives' | 'evidence' | 'drop'> & { model?: string; ms?: number; costUsd?: number };
   error?: string;
   /** What happened to the change: kept, reverted (`revert` commit), removed until a person decides, re-applied after approval. */
   outcome?: 'kept' | 'reverted' | 'removed' | 'reapplied' | 'kept_removed' | 'blocked';
@@ -134,6 +139,8 @@ export type MemoryReview = {
   diff?: string;
   /** Only these paths of the commits were reviewed (the others were reverted already). */
   paths?: string[];
+  /** Lines Jiminy dropped while keeping the rest (`drop`), and the commit that removed them (or, before a merge, the harness's edit). */
+  dropped?: JiminyDrop[]; dropCommit?: string;
 };
 
 /** What the guard tells the application (the server): a review settled, a change was reverted, a person must decide. */
@@ -230,12 +237,16 @@ export class MemoryGuard {
    * unattended one. Everything else: allowed (the review follows).
    */
   allows(tool: string, filePath: unknown, provenance: TurnProvenance | undefined): MemoryRefusal | undefined {
+    // Trust mode (see trustEligible) lets protected files through to Jiminy, but never: another letter case of a
+    // protected file (an alias trick has no legitimate use), unattended or anonymous turns, and new root files (below).
     if (tool !== 'Write' && tool !== 'Edit') return undefined;
     if (typeof filePath !== 'string') return undefined;
     const path = this.relativePath(filePath);
     if (!path) return undefined;
     const clean = !!provenance && adminClean(provenance);
     const refuse = (refusal: MemoryRefusal) => { this.refusals.push({ ...refusal, tool, at: new Date().toISOString(), ...(provenance ? { provenance: provenanceLabel(provenance) } : {}), ...(provenance?.turn ? { turn: provenance.turn } : {}) }); if (this.refusals.length > 100) this.refusals.splice(0, this.refusals.length - 100); return refusal; };
+    const exact = isProtectedPath(path, this.settings.protected) && this.settings.protected.some(p => p === path || (p.endsWith('/**') && path.startsWith(p.slice(0, -2))));
+    if (this.protects(path) && !clean && provenance && trustEligible(provenance) && exact) return undefined;
     if (this.protects(path) && !clean) return refuse({ code: 'protected_memory', path, message: `Protected memory file (${path}): only an admin's own turn that read no untrusted content (web research, attachments, Jira or Confluence, tool output) may change it. Do not retry; tell the user an admin can make this change in a turn of their own.` });
     const root = !path.includes('/');
     const exists = (() => { try { lstatSync(join(this.root, path)); return true; } catch { return false; } })();
@@ -300,6 +311,29 @@ export class MemoryGuard {
     }
     return text;
   }
+  /** The changed files as they are now, for Jiminy to number lines (bounded). */
+  private async numbered(files: MemoryReview['files']): Promise<{ path: string; text: string }[]> {
+    const result: { path: string; text: string }[] = [];
+    for (const f of files.filter(f => f.change !== 'deleted').slice(0, 10)) {
+      const shown = await this.git(['show', `HEAD:${f.path}`], { ok1: true }).catch(() => undefined);
+      if (shown?.code === 0) result.push({ path: f.path, text: shown.stdout.toString().slice(0, 8000) });
+    }
+    return result;
+  }
+  /** Lines (by text) the commits added, per path: what a drop may remove. */
+  private async addedLines(commits: readonly string[], paths?: readonly string[]): Promise<Map<string, Set<string>>> {
+    const added = new Map<string, Set<string>>();
+    for (const commit of commits) {
+      const out = (await this.git(['show', '--first-parent', '-m', '--format=', '--no-color', '-U0', commit, '--', ...(paths?.length ? paths : ['*.md'])])).stdout.toString();
+      let file = '';
+      for (const line of out.split('\n')) {
+        const header = /^\+\+\+ b\/(.*)$/.exec(line);
+        if (header) { file = header[1]!; continue; }
+        if (line.startsWith('+') && !line.startsWith('+++') && file) { const set = added.get(file) ?? new Set(); set.add(line.slice(1)); added.set(file, set); }
+      }
+    }
+    return added;
+  }
   /** The protected files' text now (what Jiminy judges directive changes against), bounded. */
   directives(): string {
     const parts: string[] = [];
@@ -331,8 +365,10 @@ export class MemoryGuard {
   }
 
   /** Start a review in the background. `paths`: only these paths (the others were handled already, such as protected files reverted by the watcher). */
-  private async start(base: Pick<MemoryReview, 'kind' | 'commits' | 'provenance'> & Partial<Pick<MemoryReview, 'turn' | 'conversationId' | 'mergedAt'>>, paths?: readonly string[], upkeep: ReadonlySet<string> = new Set()): Promise<MemoryReview> {
+  private async start(base: Pick<MemoryReview, 'kind' | 'commits' | 'provenance'> & Partial<Pick<MemoryReview, 'turn' | 'conversationId' | 'mergedAt'>>, paths?: readonly string[], upkeep: ReadonlySet<string> = new Set()): Promise<MemoryReview | undefined> {
     const files = (await this.filesOf(base.commits)).filter(f => !paths || paths.includes(f.path)).map(f => upkeep.has(f.path) ? { ...f, upkeep: true } : f);
+    // Nothing changed in the end (a merge with no net change): nothing to review.
+    if (!files.length) return undefined;
     const diff = await this.diffOf(base.commits, 16_000, paths);
     const review: MemoryReview = { id: randomUUID(), ...base, files, status: 'pending', createdAt: new Date().toISOString(), diff: diff.slice(0, 8000), ...(paths ? { paths: [...paths] } : {}) };
     this.reviews.push(review);
@@ -353,9 +389,17 @@ export class MemoryGuard {
     if (reviewer && floor !== 'reject') {
       const started = Date.now();
       try {
-        const answer = await reviewer({ files: review.files, diff, provenance: review.provenance, directives: this.directives() }, AbortSignal.timeout(this.settings.reviewTimeoutMs));
-        review.jiminy = { trust: answer.trust, verdict: answer.verdict, reason: answer.reason, alters_directives: answer.alters_directives, evidence: answer.evidence, ...(answer.model ? { model: answer.model } : {}), ms: Date.now() - started, ...(typeof answer.costUsd === 'number' ? { costUsd: answer.costUsd } : {}) };
+        const answer = await reviewer({ files: review.files, diff, provenance: review.provenance, directives: this.directives(), numbered: await this.numbered(review.files) }, AbortSignal.timeout(this.settings.reviewTimeoutMs));
+        review.jiminy = { trust: answer.trust, verdict: answer.verdict, reason: answer.reason, alters_directives: answer.alters_directives, evidence: answer.evidence, ...(answer.drop ? { drop: answer.drop } : {}), ...(answer.model ? { model: answer.model } : {}), ms: Date.now() - started, ...(typeof answer.costUsd === 'number' ? { costUsd: answer.costUsd } : {}) };
         verdict = stricter(floor, answer.verdict);
+        // Keep the change but drop the lines Jiminy named (partial revert); if they do not apply exactly, the whole change goes.
+        if (answer.drop?.length && (verdict === 'accept' || verdict === 'flag')) {
+          const added = await this.addedLines(review.commits, review.paths);
+          const dropped = await this.options.journal.dropLines(`drop-${review.id}`, answer.drop.filter(d => review.files.some(f => f.path === d.path)), path => added.get(path) ?? new Set(),
+            `Memory review: dropped lines (${[...new Set(answer.drop.map(d => d.path))].join(', ').slice(0, 120)})`, { [PROVENANCE_TRAILERS.review]: review.id, ...provenanceTrailers({ actor: { kind: 'harness' }, sources: [], writer: 'harness' }) });
+          if (dropped.applied || dropped.commit) { review.dropped = answer.drop; if (dropped.commit) review.dropCommit = dropped.commit; }
+          else { verdict = 'reject'; review.error = 'drop_failed'; }
+        }
       } catch (error) {
         review.error = error instanceof Error && /^[a-z_]{1,40}$/.test(error.message) ? error.message : 'review_failed';
         verdict = stricter(floor, failedReview(review.files));
@@ -416,6 +460,7 @@ export class MemoryGuard {
       status: 'done', verdict: decided.verdict, floor: decided.files.some(f => f.protected) ? 'reject' : 'accept', ...(decided.jiminy ? { jiminy: { trust: decided.jiminy.trust, verdict: decided.jiminy.verdict, reason: decided.jiminy.reason, alters_directives: decided.jiminy.alters_directives, evidence: decided.jiminy.evidence, ...(decided.jiminy.model ? { model: decided.jiminy.model } : {}) } } : {}),
       ...(decided.error ? { error: decided.error } : {}), outcome: decided.response.decision === 'reject' ? 'blocked' : 'kept',
       beforeMerge: { decision: decided.response.decision, ...(decided.response.approve_paths ? { paths: decided.response.approve_paths } : {}), branch: request.branch },
+      ...(decided.response.drop?.length ? { dropped: decided.response.drop } : {}),
       createdAt: new Date().toISOString(), settledAt: new Date().toISOString(), diff: request.diff.slice(0, 8000) };
     this.reviews.push(review);
     if (decided.response.decision !== 'reject') for (const sha of [request.head, ...request.commits.map(c => c.sha)]) this.approvedDreams.add(sha);
@@ -470,11 +515,22 @@ export class MemoryGuard {
       const turnRunning = this.options.journal.running.length > 0;
       const outside = commits.filter(c => !harnessCommit(c.author) && !this.options.journal.entryOf(c.commit) && !c.rewind && !(turnRunning && c.author === AGENT_EMAIL && c.parents <= 1));
       // Dreams approved before merging were reviewed already: their commits (fast-forwarded) and merges.
-      for (const c of [...outside]) {
+      // The harness's own edit on an approved branch (approve_paths / approve_edits: "chore(reflection): drop …" on top of the approved head) is part of that approval.
+      for (const c of [...outside].sort((x, y) => x.parents - y.parents)) {
         if (this.approvedDreams.has(c.commit)) { outside.splice(outside.indexOf(c), 1); continue; }
+        if (c.parents === 1 && /^chore\(reflection\): drop (paths|lines) the client did not approve/.test(c.subject)) {
+          const parent = (await this.git(['rev-parse', '-q', '--verify', `${c.commit}^1`], { ok1: true })).stdout.toString().trim();
+          if (this.approvedDreams.has(parent)) { this.approvedDreams.add(c.commit); outside.splice(outside.indexOf(c), 1); continue; }
+        }
         if (c.parents > 1) {
-          const second = (await this.git(['rev-parse', '-q', '--verify', `${c.commit}^2`], { ok1: true })).stdout.toString().trim();
-          if (this.approvedDreams.has(second)) outside.splice(outside.indexOf(c), 1);
+          let second = (await this.git(['rev-parse', '-q', '--verify', `${c.commit}^2`], { ok1: true })).stdout.toString().trim();
+          // Walk back over the harness's edit commits on the approved branch.
+          for (let i = 0; i < 3 && second && !this.approvedDreams.has(second); i++) {
+            const subject = (await this.git(['log', '-1', '--format=%s', second], { ok1: true })).stdout.toString().trim();
+            if (!/^chore\(reflection\): drop (paths|lines) the client did not approve/.test(subject)) break;
+            second = (await this.git(['rev-parse', '-q', '--verify', `${second}^1`], { ok1: true })).stdout.toString().trim();
+          }
+          if (second && this.approvedDreams.has(second)) outside.splice(outside.indexOf(c), 1);
         }
       }
       if (!outside.length) return;

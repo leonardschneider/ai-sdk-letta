@@ -285,7 +285,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.

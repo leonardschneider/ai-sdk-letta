@@ -40,6 +40,8 @@ type Ledger = { version: 1; since: string; entries: Entry[]; starts?: Record<str
   /** Untrusted content each conversation has read (it stays in its context, so later turns are untrusted too). */
   tainted?: Record<string, ContentSource[]> };
 type Active = { conversationId?: string; start?: string; overlapped: boolean; provenance?: TurnProvenance };
+/** Lines a reviewer drops: lines `start`..`end` (1-based, inclusive) of `path` at HEAD, with their exact text (joined with "\n"). */
+export type LineDrop = { path: string; start: number; end: number; text: string };
 /** A turn's recorded memory commits (see {@link MemoryJournal.endTurn}). */
 export type TurnCommits = { turn: string; conversationId?: string; commits: string[]; kind: 'turn' | 'shared'; provenance?: TurnProvenance };
 
@@ -330,6 +332,49 @@ export class MemoryJournal {
         const commit = await this.write(plan, withTrailers(subject, { ...trailers, [PROVENANCE_TRAILERS.reverts]: id }), 'ai-sdk-letta memory review', REVIEW_EMAIL);
         return { files: plan.files, ...(commit ? { commit } : {}), applied: true };
       } finally { try { unlinkSync(index); } catch { /* none */ } }
+    });
+  }
+  /**
+   * Drop specific lines from memory files as one commit made by the harness
+   * (a partial revert: a reviewer kept most of a change but not these lines).
+   * Each drop is a line range of a file at HEAD with its exact text, and
+   * must be lines `added` says the reviewed change added; anything that does
+   * not apply exactly, or a file being changed right now, fails closed
+   * (`applied: false`, nothing written). `id` names the operation
+   * (`X-Reverts`): applying it again changes nothing.
+   */
+  dropLines(id: string, drops: readonly LineDrop[], added: (path: string) => ReadonlySet<string>, subject: string, trailers: Readonly<Record<string, string | undefined>> = {}): Promise<{ commit?: string; applied: boolean }> {
+    return serial(this.memoryDirectory, async () => {
+      const done = await commitsWithTrailer(this.git, PROVENANCE_TRAILERS.reverts, new Set([id]));
+      if (done.length) return { commit: done[0]!.commit, applied: false };
+      if (this.mergeInProgress() || !drops.length) return { applied: false };
+      const busy = await this.uncommitted();
+      const byPath = new Map<string, LineDrop[]>();
+      for (const drop of drops) {
+        if (drop.path.split('/').some(part => !part || part === '.' || part === '..' || part.startsWith('.')) || busy.has(drop.path)) return { applied: false };
+        byPath.set(drop.path, [...(byPath.get(drop.path) ?? []), drop]);
+      }
+      const updates = new Map<string, string>();
+      for (const [path, list] of byPath) {
+        const shown = await this.git(['show', `HEAD:${path}`], { ok1: true }).catch(() => undefined);
+        if (!shown || shown.code !== 0) return { applied: false };
+        const lines = shown.stdout.toString().split('\n');
+        const fromChange = added(path);
+        const remove = new Set<number>();
+        for (const drop of list) {
+          if (drop.end > lines.length || drop.start < 1 || drop.end < drop.start) return { applied: false };
+          const range = lines.slice(drop.start - 1, drop.end);
+          if (range.join('\n') !== drop.text || range.some(line => !fromChange.has(line))) return { applied: false };
+          for (let line = drop.start; line <= drop.end; line++) { if (remove.has(line)) return { applied: false }; remove.add(line); }
+        }
+        updates.set(path, lines.filter((_, index) => !remove.has(index + 1)).join('\n'));
+      }
+      for (const [path, text] of updates) writeFileSync(join(this.memoryDirectory, ...path.split('/')), text);
+      await this.git(['add', '--', ...updates.keys()]);
+      const message = withTrailers(subject, { ...trailers, [PROVENANCE_TRAILERS.reverts]: id });
+      await this.git(['-c', 'user.name=ai-sdk-letta memory review', '-c', `user.email=${REVIEW_EMAIL}`, 'commit', '-q', '--no-verify', '-F', '-', '--', ...updates.keys()], { input: `${message}\n` });
+      const commit = await headOf(this.git);
+      return { ...(commit ? { commit } : {}), applied: true };
     });
   }
   /** Run `task` alone on this memory repository (no turn end, rewind or review in between). */
