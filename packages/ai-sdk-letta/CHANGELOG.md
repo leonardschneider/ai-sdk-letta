@@ -1,5 +1,12 @@
 # ai-sdk-letta
 
+## 0.14.0
+
+### Minor Changes
+
+- d1b8bd4: Claim confirmation. When a memory change relies on a statement it attributes to a person ("Bob from ops said …"), Jiminy lists it (`claims`) and the change is held until that person confirms it: they get a claim confirmation decision in their bell (Yes re-applies the change with `X-Confirmed-By`; No keeps it removed and notifies the requester and admins of an unconfirmed claim; Partly keeps it removed and sends their comment to the agent). Only the named member can confirm; admins may reject but never confirm for them. People are matched by display name, first name or Tailscale login and never guessed: outsiders and ambiguous names get an admin memory review ("cannot be verified"); claims about the requester need nothing. `matchClaimPerson`, `MemoryGuard.decideClaim` and the guard events `members`/`confirmClaims` are exported. Members may now switch their own conversation to Strict (trust mode); loosening it stays admin-only.
+- 451dec0: Memory review settings and line drops. **Trust mode** (`memory.trustJiminy`, off by default; each conversation can override it from a shield button in its header, admins only on a team server): protected-file changes from a person's own attended turn are no longer refused up front when the person is not an admin or the turn read untrusted content; Jiminy reviews them and may keep them. Automations, scheduled tasks, anonymous turns, letter-case aliases of protected files, new root files from untrusted or unattended turns, dreams touching protected files and failed reviews stay deterministic. Provenance records it (`X-Trust-Mode`). **Automation memory floor**: each automation token sets where its runs' memory changes start after reading untrusted content (`accept`, `flag` (default) or `ask_human`), in the Automations dialog (create and edit) or `PATCH /tokens/:id`; Jiminy can only make it stricter. **Line drops**: Jiminy can keep a change and drop specific lines it added (`drop`, line ranges with their exact text), for dreams and for turns: a partial-revert commit after the merge, or the Letta harness's `approve_edits` before it (when the harness supports `merge: "client"`). Drops that do not apply exactly revert the whole change. The Memory view and the review card show the dropped lines. The reviewer model is documented as a per-agent setting (`memory.reviewer`). Merges with no net change are no longer reviewed.
+
 ## 0.13.0
 
 ### Minor Changes
