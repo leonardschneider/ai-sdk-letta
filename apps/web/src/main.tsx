@@ -9,7 +9,7 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
 import { DecisionBell, DecisionsContext, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { decideError, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
 import { AutomationsDialog, AutomationsRow } from './automations.js';
@@ -20,6 +20,8 @@ import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
 import { AuthorContext, InteractionContext, InteractionDock, Message } from './chat.js';
+import { RewindContext, RewindDialog, type RewindState } from './rewind.js';
+import { rewindError, type RewindSummary } from './rewind-model.js';
 import { LatexContext } from './markdown.js';
 import { resolveLatex, type LatexOverride } from './latex.js';
 import { LatexMenu } from './latex-menu.js';
@@ -157,7 +159,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     let members = [...batch];
     // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
     const render = () => setMessages([...base,
-      withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision),
+      withRun(withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision), id),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
       markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
@@ -533,6 +535,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running, queued: t.queued ?? 0, decision: !!t.pendingDecision } })), [active]);
   const adapterArchived = useMemo<ExternalStoreThreadData<'archived'>[]>(() => archived.map(t => ({ status: 'archived', id: t.id, title: t.title, custom: { state: t.state } })), [archived]);
   const readOnly = !!selected?.archived;
+  const readOnlyRef = useRef(readOnly); readOnlyRef.current = readOnly;
   const runtimeRef = useRef<AssistantRuntime | undefined>(undefined);
   const attachments = useMemo(() => new FileAttachmentAdapter(() => runtimeRef.current?.thread.composer.getState().attachments ?? [], filesEnabled ? uploadFile : undefined), [filesEnabled]);
   // Sent files download from where they are now in the resources (the server follows moves and renames).
@@ -551,6 +554,64 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     } },
   });
   runtimeRef.current = runtime;
+
+  /* ---------------- rewind: edit an earlier message ---------------- */
+  const [editable, setEditable] = useState<{ thread: string; runIds: ReadonlySet<string>; refusal?: string }>();
+  const [editing, setEditing] = useState<string>();
+  const [rewindPending, setRewindPending] = useState(false);
+  const [confirm, setConfirm] = useState<{ runId: string; text: string; summary: RewindSummary; rewindId: string; newRunId: string; error?: string }>();
+  const [rewinding, setRewinding] = useState(false);
+  /** Which of your messages can be edited here (refreshed after every turn and change). */
+  async function loadEditable(threadId: string) {
+    try {
+      const result = await api<{ runIds: string[]; refusal?: string }>(`/v1/threads/${encodeURIComponent(threadId)}/rewind`, undefined, 'GET');
+      if (currentRef.current.id === threadId) setEditable({ thread: threadId, runIds: new Set(result.runIds), ...(result.refusal ? { refusal: result.refusal } : {}) });
+    } catch { if (currentRef.current.id === threadId) setEditable(undefined); }
+  }
+  useEffect(() => { setEditing(undefined); setConfirm(undefined); if (current.draft || running) { setEditable(undefined); return; } void loadEditable(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [current.id, current.draft, running, turns, messages.length]);
+  async function previewRewind(runId: string, text: string) {
+    const threadId = currentRef.current.id;
+    setRewindPending(true);
+    try {
+      const summary = await api<RewindSummary>(`/v1/threads/${encodeURIComponent(threadId)}/rewind/preview`, { runId });
+      setConfirm({ runId, text, summary, rewindId: uuid(), newRunId: uuid() });
+    } catch (e) { toast(rewindError(errorCode(e)), { tone: 'error' }); }
+    finally { setRewindPending(false); }
+  }
+  async function confirmRewind() {
+    if (!confirm || rewinding) return;
+    const threadId = currentRef.current.id;
+    setRewinding(true); operation.current = true;
+    try {
+      // The same IDs on a retry: the server applies the rewind and sends the message once.
+      const result = await api<{ rewind: { stage: string }; run?: { id: string; status: string } }>(`/v1/threads/${encodeURIComponent(threadId)}/rewind`, { rewindId: confirm.rewindId, runId: confirm.runId, text: confirm.text, newRunId: confirm.newRunId });
+      setConfirm(undefined); setEditing(undefined);
+      operation.current = false;
+      // Show the rewound conversation, then the edited message's reply as it streams.
+      const view = await api<View>(`/v1/threads/${threadId}/view`, undefined, 'GET');
+      if (currentRef.current.id !== threadId) return;
+      lastRun.current = view.lastRunId;
+      const base = historyMessages(view.messages);
+      setMessages(base); setQueue(view.queue ?? []); setBlocked('');
+      void refreshThreads().catch(() => {});
+      setTurns(n => n + 1);
+      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, [], [], view.live.author);
+      else if (!result.run) toast('Rewound. Your edited message couldn’t be sent; send it again.', { tone: 'error' });
+      toast('Rewound. Your edited message was sent.');
+    } catch (e) {
+      const code = errorCode(e);
+      setConfirm(value => value ? { ...value, error: rewindError(code) } : value);
+    } finally { operation.current = false; setRewinding(false); }
+  }
+  const rewindState = useMemo<RewindState>(() => ({
+    editable: editable && editable.thread === current.id && !running && !blocked && !readOnlyRef.current && !(team && queue.length) ? editable.runIds : new Set(),
+    ...(editing ? { editing } : {}), pending: rewindPending, ...(editable?.refusal ? { refusal: editable.refusal } : {}),
+    start: runId => setEditing(runId), cancel: () => { setEditing(undefined); focusComposer(); },
+    explain: code => toast(rewindError(code)),
+    submit: (runId, text) => void previewRewind(runId, text),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [editable, current.id, running, blocked, editing, rewindPending, queue.length]);
+
 
   // Global shortcuts: ⌘K new chat, ⌘/ search, Esc stops a reply when nothing else handles it.
   useEffect(() => {
@@ -646,9 +707,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
     <DecisionsContext.Provider value={decisionsState}>
     <FileLinkContext.Provider value={fileLink}>
     <LatexContext.Provider value={latex}>
+    <RewindContext.Provider value={rewindState}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
-        data-loading={loading || listLoading || undefined} data-running={running || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
+        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
@@ -740,9 +802,11 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
+        {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
       </div>
     </AssistantRuntimeProvider>
+    </RewindContext.Provider>
     </LatexContext.Provider>
     </FileLinkContext.Provider>
     </DecisionsContext.Provider>

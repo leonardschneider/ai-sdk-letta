@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-export { LettaAgent, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
+export { LettaAgent, type TurnInfo, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
 export {
   resolveReplyMode, mentionsAgent, mentionNames, turnNote, combinedText, speakerLabel, REPLY_MODES, REPLY_MODE_SETTINGS, REPLY_MODE_OVERRIDES, STAY_SILENT_TOOL, STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA,
   type ReplyMode, type ReplyModeSetting, type ReplyModeOverride, type TurnSpeaker, type TurnNoteOptions,
@@ -17,7 +17,9 @@ export {
   defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
   type AgentDefinition, type WebSearchSettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { openLettaAgent, createLettaAgent, openAgentHost, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget } from './runtime.js';
+export { openLettaAgent, createLettaAgent, openAgentHost, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
+export { MemoryJournal, type MemoryRewindPlan } from './memory-journal.js';
+export { planRevert, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
 export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
 export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
@@ -29,7 +31,7 @@ export {
 } from './attachments.js';
 export {
   ResourceStore, AttachmentStore, RESOURCE_LIMITS, RESOURCES_GITIGNORE, splitResourcePath, joinResourcePath, folderNameFromTitle, titleFromFolderName, readRegularFile,
-  type ResourceNode, type ResourceTree, type ResourceFile, type ResourceCommit,
+  type ResourceNode, type ResourceTree, type ResourceFile, type ResourceCommit, type ResourceRewindPlan,
 } from './resources.js';
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
 export {

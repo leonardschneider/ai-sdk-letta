@@ -5,7 +5,7 @@ import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
 import { ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
 import { DecisionBoard } from './decisions.js';
-import { ThreadRuntime, type RuntimeHost } from './runtime.js';
+import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
@@ -35,6 +35,12 @@ export interface ServeOptions {
    * the `SEARXNG_URL` environment variable.
    */
   webSearch?: OpenAgentOptions['webSearch'];
+  /**
+   * Rewind: application tools whose calls change nothing outside the app (or
+   * only the resources, which a rewind reverts), so the rewind confirmation
+   * does not list them as side effects that stay. See `RuntimeOptions.rewindInternalTools`.
+   */
+  rewindInternalTools?: readonly string[];
 }
 
 /** The orchestrator `schedule_task` uses. `callbackUrl`: this server's automation API as the orchestrator reaches it (for example `http://host.docker.internal:4402` from Docker). */
@@ -89,7 +95,7 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
-      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages };
+      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
   };
@@ -111,7 +117,7 @@ function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>,
       const host = await opened();
       const conversation = await host.open(options);
       const presentation = conversation.agent.presentation!;
-      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), close: () => conversation.close() };
+      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, close: () => conversation.close() };
     },
     close: async () => { const current = agent; agent = undefined; await (await current?.catch(() => undefined))?.close(); },
   };
@@ -164,13 +170,15 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const owner = 'local-gui';
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(directory, 'state.json'), owner);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     const board = decisions.bind(runtime, directory, owner);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
     if (options.automation) {
-      const service = new AutomationService({ agents: [automationAgent(definition, runtime, owner, stateDirectory, false)], ...scheduling.service, log });
+      const automationEntry = automationAgent(definition, runtime, owner, stateDirectory, false);
+      const service = new AutomationService({ agents: [automationEntry], ...scheduling.service, log });
       scheduling.bind(service);
+      runtime.rewindHooks = rewindHooks(service, automationEntry);
       const listening = await listenAutomation(service, options.automation);
       automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
     }
@@ -178,7 +186,8 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       const url = `http://127.0.0.1:${bound}`;
-      // Outcomes decided before a restart and not sent yet are sent now (once).
+      // Rewinds a stop interrupted are finished first, then outcomes decided before a restart and not sent yet are sent (once).
+      await runtime.resumeRewinds(owner).catch(() => {});
       board?.resumeAll();
       log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
       return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', automation) };
@@ -269,7 +278,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       const decisions = decisionDesk(definition);
       const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
         // An agent with several members is a group from the first message: "auto" means agent decides.
-        members: () => directory.members(definition.id).length });
+        members: () => directory.members(definition.id).length, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
       runtimes.push(runtime);
       boards.push(decisions.bind(runtime, folder, 'team'));
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });
@@ -280,6 +289,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       // A token acts for a member of the agent; once they are no longer a member, it stops working.
       const service = automationService = new AutomationService({ agents: automationAgents, members: (agentId, userId) => { const user = directory.user(userId); return user && directory.role(agentId, userId) ? authorOf(user) : undefined; }, ...scheduling.service, log });
       scheduling.bind(service);
+      for (const entry of automationAgents) entry.runtime.rewindHooks = rewindHooks(service, entry);
       const listening = await listenAutomation(service, options.automation);
       automationServer = listening.server;
       automation = { service, url: listening.url, port: listening.port, endpoint: endpointOf(listening.url, options.automation) };
@@ -289,6 +299,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
     const server = teamApp({ port, assets, agents, directory, origins: options.origins, ...(credentials ? { credentials } : {}), ...(options.integrations ? { integrationOptions: options.integrations } : {}), ...(automation ? { automation: { service: automation.service, endpoint: automation.endpoint } } : {}) }).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
     const url = `http://127.0.0.1:${bound}`;
+    for (const runtime of runtimes) await runtime.resumeRewinds('team').catch(() => {});
     for (const board of boards) board?.resumeAll();
     let closing: Promise<void> | undefined;
     const close = () => closing ??= (async () => {
@@ -332,6 +343,10 @@ export function preApprovableTools(definition: AgentDefinition): string[] {
     || (definition.permissions[name] === 'allow' && typeof (definition.tools[name] as { [PREPARE_CALL]?: unknown })[PREPARE_CALL] === 'function' && name !== 'schedule_task')));
 }
 
+/** What a rewind withdraws through the automation service: the tasks the rewound turns scheduled. */
+function rewindHooks(service: AutomationService, agent: AutomationAgent): RewindHooks {
+  return { schedules: runIds => service.schedulesOf(agent, runIds), cancelSchedules: runIds => service.cancelSchedulesOf(agent, runIds) };
+}
 function automationAgent(definition: AgentDefinition, runtime: ThreadRuntime, owner: string, stateDirectory: string, team: boolean): AutomationAgent {
   return { id: definition.id, name: definition.name, runtime, owner, store: new AutomationStore(automationFile(stateDirectory, definition.id)), preApprovable: preApprovableTools(definition), replyModes: team };
 }

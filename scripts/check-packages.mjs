@@ -33,8 +33,9 @@ const forbidden = [
 // A guard against accidentally shipping large files, not a budget: ai-sdk-letta
 // ships src, dist and source maps (just over 1 MB since the title parser,
 // about 1.5 MB since the Atlassian tools, their ADF conversion and the
-// vendored ADF JSON schema, about 1.8 MB since web search).
-const maxUnpacked = 1_950_000;
+// vendored ADF JSON schema, about 1.8 MB since web search, about 2 MB since
+// rewind).
+const maxUnpacked = 2_150_000;
 const failures = [];
 const fail = (name, message) => failures.push(`${name}: ${message}`);
 

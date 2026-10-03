@@ -2,11 +2,12 @@ import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSyn
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import type { DecisionBoard } from './decisions.js';
+import { externalEffects, forkPoint, rewindTurn, rewoundSpan, soloRefusal, type RewindSummary } from './rewind.js';
 import {
   REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
   decisionOutcomeNote, webResearchOutcomeNote,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
+  type ConversationRewind, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
 } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
@@ -18,7 +19,9 @@ export type RuntimeEvent = { sequence: number; type: string; data: Record<string
 export type DisplayOverride = 'inherit' | 'on' | 'off';
 const DISPLAY_OVERRIDES: readonly DisplayOverride[] = ['inherit', 'on', 'off'];
 // createdAt/lastActivityAt/latex are optional: threads recorded before they existed stay valid (latex: inherit).
-type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'>; createdBy?: RunAuthor; replyMode?: ReplyMode };
+type Thread = { id: string; owner: string; conversationId?: string; agentId?: string; title: string; archived: boolean; state: 'creating' | 'ready'; createdAt?: string; lastActivityAt?: string; latex?: Exclude<DisplayOverride, 'inherit'>; createdBy?: RunAuthor; replyMode?: ReplyMode;
+  /** Letta conversations this thread used before a rewind replaced them (archived, kept for audit), oldest first. */
+  previousConversations?: string[] };
 /** Metadata of an image sent with a run. The bytes live only in Letta history, never in runtime state. */
 export type RunImage = { mediaType: string; bytes: number; sha256: string };
 /**
@@ -68,7 +71,11 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** An unattended turn needed a person: the first refused call (`approval_required` or `question_required`) and its tool. The turn itself ended normally. */
   refused?: { code: string; tool: string };
   /** The turn brings a decision's outcome to the agent. */
-  decision?: RunDecision };
+  decision?: RunDecision;
+  /** Sent with its run ID as the message's OTID, and its resources and memory changes recorded under it: a rewind can undo it. */
+  tagged?: boolean;
+  /** Removed from the conversation by this rewind (kept here for audit; no longer part of the conversation). */
+  rewound?: string };
 /** Metadata of a file sent with a run (as stored in the conversation's folder). */
 export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
 /**
@@ -102,12 +109,37 @@ export type RuntimeOptions = { deadlineMs?: number; humanWaitMs?: number; queue?
   /** The agent's name, to recognise mentions (`@Name` or its name), which always get a reply. */
   agentName?: string;
   /** How long a typing signal lasts without a new one. @default 5000 */
-  typingMs?: number };
+  typingMs?: number;
+  /**
+   * Application tools that change nothing outside the app (or only the
+   * agent's resources, which a rewind reverts): a rewind's confirmation does
+   * not list their calls as side effects that stay. Built-in tools are
+   * known already (file, decision, web search, Atlassian reads).
+   */
+  rewindInternalTools?: readonly string[] };
 /** Most queued messages delivered together as one turn (every message a conversation's queue can hold). */
 export const MAX_BATCH = 10;
 /** Most turns waiting in one conversation's queue. */
 export const MAX_QUEUED = 10;
-type State = { version: 1; threads: Thread[]; runs: Run[] };
+/**
+ * A rewind in progress or done (see {@link ThreadRuntime.rewind}): written
+ * before each step, so a restart finishes it (or leaves the thread as it was
+ * when nothing had changed yet). `stage`: `started` (nothing changed),
+ * `forked` (the new conversation exists: `fork`), `switched` (the thread
+ * uses it; the old one's later turns are gone), `done`, or `failed`.
+ */
+export type RewindIntent = { id: string; threadId: string; runId: string; text: string; newRunId: string; from: string; fork?: string; forkAt?: string | null; turns: string[]; since?: string;
+  stage: 'started' | 'forked' | 'switched' | 'done' | 'failed'; createdAt: string; endedAt?: string; error?: string; author?: RunAuthor;
+  result?: { resources?: { reverted: number; conflicts: number; commit?: string }; memory?: { reverted: number; conflicts: number; commit?: string }; decisions: string[]; schedules: string[]; archived: boolean } };
+type State = { version: 1; threads: Thread[]; runs: Run[]; rewinds?: RewindIntent[] };
+/**
+ * Work outside the runtime that a rewind withdraws: tasks the rewound turns
+ * scheduled (the server's automation service sets this when it schedules).
+ */
+export interface RewindHooks {
+  schedules(runIds: ReadonlySet<string>): { id: string; at: string; prompt: string; state: 'pending' | 'fired' }[];
+  cancelSchedules(runIds: ReadonlySet<string>): Promise<string[]>;
+}
 /** One conversation's session and its single running turn (one lane per runtime unless parallel). */
 type Lane = { key: string; locked: boolean; usedAt?: number; current?: RuntimeSession; active?: { run: Run; control: AbortController }; pending?: { runId: string; request: InteractionRequest; resolve(value: InteractionResponse): void }; draining?: boolean };
 /** An opened agent conversation as seen by the runtime. */
@@ -121,6 +153,8 @@ export interface RuntimeSession {
   reload?(): Promise<UIMessage[]>;
   /** Close only this conversation's session (parallel hosts). */
   close?(): Promise<void>;
+  /** Rewind support (fork, history records, memory journal); without it, rewinds are refused with `rewind_unavailable`. */
+  rewind?: ConversationRewind;
 }
 /** Opens and closes the single agent session the runtime drives. */
 export interface RuntimeHost {
@@ -244,9 +278,12 @@ export class ThreadRuntime {
   readonly replyMode?: ReplyModeSetting;
   private readonly agentName?: string;
   private readonly typingMs: number;
+  private readonly rewindInternal: ReadonlySet<string>;
   private readonly members: () => number;
   /** The agent's decisions, when the server keeps them (set by `DecisionBoard`). */
   decisions?: DecisionBoard;
+  /** Tasks the agent scheduled, when the server schedules them (set by the automation service). */
+  rewindHooks?: RewindHooks;
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -263,6 +300,7 @@ export class ThreadRuntime {
     this.agentName = options.agentName;
     this.members = options.members ?? (() => 1);
     this.typingMs = options.typingMs ?? 5000;
+    this.rewindInternal = new Set(options.rewindInternalTools ?? []);
     if (host.attachmentsRoot) this.uploads = new UploadStaging(join(dirname(filename), 'uploads'));
     this.state = existsSync(filename) ? JSON.parse(readFileSync(filename, 'utf8')) as State : { version: 1, threads: [], runs: [] };
     if (this.state.version !== 1 || !Array.isArray(this.state.threads) || !Array.isArray(this.state.runs)) throw new Error('Invalid runtime state');
@@ -490,6 +528,228 @@ export class ThreadRuntime {
     return this.summary(thread);
   }
   private renaming: Promise<void> = Promise.resolve();
+  /* ---------------- rewind ---------------- */
+
+  /** A rewind of this thread is being prepared or applied (no turn may start). */
+  private rewinding(threadId: string) { return (this.state.rewinds ?? []).some(r => r.threadId === threadId && (r.stage === 'started' || r.stage === 'forked' || r.stage === 'switched')) || this.rewindLocks.has(threadId); }
+  private rewindLocks = new Set<string>();
+  /**
+   * The turns a rewind of `runId` removes, checked: the conversation is
+   * idle (nothing running or queued), solo for `who` (see `soloRefusal`),
+   * and every turn was recorded with its changes.
+   * @throws RuntimeFault with a fixed code (see `REWIND_REFUSALS`)
+   */
+  private rewindSpan(thread: Thread, runId: string, who?: RunAuthor) {
+    const lane = this.lane(thread.id);
+    if (lane.locked || lane.active || this.state.runs.some(r => r.threadId === thread.id && (r.status === 'queued' || r.status === 'running')) || this.rewinding(thread.id)) throw new RuntimeFault('runtime_busy');
+    if (thread.archived) throw new RuntimeFault('thread_archived');
+    const delivered = this.delivered(thread.id);
+    let span: Run[];
+    try { span = rewoundSpan(delivered, runId); } catch { throw new RuntimeFault('not_found', 404); }
+    const all = this.state.runs.filter(r => r.threadId === thread.id && !r.rewound);
+    const refusal = soloRefusal(all, span, who, this.queueing);
+    if (refusal) throw new RuntimeFault(refusal, refusal === 'not_found' ? 404 : 409);
+    return span;
+  }
+  /** The open session of a thread, for rewind support (opened if needed, under the lane). */
+  private async rewindSession(lane: Lane, thread: Thread): Promise<RuntimeSession & { rewind: ConversationRewind }> {
+    const session = await this.openIn(lane, thread);
+    if (!session.rewind) throw new RuntimeFault('rewind_unavailable');
+    return session as RuntimeSession & { rewind: ConversationRewind };
+  }
+  /**
+   * What editing the message of turn `runId` and rewinding would do (see
+   * {@link RewindSummary}); nothing changes. Solo conversations only: in a
+   * shared runtime, `who` must have written every message.
+   */
+  async rewindPreview(owner: string, threadId: string, runId: string, who?: RunAuthor): Promise<RewindSummary> {
+    const thread = this.thread(owner, threadId);
+    const span = this.rewindSpan(thread, runId, who);
+    const lane = this.lane(thread.id);
+    return this.exclusive(lane, async () => {
+      const session = await this.rewindSession(lane, thread);
+      const { records } = await session.rewind.records();
+      try { forkPoint(records, span[0]!.id); } catch { throw new RuntimeFault('rewind_too_old'); }
+      return this.summarize(thread, span, session.rewind);
+    });
+  }
+  private async summarize(thread: Thread, span: Run[], rewind: ConversationRewind): Promise<RewindSummary> {
+    try { return await this.summarizeOnce(thread, span, rewind); }
+    catch (error) { throw error instanceof Error && error.message.startsWith('rewind_unavailable') ? new RuntimeFault('rewind_unavailable') : error; }
+  }
+  private async summarizeOnce(thread: Thread, span: Run[], rewind: ConversationRewind): Promise<RewindSummary> {
+    const turns = new Set(span.map(r => r.id));
+    const since = span[0]!.startedAt;
+    const resources = this.host.attachmentsRoot && thread.agentId && thread.conversationId ? await this.resourcesOf(thread.agentId).planRewind(thread.conversationId, turns, since).catch(error => { throw fileFault(error); }) : null;
+    const memory = await rewind.memory.planRewind(turns, since);
+    const decisions = this.decisions?.rewindable(thread.id, turns) ?? [];
+    const schedules = this.rewindHooks?.schedules(turns) ?? [];
+    const fired = schedules.filter(s => s.state === 'fired');
+    const lead = span[0]!;
+    return {
+      message: { runId: lead.id, input: lead.input, ...((lead.images?.length ?? 0) + (lead.files?.length ?? 0) ? { attachments: (lead.images?.length ?? 0) + (lead.files?.length ?? 0) } : {}) },
+      turns: span.map(rewindTurn),
+      resources: resources ? { files: resources.files, kept: resources.kept } : null,
+      memory: { files: memory.files, kept: memory.kept },
+      external: [...externalEffects(span, this.rewindInternal), ...fired.map(s => ({ runId: '', tool: 'schedule_task', label: 'A scheduled task already ran', detail: s.prompt.slice(0, 160) }))],
+      cancel: { decisions: decisions.map(d => ({ id: d.id, question: d.kind === 'web-research' ? (d.research?.query ?? d.question) : d.question, ...(d.kind ? { kind: d.kind } : {}) })), schedules: schedules.filter(s => s.state === 'pending') },
+    };
+  }
+  /**
+   * Edit the message of turn `runId` and rewind: the conversation continues
+   * from the edited message (`text`, sent as a new turn `newRunId`), and its
+   * later turns are gone. What those turns changed in the resources and the
+   * agent's memory is reverted (`git revert`-style new commits; files changed
+   * since by something else are kept and reported), the decisions and
+   * reviews they asked for are withdrawn, and the tasks they scheduled are
+   * cancelled. The Letta conversation is forked just before the edited
+   * message; the old one is archived (kept for audit).
+   *
+   * Crash-safe: each step is recorded first ({@link RewindIntent}); a
+   * restart finishes a rewind that had begun to change things. Idempotent:
+   * the same `rewindId` returns the same result.
+   */
+  async rewind(owner: string, threadId: string, input: { rewindId: string; runId: string; text: string; newRunId: string }, who?: RunAuthor): Promise<{ rewind: RewindIntent; run?: { id: string; status: Run['status'] } }> {
+    this.authorize(owner);
+    if (!input || typeof input !== 'object' || ![input.rewindId, input.runId, input.newRunId].every(id => typeof id === 'string' && uuid.test(id)) || typeof input.text !== 'string' || !input.text.trim() || input.text.length > MAX_INPUT_CHARACTERS) throw new RuntimeFault('invalid_input', 400);
+    const previous = (this.state.rewinds ?? []).find(r => r.id === input.rewindId);
+    if (previous) {
+      if (previous.threadId !== threadId || previous.runId !== input.runId || previous.text !== input.text || previous.newRunId !== input.newRunId) throw new RuntimeFault('id_conflict');
+      // Given up before anything changed: try again from the start.
+      if (previous.stage === 'failed') this.state.rewinds = this.state.rewinds!.filter(r => r !== previous);
+      else return this.finishRewind(owner, previous, who);
+    }
+    if (this.state.runs.some(r => r.id === input.newRunId)) throw new RuntimeFault('id_conflict');
+    const thread = this.thread(owner, threadId);
+    const span = this.rewindSpan(thread, input.runId, who);
+    const lane = this.lane(thread.id);
+    this.rewindLocks.add(thread.id);
+    let intent: RewindIntent | undefined;
+    try {
+      await this.exclusive(lane, async () => {
+        const session = await this.rewindSession(lane, thread);
+        const { records } = await session.rewind.records();
+        let point: ReturnType<typeof forkPoint>;
+        try { point = forkPoint(records, span[0]!.id); } catch { throw new RuntimeFault('rewind_too_old'); }
+        // Everything the rewind needs is checked before anything changes (git can plan the reverts, the files are not busy).
+        await this.summarize(thread, span, session.rewind);
+        intent = { id: input.rewindId, threadId: thread.id, runId: input.runId, text: input.text, newRunId: input.newRunId, from: thread.conversationId!, forkAt: point.messageId, turns: span.map(r => r.id), ...(span[0]!.startedAt ? { since: span[0]!.startedAt } : {}), stage: 'started', createdAt: new Date().toISOString(), ...(who ? { author: who } : {}) };
+        (this.state.rewinds ??= []).push(intent);
+        if (this.state.rewinds.length > 200) this.state.rewinds = this.state.rewinds.filter(r => r.stage !== 'done' && r.stage !== 'failed').concat(this.state.rewinds.filter(r => r.stage === 'done' || r.stage === 'failed').slice(-100));
+        this.save(); this.changed();
+        await this.applyRewind(lane, intent, session.rewind);
+      });
+    } catch (error) {
+      if (intent && intent.stage === 'started') { intent.stage = 'failed'; intent.endedAt = new Date().toISOString(); intent.error = error instanceof RuntimeFault ? error.code : 'rewind_failed'; this.save(); this.changed(); }
+      if (error instanceof RuntimeFault) throw error;
+      throw new RuntimeFault(intent && intent.stage !== 'failed' ? 'rewind_incomplete' : 'rewind_failed', 503);
+    } finally { this.rewindLocks.delete(thread.id); }
+    return this.finishRewind(owner, intent!, who);
+  }
+  /** A retried (or just applied) rewind: finish it if a restart interrupted it, then send the edited message once. */
+  private async finishRewind(owner: string, intent: RewindIntent, who?: RunAuthor): Promise<{ rewind: RewindIntent; run?: { id: string; status: Run['status'] } }> {
+    if (intent.stage === 'forked' || intent.stage === 'switched') {
+      const thread = this.thread(owner, intent.threadId);
+      const lane = this.lane(thread.id);
+      this.rewindLocks.add(thread.id);
+      try { await this.exclusive(lane, async () => { const session = await this.rewindSession(lane, thread); await this.applyRewind(lane, intent, session.rewind); }); }
+      catch (error) { throw error instanceof RuntimeFault ? error : new RuntimeFault('rewind_incomplete', 503); }
+      finally { this.rewindLocks.delete(thread.id); }
+    }
+    // The edited message, as a new turn of the (new) conversation (sent once: a retry finds it).
+    let run: { id: string; status: Run['status'] } | undefined;
+    const existing = this.state.runs.find(r => r.id === intent.newRunId);
+    if (existing) run = { id: existing.id, status: existing.status };
+    else if (intent.stage === 'done') {
+      try { run = await this.start(owner, { id: intent.newRunId, threadId: intent.threadId, text: intent.text, parentRunId: this.delivered(intent.threadId).at(-1)?.id ?? null }, who); }
+      catch { run = undefined; }
+    }
+    return { rewind: structuredClone(intent), ...(run ? { run } : {}) };
+  }
+  /** Carry out (or finish) a rewind from its recorded stage. The lane is held by the caller. */
+  private async applyRewind(lane: Lane, intent: RewindIntent, rewind: ConversationRewind) {
+    const thread = this.state.threads.find(t => t.id === intent.threadId)!;
+    if (intent.stage === 'started') {
+      // 1. The new conversation: the history before the edited message. Its ID is recorded as soon as it exists.
+      await rewind.fork(intent.forkAt ?? null, id => { intent.fork = id; intent.stage = 'forked'; this.save(); });
+      if (!intent.fork) throw new RuntimeFault('rewind_fork_failed', 503);
+    }
+    if (intent.stage === 'forked') {
+      // 2. The thread now uses it (atomically, in one write); the rewound turns leave the conversation.
+      if (thread.conversationId === intent.from) {
+        thread.previousConversations = [...(thread.previousConversations ?? []), intent.from];
+        thread.conversationId = intent.fork!;
+      }
+      for (const run of this.state.runs) if (intent.turns.includes(run.id) || (run.batchOf && intent.turns.includes(run.batchOf))) run.rewound = intent.id;
+      intent.stage = 'switched';
+      thread.lastActivityAt = new Date().toISOString();
+      this.save(); this.changed();
+      // The conversation's folder follows (its attachment links too).
+      if (this.host.attachmentsRoot && thread.agentId) { try { this.resourcesOf(thread.agentId).rebind(intent.from, intent.fork!); } catch { /* the folder is adopted again on first use */ } }
+      await this.closeLane(lane);
+    }
+    if (intent.stage === 'switched') {
+      const turns = new Set(intent.turns);
+      const result: NonNullable<RewindIntent['result']> = intent.result ?? { decisions: [], schedules: [], archived: false };
+      // 3. Undo what the turns changed (each idempotent through its X-Rewind trailer), and withdraw what they started.
+      if (this.host.attachmentsRoot && thread.agentId) {
+        const applied = await this.resourcesOf(thread.agentId).applyRewind(intent.id, intent.fork!, turns, intent.since);
+        result.resources ??= { reverted: applied.files.filter(f => f.status === 'revert').length, conflicts: applied.files.filter(f => f.status === 'conflict').length, ...(applied.commit ? { commit: applied.commit } : {}) };
+      }
+      const memory = await rewind.memory.applyRewind(intent.id, turns, intent.since);
+      result.memory ??= { reverted: memory.files.filter(f => f.status === 'revert').length, conflicts: memory.files.filter(f => f.status === 'conflict').length, ...(memory.commit ? { commit: memory.commit } : {}) };
+      result.decisions = [...new Set([...result.decisions, ...(this.decisions?.rewound(thread.id, turns) ?? [])])];
+      result.schedules = [...new Set([...result.schedules, ...(await this.rewindHooks?.cancelSchedules(turns) ?? [])])];
+      // 4. The old conversation is archived (kept for audit; the default conversation cannot be).
+      if (!result.archived) result.archived = await rewind.archive(intent.from).catch(() => false);
+      intent.result = result;
+      intent.stage = 'done'; intent.endedAt = new Date().toISOString();
+      this.save(); this.changed();
+    }
+  }
+  /**
+   * Finish rewinds a restart interrupted: one that had not changed anything
+   * yet (`started`) is given up; one that had forked or switched is
+   * completed, so the thread always points at a conversation (the old one
+   * until it switched, the new one after). Called on startup by the server.
+   */
+  async resumeRewinds(owner: string): Promise<void> {
+    this.authorize(owner);
+    for (const intent of (this.state.rewinds ?? []).filter(r => r.stage === 'started' || r.stage === 'forked' || r.stage === 'switched')) {
+      if (intent.stage === 'started') { intent.stage = 'failed'; intent.error = 'interrupted'; intent.endedAt = new Date().toISOString(); this.save(); this.changed(); continue; }
+      const thread = this.state.threads.find(t => t.id === intent.threadId);
+      if (!thread) continue;
+      const lane = this.lane(thread.id);
+      try {
+        await this.exclusive(lane, async () => {
+          // The old conversation may hold the session (forked, not switched yet): its rewind support is the agent's either way.
+          const session = await this.rewindSession(lane, thread);
+          await this.applyRewind(lane, intent, session.rewind);
+        });
+      } catch { /* retried at the next start; the thread points at a conversation either way */ }
+    }
+  }
+  /** Rewinds of a thread (newest 20), for the app and diagnostics. */
+  rewinds(owner: string, threadId: string): RewindIntent[] {
+    this.thread(owner, threadId);
+    return (this.state.rewinds ?? []).filter(r => r.threadId === threadId).slice(-20).map(r => structuredClone(r));
+  }
+  /** Turn IDs of a thread's delivered turns a rewind may start from, for the app (your own ordinary messages; see `soloRefusal`). */
+  editable(owner: string, threadId: string, who?: RunAuthor): { runIds: string[]; refusal?: string } {
+    const thread = this.thread(owner, threadId);
+    const delivered = this.delivered(thread.id);
+    const runIds: string[] = [];
+    let refusal: string | undefined;
+    for (const run of delivered) {
+      if (run.batchOf || run.source || run.decision) continue;
+      const span = rewoundSpan(delivered, run.id);
+      const all = this.state.runs.filter(r => r.threadId === thread.id && !r.rewound);
+      const why = soloRefusal(all, span, who, this.queueing);
+      if (!why) runIds.push(run.id); else if (why === 'rewind_not_solo') refusal = why;
+    }
+    return { runIds, ...(refusal ? { refusal } : {}) };
+  }
+
   /** Resolves when folder renames requested by {@link updateMetadata} are done (or deferred to the end of a turn). */
   folderRenamed(): Promise<void> { return this.renaming; }
   /** Create a thread (and its Letta conversation). In a shared runtime, `author` records who started it. */
@@ -514,7 +774,7 @@ export class ThreadRuntime {
     });
   }
   /** Turns that reached (or may have reached) the agent: not waiting, not withdrawn before sending. */
-  private delivered(threadId: string) { return this.state.runs.filter(r => r.threadId === threadId && r.status !== 'queued' && !r.notSent); }
+  private delivered(threadId: string) { return this.state.runs.filter(r => r.threadId === threadId && r.status !== 'queued' && !r.notSent && !r.rewound); }
   /**
    * In a shared runtime, user turns in display history carry their author
    * (matched by the OTID they were sent with). A combined turn (several queued
@@ -836,6 +1096,7 @@ export class ThreadRuntime {
       return { id: previous.id, status: previous.status };
     }
     if (thread.archived) throw new RuntimeFault('thread_archived');
+    if (this.rewinding(thread.id)) throw new RuntimeFault('rewind_in_progress');
     if (this.queueing && author) this.stopTyping(thread.id, author.id);
     if (automation && (automation.replyMode !== undefined && !(['always', 'when-addressed', 'agent-decides'] as string[]).includes(automation.replyMode))) throw new RuntimeFault('invalid_input', 400);
     if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author, automation, extra.decision);
@@ -971,7 +1232,7 @@ export class ThreadRuntime {
     let files: StoredFile[] = [];
     if (staged.length) {
       if (!session.agent.attachments) throw new RuntimeFault('files_unavailable', 400);
-      try { files = await session.agent.attachments.store(staged.map(upload => upload.prepared)); } catch (error) { throw fileFault(error); }
+      try { files = await session.agent.attachments.store(staged.map(upload => upload.prepared), run.id); } catch (error) { throw fileFault(error); }
       this.uploads!.discard(uploadIds);
     }
     const fileMetadata: RunFile[] = files.map(({ name, kind, mediaType, label, bytes, sha256, pages, lines }) => ({ name, kind, mediaType, label, bytes, sha256, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) }));
@@ -981,7 +1242,7 @@ export class ThreadRuntime {
     const replyMode = this.replyMode !== undefined && session.agent.listening ? run.replyModeOverride ?? this.modeOf(thread) : undefined;
     // A decision's outcome is addressed to the agent: it always replies (resumes the work, or acknowledges the stop).
     const addressed = !!run.decision || (!!this.agentName && turn.some(r => mentionsAgent(r.input, this.agentName!)));
-    Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt, ...(replyMode ? { replyMode } : {}), ...(others.length ? { batch: turn.map(r => r.id) } : {}) });
+    Object.assign(run, { ...(imageMetadata.length ? { images: imageMetadata } : {}), ...(fileMetadata.length ? { files: fileMetadata, uploads: uploadIds } : {}), status: 'running', startedAt, tagged: true, ...(replyMode ? { replyMode } : {}), ...(others.length ? { batch: turn.map(r => r.id) } : {}) });
     // The other messages of a combined turn are sent with it: they follow its state, and its events are the turn's.
     for (const other of others) Object.assign(other, { status: 'running', startedAt, parentRunId: run.id, batchOf: run.id });
     thread.lastActivityAt = startedAt;
@@ -1062,6 +1323,7 @@ export class ThreadRuntime {
       // Tools that use personal credentials (Atlassian) act for the person whose message started the turn
       // (the first message's author in a combined turn). Single-user runtimes leave it to the host (the local user).
       const actor = run.author ? { actor: { id: run.author.id, name: run.author.name, login: run.author.login } } : {};
+      // Every turn carries its run ID as the message's OTID: history shows its author or source, and a rewind finds the turn (and its resources and memory changes).
       const shared = this.queueing ? { otid: run.id, ...actor,
         ...(turn.others.length ? { speakers: [run, ...turn.others].map(speaker) } : run.author ? { speaker: speaker(run) } : {}),
         ...(turn.replyMode ? { replyMode: turn.replyMode, addressed: !!turn.addressed } : {}) } : {};
@@ -1070,9 +1332,10 @@ export class ThreadRuntime {
       const reminder = run.decision ? (run.decision.kind === 'web-research' ? webResearchOutcomeNote(run.decision.choice?.id === 'approve' ? 'approve' : run.decision.choice?.id === 'search_again' ? 'search_again' : 'reject') : decisionOutcomeNote(run.decision.outcome)) : this.decisions?.pendingNote(run.threadId);
       const decision = { ...(reminder ? { reminder } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via } } : {};
+      const tag = { otid: run.id };
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...shared, ...unattended, ...decision }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...shared, ...unattended, ...decision });
+        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision });
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }

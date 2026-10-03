@@ -705,12 +705,47 @@ Rules for `generate` and `stream`:
   Other AI SDK call options are rejected.
 - `messages` must extend exactly what this instance already sent; history
   edits, replays and regeneration are refused. Use `agent.transcript` as the
-  base.
+  base. (To edit an earlier message, use a rewind; see below.)
 - One turn at a time, up to 8,000 characters of text.
 - After a failed or cancelled turn, the instance refuses further turns
   (delivery is uncertain). Close it and open the agent again.
 - Tool calls appear in results as `providerExecuted`: the AI SDK displays
   them but never runs them a second time.
+
+### Rewind: edit an earlier message
+
+In the browser app, the user can edit one of their earlier messages
+(**Edit** on the message, then **Save & rewind**). The conversation
+continues from the edited message; what the later turns changed in the
+agent's resources and memory is reverted (new git commits, history kept),
+and the confirmation lists what cannot be undone (commands with internet
+access, Jira and Confluence changes, other application tools). It works in
+solo conversations (in a team server, ones only you wrote in). See
+[Rewind](../README.md#rewind-edit-an-earlier-message) for the details.
+
+Your own tools' calls are listed as "can't be undone" unless you say they
+only change the agent's resources (which a rewind reverts):
+
+```ts
+// src/gui-rewind.ts
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { startGuiServer } from '@ai-sdk-letta/server';
+import { agent } from './agent.js';
+
+const assets = join(dirname(createRequire(import.meta.url).resolve('@ai-sdk-letta/web/package.json')), 'dist');
+// convert_temperature changes nothing: the rewind confirmation does not list its calls.
+const server = await startGuiServer(agent, assets, { port: 4400, rewindInternalTools: ['convert_temperature'] });
+await server.close();
+```
+
+From your own server code, `ThreadRuntime` has the same operations:
+`rewindPreview(owner, threadId, runId)` returns the summary without
+changing anything, and `rewind(owner, threadId, { rewindId, runId, text,
+newRunId })` runs it (idempotent by `rewindId`; a rewind interrupted by a
+crash is finished by `resumeRewinds(owner)`, which the servers call on
+start). Rewind needs git 2.40 or later; with an older git it is refused
+(`rewind_unavailable`).
 
 ## 9a. Run it from n8n or Conductor
 

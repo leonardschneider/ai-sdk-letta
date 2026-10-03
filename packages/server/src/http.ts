@@ -114,7 +114,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   // Raw bytes, only on the upload route, only as application/octet-stream, bounded by the per-file limit.
   const upload = express.raw({ limit: UPLOAD_BODY_LIMIT_BYTES, type: 'application/octet-stream' });
   app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && (req.path === '/v1/uploads' || req.path === '/v1/resources/upload') ? upload : small)(req, res, next));
-  app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: runtime.parallel ? Runtime.MAX_PARALLEL_TURNS : 1, queue: runtime.queueing, edits: false,
+  app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: runtime.parallel ? Runtime.MAX_PARALLEL_TURNS : 1, queue: runtime.queueing, edits: false, rewind: true,
     ...(runtime.replyMode !== undefined ? { replyModes: { agent: runtime.replyMode, batching: true } } : {}),
     images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes },
     files: runtime.uploads ? { types: ['text', 'pdf', 'image'], textExtensions: [...TEXT_EXTENSIONS], maxFileBytes: FILE_LIMITS.maxFileBytes, maxFilesPerMessage: FILE_LIMITS.maxFilesPerMessage, maxConversationFiles: FILE_LIMITS.maxConversationFiles, maxConversationBytes: FILE_LIMITS.maxConversationBytes } : null }));
@@ -188,6 +188,17 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
+  /* ---------------- rewind ---------------- */
+  /** Which of your messages you can edit in this conversation (`{ runIds, refusal? }`; `refusal: 'rewind_not_solo'` when others wrote in it). */
+  app.get('/v1/threads/:id/rewind', (req, res) => res.json({ ...runtime.editable(owner, req.params.id, author(req)), rewinds: runtime.rewinds(owner, req.params.id) }));
+  /** What editing the message of `{ runId }` would do (nothing changes): turns removed, files and memory reverted, conflicts, effects that stay, what is withdrawn. */
+  app.post('/v1/threads/:id/rewind/preview', async (req, res) => {
+    const runId = (req.body as { runId?: unknown } | undefined)?.runId;
+    if (typeof runId !== 'string') throw new RuntimeFault('invalid_input', 400);
+    res.json(await runtime.rewindPreview(owner, req.params.id, runId, author(req)));
+  });
+  /** Edit and rewind: `{ rewindId, runId, text, newRunId }` (UUIDs; the same body again returns the same result). The edited text is sent as run `newRunId`. */
+  app.post('/v1/threads/:id/rewind', async (req, res) => res.json(await runtime.rewind(owner, req.params.id, req.body, author(req))));
   app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id, true); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
   app.post('/v1/runs/:id/cancel', (req, res) => { mayAct(req, req.params.id); runtime.cancel(owner, req.params.id); res.json({ accepted: true }); });
   /* ---------------- decisions ---------------- */

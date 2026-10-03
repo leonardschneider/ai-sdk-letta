@@ -31,6 +31,9 @@ export interface AgentPresentation {
   historyTruncated: boolean;
 }
 
+/** The turn a `beforeTurn`/`afterTurn` hook runs for: its OTID, when the call set one (see {@link LettaCallOptions}). */
+export interface TurnInfo { otid?: string }
+
 /** Durable delivery hooks: `begin` before sending, `complete` after a confirmed finish. */
 export interface DeliveryHooks { begin(): void; complete(): void }
 
@@ -61,9 +64,9 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
    * Runs after every turn, finished or not (for example, to commit what the
    * agent changed in its resources). Errors are ignored.
    */
-  afterTurn?: () => Promise<void>;
+  afterTurn?: (turn: TurnInfo) => Promise<void>;
   /** Runs when a turn starts, before anything is stored or sent (paired with `afterTurn`). Errors are ignored. */
-  beforeTurn?: () => void;
+  beforeTurn?: (turn: TurnInfo) => void;
   /**
    * The session exposes the {@link STAY_SILENT_TOOL} tool, so turns may pass a
    * `replyMode` and the agent may listen without replying (see
@@ -314,7 +317,7 @@ export function parseUserTurn(content: ModelMessage['content'], limits?: Attachm
  * {@link userTurnContent} builds.
  * @throws {FileInputError}
  */
-export async function storeUserTurn(turn: ParsedTurn, store?: AttachmentStore, signal?: AbortSignal): Promise<{ message: SendMessage; files: StoredFile[] }> {
+export async function storeUserTurn(turn: ParsedTurn, store?: AttachmentStore, signal?: AbortSignal, otid?: string): Promise<{ message: SendMessage; files: StoredFile[] }> {
   if (!store || !turn.attachments.length) return { message: turn.images.length ? turn.items : turn.text, files: [] };
   const existing = turn.attachments.some(a => a.reference) ? store.list().filter(f => !f.name.includes('/')) : [];
   const files: (StoredFile | undefined)[] = turn.attachments.map(a => {
@@ -324,7 +327,7 @@ export async function storeUserTurn(turn: ParsedTurn, store?: AttachmentStore, s
     return file;
   });
   const fresh = turn.attachments.flatMap((a, i) => a.reference ? [] : [{ i, name: a.name, bytes: a.bytes! }]);
-  const stored = fresh.length ? await store.save(fresh, { signal }) : [];
+  const stored = fresh.length ? await store.save(fresh, { signal, ...(otid ? { turn: otid } : {}) }) : [];
   fresh.forEach(({ i }, n) => { files[i] = stored[n]; });
   const note = attachmentNote(files as StoredFile[]);
   const message: SendMessage = turn.images.length
@@ -363,8 +366,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private readonly defaultActor?: TurnActor;
   private readonly memoryTools: readonly string[];
   private readonly delivery?: DeliveryHooks;
-  private readonly afterTurn?: () => Promise<void>;
-  private readonly beforeTurn?: () => void;
+  private readonly afterTurn?: (turn: TurnInfo) => Promise<void>;
+  private readonly beforeTurn?: (turn: TurnInfo) => void;
   private readonly modelId: string;
   private history: ModelMessage[] = [];
   private busy = false;
@@ -391,7 +394,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private settled?: Promise<void>;
   /** Resolves when the work after the last turn (see `afterTurn`) is done. */
   idle(): Promise<void> { return this.settled ?? Promise.resolve(); }
-  private finishTurn() { if (this.afterTurn) this.settled = (this.settled ?? Promise.resolve()).then(() => this.afterTurn!()).catch(() => {}); }
+  private finishTurn(turn: TurnInfo = {}) { if (this.afterTurn) this.settled = (this.settled ?? Promise.resolve()).then(() => this.afterTurn!(turn)).catch(() => {}); }
 
   /**
    * A copy of the transcript this instance has sent and received (images as
@@ -425,11 +428,12 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (historyKey(messages.slice(0, -1)) !== historyKey(this.history)) throw new Error('History edits, replay, and regeneration are not supported');
     options.abortSignal?.throwIfAborted();
     this.busy = true;
-    try { this.beforeTurn?.(); } catch { /* observer */ }
+    const info: TurnInfo = options.otid ? { otid: options.otid } : {};
+    try { this.beforeTurn?.(info); } catch { /* observer */ }
     // Attachments are stored before delivery; a turn that then fails leaves them in the folder (harmless, and listed).
     let turn: Awaited<ReturnType<typeof storeUserTurn>>;
-    try { turn = await storeUserTurn(parsed, this.attachments, options.abortSignal); options.abortSignal?.throwIfAborted(); }
-    catch (error) { this.busy = false; this.finishTurn(); throw error; }
+    try { turn = await storeUserTurn(parsed, this.attachments, options.abortSignal, options.otid); options.abortSignal?.throwIfAborted(); }
+    catch (error) { this.busy = false; this.finishTurn(info); throw error; }
     const control = new AbortController();
     this.active = control;
     const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, control.signal]) : control.signal;
@@ -446,7 +450,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const actor = options.actor ? Object.freeze({ id: options.actor.id, ...(typeof options.actor.name === 'string' ? { name: options.actor.name } : {}), ...(typeof options.actor.login === 'string' ? { login: options.actor.login } : {}) }) : this.defaultActor;
     // The same policy object for the whole turn (the bridge remembers a refusal per object).
     const unattended = options.unattended ? Object.freeze({ preApproved: Object.freeze([...options.unattended.preApproved]), ...(typeof options.unattended.onBehalfOf === 'string' ? { onBehalfOf: options.unattended.onBehalfOf } : {}), ...(typeof options.unattended.source === 'string' ? { source: options.unattended.source } : {}) }) : undefined;
-    return { otid: options.otid, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor, unattended };
+    return { otid: options.otid, info, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor, unattended };
   }
 
   private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false, actor?: TurnActor, unattended?: UnattendedPolicy): LanguageModelV4 {
@@ -587,19 +591,19 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       this.history = [...turn.messages, ...result.response.messages];
       return result;
     } catch (error) { this.unusable = true; throw error; }
-    finally { this.busy = false; this.active = undefined; this.finishTurn(); }
+    finally { this.busy = false; this.active = undefined; this.finishTurn(turn.info); }
   }
 
   /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
   async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
     return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor, turn.unattended), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
-      onError: () => { this.unusable = true; this.busy = false; this.finishTurn(); },
-      onAbort: () => { this.close(); this.busy = false; this.finishTurn(); },
+      onError: () => { this.unusable = true; this.busy = false; this.finishTurn(turn.info); },
+      onAbort: () => { this.close(); this.busy = false; this.finishTurn(turn.info); },
       onFinish: result => {
         try { if (!this.unusable && result.finishReason === 'stop') this.delivery?.complete(); }
         catch (error) { this.unusable = true; throw error; }
-        finally { this.busy = false; this.active = undefined; this.finishTurn(); }
+        finally { this.busy = false; this.active = undefined; this.finishTurn(turn.info); }
         this.history = [...turn.messages, ...result.response.messages];
       },
     });

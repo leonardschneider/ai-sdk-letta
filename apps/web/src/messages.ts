@@ -57,6 +57,14 @@ export function withSource(message: ThreadMessageLike, source: MessageSource | u
   return source ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, source } } } : message;
 }
 
+/** The run a user message was sent as (its OTID in history), when it is one: what a rewind edits. */
+export function knownRun(message: Pick<UIMessage, 'metadata'>): string | undefined {
+  const value = (message.metadata as { otid?: unknown } | undefined)?.otid;
+  return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value) ? value : undefined;
+}
+export function withRun(message: ThreadMessageLike, runId: string | undefined): ThreadMessageLike {
+  return runId ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, runId } } } : message;
+}
 /** A decision's outcome turn: shown as a compact "Decided by …" line instead of a bubble. */
 export function withDecision(message: ThreadMessageLike, decision: DecisionOutcome | undefined): ThreadMessageLike {
   return decision ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, decision } } } : message;
@@ -121,7 +129,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined));
   return mergeAssistantRuns(converted).map(markListened);
 }
 

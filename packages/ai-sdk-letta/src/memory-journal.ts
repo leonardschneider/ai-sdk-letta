@@ -1,0 +1,236 @@
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { CONVERSATION_TRAILER, REWIND_TRAILER, TURN_TRAILER, commitInfo, commitsSince, commitsWithTrailer, headOf, planRevert, withTrailers, type CommitInfo, type FilePlan, type GitRunner } from './revert.js';
+
+/**
+ * Which turn changed the agent's memory (MemFS, a git repository the Letta
+ * harness keeps), so a rewind can undo exactly the memory changes of the
+ * turns it removes.
+ *
+ * The agent edits memory files during its turns and commits them with the
+ * one command it is allowed (`memoryCommitCommand`), or not at all (the
+ * harness then reminds it in a later turn, which would mix two turns'
+ * changes). So at the end of every turn the journal commits what is left
+ * ("Agent memory changes", with `X-Turn` and `X-Conversation` trailers) and
+ * records which new commits the turn made, in a ledger next to the agent's
+ * state (`<state>/memory/<agentId>.json`).
+ *
+ * Commits are classified as:
+ * - `turn`: made by one turn (its own commits and the end-of-turn commit);
+ * - `shared`: made while turns of several conversations ran at once (they
+ *   cannot be told apart, so a rewind keeps them and says so);
+ * - background: anything else, such as dreaming (reflection) merging its
+ *   work: never attributed to a turn; a rewind keeps it and says so.
+ */
+
+/** A rewind's view of the memory: what is reverted, what is kept. */
+export interface MemoryRewindPlan {
+  /** Files the rewound turns changed: reverted, or kept on conflict. */
+  files: FilePlan[];
+  /** The rewound turns' commits. */
+  commits: CommitInfo[];
+  /** Commits since the rewound turns started that are kept: dreaming and other background work (`background`), or several turns at once (`shared`). */
+  kept: (CommitInfo & { kind: 'background' | 'shared' })[];
+}
+type Entry = { commit: string; kind: 'turn' | 'shared'; turns: string[]; conversationId?: string; at: string };
+type Ledger = { version: 1; since: string; entries: Entry[]; starts?: Record<string, string> };
+type Active = { conversationId?: string; start?: string; overlapped: boolean };
+
+const AGENT_EMAIL = 'agent@localhost';
+const REWIND_EMAIL = 'rewind@ai-sdk-letta.invalid';
+const journals = new Map<string, MemoryJournal>();
+const queues = new Map<string, Promise<unknown>>();
+/** One operation at a time per memory repository (in this process). */
+async function serial<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const previous = queues.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const tail = run.catch(() => {});
+  queues.set(key, tail);
+  try { return await run; } finally { if (queues.get(key) === tail) queues.delete(key); }
+}
+
+/** The memory journal of one agent. Get one with {@link MemoryJournal.open}. */
+export class MemoryJournal {
+  private readonly active = new Map<string, Active>();
+  private constructor(readonly file: string, readonly memoryDirectory: string, readonly author: string) {}
+
+  /**
+   * The journal of an agent's memory (one per memory directory in this process).
+   * @param directory where ledgers are kept (`statePaths(...).memory`)
+   * @param author the name the agent's memory commits use (the definition's name)
+   */
+  static open(directory: string, agentId: string, memoryDirectory: string, author = 'ai-sdk-letta agent'): MemoryJournal {
+    if (!/^agent-[a-zA-Z0-9-]{1,100}$/.test(agentId)) throw new Error('Invalid agent ID');
+    const key = resolve(memoryDirectory);
+    let journal = journals.get(key);
+    if (!journal) { journal = new MemoryJournal(join(directory, `${agentId}.json`), key, author); journals.set(key, journal); }
+    return journal;
+  }
+
+  /** Runs git in the memory repository, without global or system configuration and without hooks. */
+  readonly git: GitRunner = (args, options = {}) => new Promise((done, fail) => {
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: this.memoryDirectory, LANG: 'C', LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', ...options.env };
+    const child = execFile('git', ['-c', 'core.hooksPath=/dev/null', '-C', this.memoryDirectory, ...args], { env, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 }, (error, stdout, stderr) => {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (error && !(options.ok1 && code === 1)) fail(new Error(`git ${args[0]} failed: ${String(stderr).trim().slice(0, 300) || (error as Error).message}`));
+      else done({ stdout, code: error ? 1 : 0 });
+    });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(options.input ?? '');
+  });
+
+  private ledger(): Ledger {
+    try {
+      const value = JSON.parse(readFileSync(this.file, 'utf8')) as Ledger;
+      if (value.version === 1 && Array.isArray(value.entries)) return value;
+    } catch { /* new */ }
+    return { version: 1, since: new Date().toISOString(), entries: [] };
+  }
+  private save(ledger: Ledger) {
+    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+    if (ledger.entries.length > 5000) ledger.entries = ledger.entries.slice(-5000);
+    const temporary = `${this.file}.tmp-${randomUUID()}`;
+    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    try { writeFileSync(fd, JSON.stringify(ledger)); fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, this.file);
+  }
+  /** When the journal started recording (turns before that cannot be rewound precisely). */
+  get since(): string { const ledger = this.ledger(); if (!ledger.entries.length) this.save(ledger); return ledger.since; }
+
+  /** A turn started (`turn`: its ID, the OTID of its message). Paired with {@link endTurn}. */
+  beginTurn(turn: string, conversationId?: string) {
+    for (const other of this.active.values()) other.overlapped = true;
+    const entry: Active = { ...(conversationId ? { conversationId } : {}), overlapped: this.active.size > 0 };
+    this.active.set(turn, entry);
+    void serial(this.memoryDirectory, async () => { entry.start = await headOf(this.git).catch(() => undefined); });
+  }
+  /**
+   * A turn ended: commit the memory changes it left uncommitted, then record
+   * which commits since it started are its own. Errors are swallowed (memory
+   * attribution must never fail a turn); see {@link since}.
+   */
+  async endTurn(turn: string, conversationId?: string): Promise<void> {
+    const entry = this.active.get(turn);
+    this.active.delete(turn);
+    if (!entry) return;
+    await serial(this.memoryDirectory, async () => {
+      try {
+        if (!this.mergeInProgress()) await this.sweep(turn, conversationId ?? entry.conversationId, entry.overlapped);
+        const commits = (await commitsSince(this.git, entry.start)).filter(c => !entry.start || c.commit !== entry.start);
+        const ledger = this.ledger();
+        if (entry.start) { ledger.starts ??= {}; ledger.starts[turn] = entry.start; const keys = Object.keys(ledger.starts); if (keys.length > 5000) for (const old of keys.slice(0, keys.length - 5000)) delete ledger.starts[old]; }
+        const known = new Set(ledger.entries.map(e => e.commit));
+        const at = new Date().toISOString();
+        for (const commit of commits) {
+          if (known.has(commit.commit) || commit.rewind) continue;
+          // The agent's own commits (its one allowed command) and the end-of-turn commit; nothing else (dreaming merges, reflection).
+          const own = commit.author === AGENT_EMAIL && commit.parents <= 1;
+          if (!own) continue;
+          const kind = entry.overlapped && commit.turn !== turn ? 'shared' : 'turn';
+          ledger.entries.push({ commit: commit.commit, kind, turns: kind === 'shared' ? [turn, ...[...this.active.keys()]] : [turn], ...(conversationId ?? entry.conversationId ? { conversationId: conversationId ?? entry.conversationId } : {}), at });
+        }
+        this.save(ledger);
+      } catch { /* never fails a turn */ }
+    });
+  }
+  private mergeInProgress() {
+    for (const name of ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
+      try { lstatSync(join(this.memoryDirectory, '.git', name)); return true; } catch { /* absent */ }
+    }
+    return false;
+  }
+  /** Commit uncommitted Markdown changes (the agent's), as the agent: "Agent memory changes". */
+  private async sweep(turn: string, conversationId: string | undefined, overlapped: boolean) {
+    const status = (await this.git(['status', '--porcelain', '-z', '--', '*.md'])).stdout.toString();
+    if (!status.replace(/\0/g, '').trim()) return;
+    await this.git(['add', '-A', '--', '*.md']);
+    const staged = await this.git(['diff', '--cached', '--quiet'], { ok1: true });
+    if (staged.code === 0) return;
+    const message = withTrailers('Agent memory changes', { [TURN_TRAILER]: overlapped ? undefined : turn, [CONVERSATION_TRAILER]: overlapped ? undefined : conversationId });
+    await this.git(['-c', `user.name=${this.author.replace(/[\r\n]/g, ' ')}`, '-c', `user.email=${AGENT_EMAIL}`, 'commit', '-q', '--no-verify', '-F', '-'], { input: `${message}\n` });
+  }
+
+  /** The commits of `turns` recorded in the ledger (only `turn` ones), and the others since `since`. */
+  private async classify(turns: ReadonlySet<string>, since?: string) {
+    const ledger = this.ledger();
+    const byCommit = new Map(ledger.entries.map(e => [e.commit, e]));
+    const targets = ledger.entries.filter(e => e.kind === 'turn' && e.turns.some(t => turns.has(t))).map(e => e.commit);
+    const kept: MemoryRewindPlan['kept'] = [];
+    // Commits since the first rewound turn started: from the HEAD it started at when recorded, otherwise by time.
+    const startHead = [...turns].map(t => ledger.starts?.[t]).find(Boolean);
+    if (since || startHead) {
+      const start = since ? Date.parse(since) - 1000 : 0;
+      const targetSet = new Set(targets);
+      const candidates = startHead ? await commitsSince(this.git, startHead).catch(() => commitsSince(this.git, undefined)) : await commitsSince(this.git, undefined);
+      for (const commit of candidates.filter(c => (startHead || Date.parse(c.date) >= start) && !targetSet.has(c.commit) && !c.rewind).slice(-200)) {
+        const entry = byCommit.get(commit.commit);
+        // Other turns' commits (other conversations, or turns that stay) are theirs: not listed.
+        if (entry?.kind === 'turn') continue;
+        if (entry?.kind === 'shared' && !entry.turns.some(t => turns.has(t))) continue;
+        kept.push({ commit: commit.commit, subject: commit.subject, date: commit.date, ...(commit.author ? { author: commit.author } : {}), kind: entry?.kind === 'shared' ? 'shared' : 'background' });
+      }
+    }
+    return { targets, kept };
+  }
+  /** What rewinding `turns` would revert in memory, and what it keeps (see {@link MemoryRewindPlan}). `since`: when the first rewound turn started. */
+  planRewind(turns: ReadonlySet<string>, since?: string): Promise<MemoryRewindPlan> {
+    return serial(this.memoryDirectory, () => this.plan(turns, since).then(({ files, commits, kept }) => ({ files, commits, kept })));
+  }
+  private async plan(turns: ReadonlySet<string>, since?: string) {
+    const { targets, kept } = await this.classify(turns, since);
+    const index = join(this.memoryDirectory, '.git', `rewind-${randomUUID()}.index`);
+    try {
+      const plan = await planRevert(this.git, targets, index, await this.uncommitted());
+      return { ...plan, kept };
+    } finally { try { unlinkSync(index); } catch { /* none */ } }
+  }
+  private async uncommitted(): Promise<Set<string>> {
+    const out = (await this.git(['status', '--porcelain', '-z', '--untracked-files=all'])).stdout.toString().split('\0').filter(Boolean);
+    return new Set(out.map(line => line.slice(3)));
+  }
+  /**
+   * Revert the memory changes of `turns` as one new commit ("Rewind: revert
+   * memory changes of later turns", trailer `X-Rewind: <rewindId>`).
+   * Idempotent: a rewind whose commit is already there is not applied again.
+   */
+  applyRewind(rewindId: string, turns: ReadonlySet<string>, since?: string): Promise<MemoryRewindPlan & { commit?: string; applied: boolean }> {
+    return serial(this.memoryDirectory, async () => {
+      const done = await commitsWithTrailer(this.git, REWIND_TRAILER, new Set([rewindId]));
+      if (done.length) return { files: [], commits: [], kept: [], commit: done[0]!.commit, applied: false };
+      if (this.mergeInProgress()) throw new Error('memory_busy');
+      const plan = await this.plan(turns, since);
+      const written: string[] = [];
+      for (const change of plan.changes) {
+        const parts = change.path.split('/');
+        if (parts.some(part => !part || part === '.' || part === '..' || part === '.git')) continue;
+        const absolute = join(this.memoryDirectory, ...parts);
+        let current = this.memoryDirectory;
+        let safe = true;
+        for (const part of parts.slice(0, -1)) {
+          current = join(current, part);
+          try { const info = lstatSync(current); if (!info.isDirectory() || info.isSymbolicLink()) { safe = false; break; } }
+          catch { if (!change.entry) { safe = false; break; } mkdirSync(current, { recursive: true }); }
+        }
+        if (!safe) continue;
+        let exists = false;
+        try { const info = lstatSync(absolute); if (!info.isFile() && !info.isSymbolicLink()) continue; exists = true; } catch { /* absent */ }
+        if (!change.entry) { if (exists) unlinkSync(absolute); written.push(change.path); continue; }
+        const bytes = (await this.git(['cat-file', 'blob', change.entry.oid])).stdout;
+        if (exists) unlinkSync(absolute);
+        writeFileSync(absolute, bytes, { mode: change.entry.mode === '100755' ? 0o755 : 0o644, flag: 'wx' });
+        written.push(change.path);
+      }
+      if (!written.length) return { files: plan.files, commits: plan.commits, kept: plan.kept, applied: true };
+      await this.git(['add', '-A', '--', ...written]);
+      const count = plan.files.filter(file => file.status === 'revert').length;
+      const message = withTrailers(`Rewind: revert memory changes of later turns (${count} file${count === 1 ? '' : 's'})`, { [REWIND_TRAILER]: rewindId });
+      await this.git(['-c', 'user.name=ai-sdk-letta rewind', '-c', `user.email=${REWIND_EMAIL}`, 'commit', '-q', '--no-verify', '-F', '-', '--', ...written], { input: `${message}\n` });
+      const commit = await headOf(this.git);
+      return { files: plan.files, commits: plan.commits, kept: plan.kept, ...(commit ? { commit } : {}), applied: true };
+    });
+  }
+  /** Commit metadata (for summaries). */
+  info(commits: readonly string[]) { return commitInfo(this.git, commits); }
+}

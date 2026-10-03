@@ -44,6 +44,10 @@ export type ScheduleRecord = {
   /** SHA-256 of the single-use secret the orchestrator presents when the task is due. */
   hash: string;
   handle?: OrchestratorHandle; runId?: string; firedAt?: string; error?: string; cleanedAt?: string;
+  /** The turn that scheduled it (its run ID), when known: a rewind of that turn cancels the task. */
+  requestedBy?: string;
+  /** Cancelled because the turn that scheduled it was rewound. */
+  rewound?: boolean;
 };
 type StoreState = { version: 1; tokens: AutomationToken[]; runs: ServiceRun[]; schedules: ScheduleRecord[] };
 
@@ -489,16 +493,22 @@ export class AutomationService {
     if (this.members && !actor.id) throw new Error('scheduler_failed');
     const threadId = request.conversation === 'current' ? agent.runtime.threadOfConversation(agent.owner, turn.conversationId) : undefined;
     if (request.conversation === 'current' && !threadId) throw new Error('scheduler_failed');
+    // The turn that asks (so a rewind of it cancels the task).
+    const origin = agent.runtime.threadOfConversation(agent.owner, turn.conversationId);
+    const requestedBy = origin ? agent.runtime.activeRun(origin)?.id : undefined;
     const secret = newSecret();
     const record: ScheduleRecord = { id: randomUUID(), at: request.at, prompt: request.prompt, conversation: request.conversation, ...(threadId ? { threadId } : {}), ...(request.title ? { title: request.title } : {}),
-      actor, createdAt: new Date().toISOString(), orchestrator: scheduler.orchestrator.kind, state: 'scheduling', hash: sha256(secret) };
+      actor, createdAt: new Date().toISOString(), orchestrator: scheduler.orchestrator.kind, state: 'scheduling', hash: sha256(secret), ...(requestedBy ? { requestedBy } : {}) };
     agent.store.update(state => {
       if (state.schedules.filter(s => s.state === 'scheduled' || s.state === 'scheduling').length >= AUTOMATION_LIMITS.pendingSchedules) throw new Error('schedule_limit');
       state.schedules.push(record);
     });
     try {
       const handle = await scheduler.orchestrator.createJob({ id: record.id, at: record.at, token: secret, fireUrl: `${scheduler.callbackUrl.replace(/\/+$/, '')}/v1/automation/schedules/${record.id}/fire`, label: visible(request.prompt, 60) });
-      agent.store.update(state => { const s = state.schedules.find(x => x.id === record.id); if (s) { s.state = 'scheduled'; s.handle = handle; } });
+      let withdrawn = false;
+      agent.store.update(state => { const s = state.schedules.find(x => x.id === record.id); if (s) { s.handle = handle; if (s.state === 'scheduling') s.state = 'scheduled'; else withdrawn = true; } });
+      // Cancelled while it was being created (a rewind of the turn): its job goes too.
+      if (withdrawn) void this.retire(agent, record.id);
     } catch (error) {
       agent.store.update(state => { const s = state.schedules.find(x => x.id === record.id); if (s) { s.state = 'failed'; s.error = (error as Error).message; } });
       this.log(`Scheduling a task with ${scheduler.orchestrator.kind} failed: ${(error as Error).message}${(error as { detail?: string }).detail ? ` (${(error as { detail?: string }).detail})` : ''}`);
@@ -592,6 +602,29 @@ export class AutomationService {
       catch { throw new RuntimeFault('scheduler_unreachable', 502); }
     }
     this.changed();
+  }
+  /** Tasks scheduled by these turns (see `ScheduleRecord.requestedBy`): waiting ones, and ones that already fired. */
+  schedulesOf(agent: AutomationAgent, runIds: ReadonlySet<string>): { id: string; at: string; prompt: string; state: 'pending' | 'fired' }[] {
+    return agent.store.read().schedules.filter(s => s.requestedBy && runIds.has(s.requestedBy) && ['scheduling', 'scheduled', 'fired'].includes(s.state))
+      .map(s => ({ id: s.id, at: s.at, prompt: s.prompt.slice(0, 300), state: s.state === 'fired' ? 'fired' as const : 'pending' as const }));
+  }
+  /**
+   * A rewind removed these turns: the tasks they scheduled that have not
+   * fired are cancelled (their jobs removed from the orchestrator; a removal
+   * that fails is retried by the periodic cleanup, and the task can no
+   * longer fire either way). Idempotent.
+   */
+  async cancelSchedulesOf(agent: AutomationAgent, runIds: ReadonlySet<string>): Promise<string[]> {
+    const cancelled: string[] = [];
+    agent.store.update(state => { for (const s of state.schedules) if (s.requestedBy && runIds.has(s.requestedBy) && (s.state === 'scheduled' || s.state === 'scheduling' || s.state === 'failed')) { s.state = 'cancelled'; s.rewound = true; cancelled.push(s.id); } });
+    for (const id of cancelled) {
+      const schedule = agent.store.read().schedules.find(s => s.id === id);
+      if (!schedule?.handle || !this.scheduler) continue;
+      try { await this.scheduler.orchestrator.deleteJob(schedule.handle); agent.store.update(state => { const s = state.schedules.find(x => x.id === id); if (s) s.cleanedAt = new Date().toISOString(); }); }
+      catch (error) { this.log(`Removing a task cancelled by a rewind from ${this.scheduler.orchestrator.kind} failed (it cannot fire; removal is retried later): ${(error as Error).message}`); }
+    }
+    if (cancelled.length) this.changed();
+    return cancelled;
   }
   /** Tasks of an agent for the app: waiting ones, then the 20 most recent others. */
   schedules(agent: AutomationAgent) {

@@ -21,6 +21,8 @@ import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './c
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
 import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
+import { MemoryJournal } from './memory-journal.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -95,6 +97,8 @@ export interface LettaRuntime<TOOLS extends ToolSet = ToolSet> {
   navigation: NavigationSource;
   /** The agent's resources (all conversations' files, git-backed), when it has file tools or a sandbox. */
   resources?: ResourceStore;
+  /** Rewind support for the open conversation (see {@link ConversationRewind}). */
+  rewind: ConversationRewind;
   /** Close the session and SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
@@ -156,6 +160,39 @@ export async function openResources(paths: ReturnType<typeof statePaths>, agentI
 /** A conversation to open on an {@link AgentHost}: an existing one, or a new one with this title. */
 export type ConversationTarget = { conversationId: string } | { newTitle: string };
 
+/** One backend history record, as a rewind reads it (see {@link ConversationRewind.records}). */
+export interface HistoryRecord {
+  id: string;
+  type: string;
+  /** User messages: the OTID the turn was sent with. */
+  otid?: string;
+  date?: string;
+  /** User and assistant messages: the visible text (system reminders removed). */
+  text?: string;
+  /** Tool calls: the tool and its arguments (as sent by the model). */
+  tool?: { name: string; arguments: unknown };
+}
+/**
+ * What a rewind needs from an open conversation (see the server's
+ * `ThreadRuntime.rewind`): its backend history, a fork of it, and the
+ * agent's memory journal.
+ */
+export interface ConversationRewind {
+  /** Backend history records, oldest first (at most `HISTORY_LIMIT`). */
+  records(): Promise<{ records: HistoryRecord[]; truncated: boolean }>;
+  /**
+   * A new conversation with this one's history up to and including
+   * `messageId` (`null`: no history; a new empty conversation with the same
+   * title). Returns its ID as soon as the backend made it (`onCreated` gets
+   * it first, so a caller can record it before anything else can fail).
+   */
+  fork(messageId: string | null, onCreated?: (conversationId: string) => void): Promise<string>;
+  /** Archive a conversation of this agent (kept for audit, hidden from lists). `'default'` cannot be archived: `false`. */
+  archive(conversationId: string): Promise<boolean>;
+  /** The agent's memory journal (which turn changed which memory). */
+  readonly memory: MemoryJournal;
+}
+
 /** One open conversation of an {@link AgentHost}: its own Letta session, tools, interactions and sandbox. */
 export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   agent: LettaAgent<TOOLS>;
@@ -163,6 +200,8 @@ export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   title: string;
   /** Reload the display history from the backend (nothing is sent; projected like `presentation.initialMessages`). */
   history(): Promise<UIMessage[]>;
+  /** Rewind support (fork, history records, memory journal). */
+  rewind: ConversationRewind;
   /** Close this conversation's session (the host and other conversations stay open). Idempotent. */
   close(): Promise<void>;
 }
@@ -374,6 +413,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           sandbox: () => shell?.session,
         });
         let memoryRoot: string | undefined;
+        const turnIds = new WeakMap<object, string>();
         session = sessionClient.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name));
         const ready = await session.ready();
         if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
@@ -398,6 +438,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         if (reflection?.trigger !== definition.dreaming.trigger || reflection.step_count !== definition.dreaming.stepCount) throw new Error('Persistent dreaming configuration differs from the definition; inspect agent settings before continuing');
         assertIdle(status);
         memoryRoot = status.memoryDirectory;
+        const journal = MemoryJournal.open(paths.memory, identity.agentId, memoryRoot, definition.name);
         selectConversation(conversationId);
         const sandboxLine = shell ? `\nSandbox: ${typeof shell.config.provider === 'string' ? shell.config.provider : 'custom'} · no network${definition.permissions.run_command_online === 'ask' ? ' (network commands ask first)' : ''}${shell.hasProject ? ` · project ${shell.config.project!.path}` : ''}` : '';
         const dreamingLine = definition.dreaming.trigger === 'off' ? 'Dreaming: off' : `Dreaming: ${reflection.trigger}${reflection.trigger === 'step-count' ? ` ${reflection.step_count}` : ''} configured (not evidence a dream ran)`;
@@ -416,10 +457,48 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
           // Whatever the agent changed in the resources during the turn becomes one commit.
           // Folder renames of this conversation wait while a turn runs, then apply after that commit.
-          ...(store ? { beforeTurn: () => store.beginTurn(conversationId), afterTurn: () => store.endTurn(conversationId) } : {}),
+          // Memory: what the turn changed is committed and recorded with its ID (see MemoryJournal), so a rewind can undo it.
+          beforeTurn: turn => { const id = turn.otid ?? `turn-${randomUUID()}`; turnIds.set(turn, id); store?.beginTurn(conversationId, turn.otid); journal.beginTurn(id, conversationId); },
+          afterTurn: async turn => { const id = turnIds.get(turn); turnIds.delete(turn); await Promise.all([store?.endTurn(conversationId, turn.otid), id ? journal.endTurn(id, conversationId) : undefined]); },
         });
+        const rewind: ConversationRewind = {
+          memory: journal,
+          records: async () => {
+            const loaded = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
+            return { records: loaded.messages.map(historyRecord), truncated: loaded.truncated };
+          },
+          fork: async (messageId, onCreated) => {
+            let forked: string;
+            if (messageId === null) {
+              const creator = managementClient(REQUEST_TIMEOUT_MS);
+              try {
+                const created = await creator.conversations.create({ agentId: identity.agentId, summary: sanitizeText(conversationTitle) });
+                if (created.agent_id !== identity.agentId) throw new Error('Created conversation belongs to a different agent');
+                forked = created.id;
+              } finally { await creator.close(); }
+            } else {
+              // The session's command also forks the default conversation (the SDK's fork() cannot name its agent).
+              const response = await live.sendCommand({ type: 'conversation_fork', conversation_id: conversationId, body: { agent_id: identity.agentId, message_id: messageId } }, { responseType: 'conversation_fork_response', timeoutMs: REQUEST_TIMEOUT_MS });
+              const id = (response.conversation as { id?: unknown } | null | undefined)?.id;
+              if (response.success !== true || typeof id !== 'string' || !validConversationId(id) || id === 'default') throw new Error('rewind_fork_failed');
+              forked = id;
+            }
+            onCreated?.(forked);
+            // Check what was made (the SDK calls a failure here ConversationForkHydrationError): the ID is already known to the caller.
+            const inspector = managementClient(REQUEST_TIMEOUT_MS);
+            try { const made = await inspector.conversations.retrieve(forked); if (made.agent_id !== identity.agentId) throw new Error('Forked conversation belongs to a different agent'); }
+            finally { await inspector.close(); }
+            return forked;
+          },
+          archive: async id => {
+            if (id === 'default' || !validConversationId(id)) return false;
+            const updater = managementClient(REQUEST_TIMEOUT_MS);
+            try { const updated = await updater.conversations.update(id, { archived: true }); return updated.archived === true; }
+            finally { await updater.close(); }
+          },
+        };
         const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening });
-        self = { agent, conversationId, title: conversationTitle, live, history: reload, truncated: history.truncated, startupStatus, close: shutdown };
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
       } catch (error) { await shutdown(); throw error; }
@@ -428,10 +507,33 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     return {
       definition, identity, lease, ...(resources ? { resources } : {}),
       openConversation,
-      open: async target => { const { agent, conversationId, title, history, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, close: closeConversation }; },
+      open: async target => { const { agent, conversationId, title, history, rewind, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, close: closeConversation }; },
       close,
     };
   } catch (error) { await close(); throw error; }
+}
+
+/** A backend record as a rewind reads it (see {@link HistoryRecord}). */
+function historyRecord(message: { id: string }): HistoryRecord {
+  const row = message as unknown as Record<string, unknown>;
+  const type = typeof row.message_type === 'string' ? row.message_type : 'unknown';
+  const record: HistoryRecord = { id: message.id, type };
+  if (typeof row.otid === 'string') record.otid = row.otid;
+  if (typeof row.date === 'string') record.date = row.date;
+  if (type === 'user_message' || type === 'assistant_message') {
+    const visible = projectHistory([message] as never, [], 0);
+    const text = visible[0]?.parts.filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('\n');
+    if (text) record.text = text;
+  }
+  if (type === 'tool_call_message' || type === 'approval_request_message') {
+    const call = row.tool_call as { name?: unknown; arguments?: unknown } | undefined;
+    if (call && typeof call.name === 'string') {
+      let args: unknown = call.arguments;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* as sent */ } }
+      record.tool = { name: call.name, arguments: args };
+    }
+  }
+  return record;
 }
 
 /**
@@ -511,6 +613,6 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
-    return { agent: conversation.agent, identity, navigation, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
+    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
   } catch (error) { await host.close(); throw error; }
 }

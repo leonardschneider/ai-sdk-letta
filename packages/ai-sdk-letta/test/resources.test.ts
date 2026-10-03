@@ -442,3 +442,45 @@ test('the agent commits its changes at the end of each turn, even a failed one',
     assert.ok(tracked(store).includes('Alpha/partial.txt'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('rewind attribution: end-of-turn commits carry X-Turn and X-Conversation; overlapping turns share their commit (X-Shared-Turns), which a rewind keeps', async () => {
+  const root = tmp();
+  try {
+    const store = ResourceStore.open(root, AGENT);
+    await store.init();
+    const folder = store.ensureFolder('local-conv-a', 'Alpha');
+    store.beginTurn('local-conv-a', 'turn-1');
+    writeFileSync(join(store.files, folder, 'one.md'), 'one\n');
+    await store.endTurn('local-conv-a', 'turn-1');
+    assert.match(git(store, 'log', '-n1', '--format=%B'), /X-Turn: turn-1\nX-Conversation: local-conv-a/);
+    // Two conversations' turns at once: one commit, both turns named, neither alone.
+    store.ensureFolder('local-conv-b', 'Beta');
+    store.beginTurn('local-conv-a', 'turn-2'); store.beginTurn('local-conv-b', 'turn-3');
+    writeFileSync(join(store.files, folder, 'two.md'), 'two\n');
+    await store.endTurn('local-conv-a', 'turn-2');
+    await store.endTurn('local-conv-b', 'turn-3');
+    assert.match(git(store, 'log', '-n1', '--format=%B'), /X-Shared-Turns: turn-2,turn-3/);
+    const plan = await store.planRewind('local-conv-a', new Set(['turn-2']), new Date(Date.now() - 60_000).toISOString());
+    assert.deepEqual(plan.files, [], 'a shared commit is not reverted');
+    assert.equal(plan.kept.find(c => c.kind === 'shared')?.subject, `Agent changes in ${folder}`);
+    const one = await store.planRewind('local-conv-a', new Set(['turn-1']));
+    assert.deepEqual(one.files.map(f => [f.path, f.change, f.status]), [[`${folder}/one.md`, 'created', 'revert']]);
+    // A rename of the folder later is followed: the file is reverted where it is now.
+    await store.move(folder, 'Renamed');
+    const moved = await store.planRewind('local-conv-a', new Set(['turn-1']));
+    assert.deepEqual(moved.files.map(f => f.path), ['Renamed/one.md']);
+    const applied = await store.applyRewind('11111111-1111-4111-8111-111111111111', 'local-conv-a', new Set(['turn-1']));
+    assert.equal(existsSync(join(store.files, 'Renamed', 'one.md')), false);
+    assert.equal(existsSync(join(store.files, 'Renamed', 'two.md')), true);
+    assert.match(git(store, 'log', '-n1', '--format=%B'), /^Rewind: revert 1 file changed by later turns in Renamed\n\nX-Rewind: 11111111-1111-4111-8111-111111111111/);
+    // Idempotent: applying the same rewind again changes nothing.
+    const again = await store.applyRewind('11111111-1111-4111-8111-111111111111', 'local-conv-a', new Set(['turn-1']));
+    assert.equal(again.applied, false); assert.equal(again.commit, applied.commit);
+    // Rebinding moves the folder (and attachment links) to the conversation that replaced it.
+    store.recordAttachments('local-conv-a', [{ name: 'two.md', path: 'Renamed/two.md', sha256: 'a'.repeat(64), bytes: 4 }]);
+    store.rebind('local-conv-a', 'local-conv-c');
+    assert.equal(store.folderOf('local-conv-c'), 'Renamed');
+    assert.equal(store.folderOf('local-conv-a'), undefined);
+    assert.equal(store.locateAttachment('local-conv-c', 'two.md'), 'Renamed/two.md');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,0 +1,8 @@
+---
+"ai-sdk-letta": minor
+"@ai-sdk-letta/server": minor
+---
+
+Rewind: edit one of your earlier messages in the browser app. The conversation continues from the edited message (the Letta conversation is forked just before it; the old one is archived for audit), and what the later turns changed in the agent's resources and memory is reverted as new git commits (history is never rewritten). A confirmation lists the turns removed, the files and memory reverted, files that can't be reverted cleanly because something else changed them later (kept as they are), changes that are kept (yours in the Resources panel, other conversations', dreaming), effects outside the app that can't be undone, and the decisions, web research reviews and scheduled tasks that are withdrawn. Solo conversations only (on a team server: ones only you wrote in). Crash-safe and idempotent; refused while a turn runs or waits.
+
+To make this precise, every turn is now sent with its run ID as the message's OTID, end-of-turn resources commits carry `X-Turn` and `X-Conversation` trailers (`X-Shared-Turns` when conversations ran at the same time), and the agent's uncommitted memory changes are committed at the end of each turn with the same trailers (`MemoryJournal`). New: `ThreadRuntime.rewindPreview()`, `rewind()` and `resumeRewinds()`; routes `GET /v1/threads/:id/rewind`, `POST /v1/threads/:id/rewind/preview` and `POST /v1/threads/:id/rewind`; the `rewindInternalTools` server option; `ResourceStore.planRewind()`, `applyRewind()` and `rebind()`; `ConversationSession.rewind` (fork, history records, memory journal). `beforeTurn`/`afterTurn` hooks of `LettaAgent` now receive the turn's OTID.
