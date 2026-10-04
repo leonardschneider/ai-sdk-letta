@@ -215,13 +215,23 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
   return projected;
 }
 
-/** @throws when the conversation ends with an unanswered user turn or an unfinished tool call. */
-export function assertHistorySettled(messages: ListMessagesResult['messages']) {
+/**
+ * @throws when the conversation ends with an unanswered user turn or an
+ * unfinished tool call. `settled.through`: the newest message when a turn
+ * was recorded as settled (stopped, or checked; see
+ * `IdentityLease.settleTurn`): the history up to and including it counts as
+ * settled, so a stopped turn's unanswered message or interrupted tool does
+ * not lock the conversation. Later messages are checked as usual; an
+ * unknown `through` (not in the loaded history) settles nothing.
+ */
+export function assertHistorySettled(messages: ListMessagesResult['messages'], settled?: { through?: string }) {
   // Conservative: do not resume an abandoned prompt or half-completed tool chain.
   let pendingUser = false;
   const calls = new Set<string>();
   const silent = new Set<string>();
-  for (const message of messages) {
+  const through = settled?.through ? messages.findIndex(message => message.id === settled.through) : -1;
+  for (const [index, message] of messages.entries()) {
+    if (index <= through) continue;
     const row = message as unknown as Row;
     if (row.message_type === 'user_message' && (textContent(row.content, true) || imageItems(row.content).length)) pendingUser = true;
     if (row.message_type === 'assistant_message' && textContent(row.content)) pendingUser = false;
@@ -236,7 +246,7 @@ export function assertHistorySettled(messages: ListMessagesResult['messages']) {
       if (silent.has(row.tool_call_id) && row.status === 'success') pendingUser = false;
     }
   }
-  if (pendingUser || calls.size) throw new Error('Conversation history has an unfinished or uncertain turn. Inspect backend; no implicit retry or repair. Select another conversation to continue.');
+  if (pendingUser || calls.size) throw new Error('Conversation history has an unfinished or uncertain turn. Inspect backend; no implicit retry or repair (in the GUI: Check and unlock). Select another conversation to continue.');
 }
 
 /** List every conversation of one agent, failing closed on foreign or repeated rows. */

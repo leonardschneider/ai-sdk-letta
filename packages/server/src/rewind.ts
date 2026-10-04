@@ -86,7 +86,8 @@ export function soloRefusal(all: readonly Run[], span: readonly Run[], who: RunA
     if (all.some(r => !r.notSent && r.author && r.author.id !== who.id)) return 'rewind_not_solo';
   }
   if (span.some(r => r.source)) return 'rewind_automation';
-  if (span.some(r => r.status !== 'completed')) return 'delivery_uncertain';
+  // A turn stopped with a known outcome (or settled by Check and unlock) is a finished turn; an uncertain one is not.
+  if (span.some(r => r.status !== 'completed' && r.status !== 'stopped' && !r.checked)) return 'delivery_uncertain';
   if (span.some(r => !r.tagged)) return 'rewind_too_old';
   return undefined;
 }

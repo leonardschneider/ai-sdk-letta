@@ -10,7 +10,7 @@ import { validLocalAgentId } from './temporary-agents.js';
 import type { ToolSet } from 'ai';
 import { defineAgent, type AgentDefinition, type DreamingSettings, type ToolPermission } from './definition.js';
 import { fileTools, FILE_TOOL_PERMISSIONS } from './file-tools.js';
-import { checkProjectFolder, projectNote, sandboxTools, SandboxError, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
+import { checkProjectFolder, projectNote, sandboxTools, SandboxError, SANDBOX_LIMITS, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
 import { decisionTools, DECISION_TOOL_PERMISSIONS } from './decisions.js';
 import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from './web-search.js';
 import { askUserTool, ASK_USER_TOOL } from './tools.js';
@@ -48,6 +48,12 @@ export type AdoptionRecord = {
   instructions?: { before: string; after: string; at: string };
   /** Its project folder on this computer, as the person gave it (symlinks are resolved only for the mount): mounted read-write at `/project` in its sandbox. See {@link checkAdoptedProject}. */
   project?: string;
+  /**
+   * Its sandbox's per-command timeout (ms), replacing the host's
+   * `sandbox.timeoutMs` (default 120000, at most 240000). Raise it for long
+   * builds; see {@link SANDBOX_LIMITS}.
+   */
+  commandTimeoutMs?: number;
 };
 type AdoptionFile = { version: 1; agents: AdoptionRecord[] };
 
@@ -298,6 +304,11 @@ export function checkAdoptedProject(path: string, home = homedir()): string {
   return checkProjectFolder(real, home);
 }
 
+/** Whether `value` is a sandbox command timeout an adopted agent may have (see {@link AdoptionRecord.commandTimeoutMs}). */
+export function validCommandTimeout(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1000 && value <= SANDBOX_LIMITS.maxTimeoutMs;
+}
+
 /** What the host offers adopted agents: a sandbox (for `sandbox`), whether web search is set up (for `web_search`), and dreaming in the app (default off). */
 export type AdoptionEnvironment = { sandbox?: SandboxConfig; webSearch?: boolean; dreaming?: Partial<DreamingSettings> };
 
@@ -317,7 +328,7 @@ export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): Adop
 export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionEnvironment = {}): AgentDefinition {
   const sets = new Set(record.tools);
   // Its own project folder replaces the host's (if any); the sandbox checks it again and mounts its real path.
-  const sandbox = environment.sandbox && record.project ? { ...environment.sandbox, project: record.project } : environment.sandbox;
+  const sandbox = environment.sandbox ? { ...environment.sandbox, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
   const tools: ToolSet = {
     ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
     ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),

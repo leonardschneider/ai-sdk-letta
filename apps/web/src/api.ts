@@ -86,7 +86,7 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   /** The agent trusts Jiminy with protected memory by default (each conversation can override it). */
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
-  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean; project?: string; sandbox?: boolean };
+  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean; project?: string; sandbox?: boolean; commandTimeoutMs?: number };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
   /** The name of its project folder (mounted at `/project`): the Resources panel shows it read-only. */

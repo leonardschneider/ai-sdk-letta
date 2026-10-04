@@ -10,7 +10,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  type ConversationRewind, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type WebDevRegistry, type WebDevStatus,
+  type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
@@ -60,7 +60,7 @@ export type RunAutomation = { source: RunSource; preApproved: readonly string[];
  * a run may first wait in its conversation's queue (`queued`); `author` names
  * who wrote it.
  */
-export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; files?: RunFile[]; uploads?: string[]; parentRunId: string | null; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; events: RuntimeEvent[]; startedAt?: string; queuedAt?: string; author?: RunAuthor; notSent?: boolean;
+export type Run = { id: string; threadId: string; input: string; images?: RunImage[]; files?: RunFile[]; uploads?: string[]; parentRunId: string | null; status: RunStatus; events: RuntimeEvent[]; startedAt?: string; queuedAt?: string; author?: RunAuthor; notSent?: boolean;
   /** Shared runtimes: the reply mode the turn was sent with. */
   replyMode?: ReplyMode;
   /** The agent listened to this turn without replying. */
@@ -84,7 +84,31 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** Sent with its run ID as the message's OTID, and its resources and memory changes recorded under it: a rewind can undo it. */
   tagged?: boolean;
   /** Removed from the conversation by this rewind (kept here for audit; no longer part of the conversation). */
-  rewound?: string };
+  rewound?: string;
+  /**
+   * A turn whose outcome was uncertain (failed, interrupted) that "Check and
+   * unlock" found settled in Letta (see {@link ThreadRuntime.check}): no run
+   * active; `delivered` says whether its message is in the history. The
+   * conversation is usable again; nothing was replayed.
+   */
+  checked?: { at: string; delivered?: boolean } };
+/**
+ * A run's state. `stopped`: someone pressed Stop, or a turn limit was
+ * reached (see `TurnLimits`), and the backend confirmed the run ended: the
+ * outcome is known, so the conversation stays usable (unlike `failed`,
+ * `cancelled` and `interrupted`, whose outcome is uncertain). Its `stopped`
+ * event's `code` says why: `cancelled`, `timed_out` (a prompt nobody
+ * answered), `idle_timeout` or `max_duration`.
+ */
+export type RunStatus = 'queued' | 'running' | 'completed' | 'stopped' | 'failed' | 'cancelled' | 'interrupted';
+/**
+ * Whether a finished turn leaves its conversation usable: it completed, it
+ * was stopped with a known outcome, or "Check and unlock" settled it. Any
+ * other ended turn makes the conversation read-only (no replay).
+ */
+export const usableRun = (run: Pick<Run, 'status' | 'checked'>): boolean => run.status === 'completed' || run.status === 'stopped' || !!run.checked;
+/** Codes of a `stopped` run (see {@link RunStatus}). */
+export const STOP_CODES = Object.freeze(['cancelled', 'timed_out', 'idle_timeout', 'max_duration'] as const);
 /** Metadata of a file sent with a run (as stored in the conversation's folder). */
 export type RunFile = Pick<StoredFile, 'name' | 'kind' | 'mediaType' | 'label' | 'bytes' | 'sha256' | 'pages' | 'lines'>;
 /**
@@ -103,7 +127,22 @@ export type RunInput = { id: string; threadId: string; text: string; parentRunId
  * - `parallel`: conversations run turns at the same time, each in its own
  *   session (needs a host whose `parallel` is true).
  */
-export type RuntimeOptions = { deadlineMs?: number; humanWaitMs?: number; queue?: boolean; parallel?: boolean;
+export type RuntimeOptions = {
+  /**
+   * Tighter turn limits for this runtime's turns (see `TurnLimits`); the
+   * agent's own limits (its definition, `AI_SDK_LETTA_TURN_IDLE_MS` and
+   * `AI_SDK_LETTA_TURN_MAX_MS`, then 10 minutes idle and 6 hours of work)
+   * apply otherwise. Human waits never count.
+   */
+  turnLimits?: Partial<TurnLimits>;
+  /** @deprecated the hard cap of a turn's working time; use `turnLimits.maxMs`. */
+  deadlineMs?: number;
+  /**
+   * How long one approval or question may wait for an answer before the
+   * turn is stopped (the turn's clock is paused meanwhile; prompts that
+   * expire on their own wait until then). @default 240000
+   */
+  humanWaitMs?: number; queue?: boolean; parallel?: boolean;
   /**
    * Shared runtimes whose sessions can listen (the agent was opened with
    * `listening`): the agent's reply mode setting (`'auto'` by default:
@@ -181,7 +220,7 @@ export interface RuntimeSession {
   conversationId: string;
   history: UIMessage[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'> & { attachments?: AttachmentStore; listening?: boolean };
+  agent: Pick<LettaAgent<any>, 'stream' | 'interactions' | 'transcript'> & Partial<Pick<LettaAgent<any>, 'lastTurn'>> & { attachments?: AttachmentStore; listening?: boolean };
   /** Reload display history from the backend without reopening (parallel hosts). */
   reload?(): Promise<UIMessage[]>;
   /** Close only this conversation's session (parallel hosts). */
@@ -228,6 +267,13 @@ export interface RuntimeHost {
    * {@link ThreadRuntime.projectList}).
    */
   project?: string;
+  /**
+   * "Check and unlock" a conversation (see `AgentHost.check`): read-only
+   * towards Letta; records the turn as settled when no run is active. The
+   * runtime closes the conversation's session first. Without it, checks are
+   * refused with `check_unavailable`.
+   */
+  check?(conversationId: string, otid?: string): Promise<ConversationCheck>;
 }
 /** Titles of conversations whose real title was not known yet. */
 const FALLBACK_TITLES = new Set(['Untitled conversation', 'Default conversation']);
@@ -256,6 +302,12 @@ export function toolFailureReason(error: unknown): { reason?: string } {
   return typeof reason === 'string' && failureReasons.has(reason) ? { reason } : {};
 }
 
+/** `promise`'s value, or undefined if it rejects or takes longer than `ms`. */
+function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([promise.catch(() => undefined), new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), ms); timer.unref?.(); })]).finally(() => clearTimeout(timer));
+}
+
 /** Transport observations for reconnects/failed-turn inspection only, never agent input. */
 export function displayRun(run: Run): UIMessage[] {
   const parts: UIMessage['parts'] = [];
@@ -281,7 +333,7 @@ export function displayRun(run: Run): UIMessage[] {
   }
   if (run.status !== 'completed' && run.status !== 'running') for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: `Turn ${run.status}; execution not confirmed.` };
+    if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: run.status === 'stopped' ? 'Turn stopped; the tool was interrupted.' : `Turn ${run.status}; execution not confirmed.` };
   }
   const metadata = run.startedAt || run.author || run.source || run.decision ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}) } } : {};
   // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
@@ -320,7 +372,7 @@ export class ThreadRuntime {
   private listeners = new Map<string, Set<(event: RuntimeEvent) => void>>();
   /** Validated uploads waiting to be sent, next to this runtime's state (`<dir>/uploads/.staging`). */
   readonly uploads?: UploadStaging;
-  private readonly deadlineMs: number;
+  private readonly turnLimits?: Partial<TurnLimits>;
   private readonly humanWaitMs: number;
   /** Turns of one conversation queue instead of being refused (shared runtimes). */
   readonly queueing: boolean;
@@ -356,7 +408,8 @@ export class ThreadRuntime {
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
     const options: RuntimeOptions = typeof deadlineOrOptions === 'object' ? deadlineOrOptions : { deadlineMs: deadlineOrOptions, humanWaitMs };
-    this.deadlineMs = options.deadlineMs ?? 180_000;
+    const limits = { ...(options.deadlineMs !== undefined ? { maxMs: options.deadlineMs } : {}), ...options.turnLimits };
+    if (Object.keys(limits).length) this.turnLimits = Object.freeze(limits);
     this.humanWaitMs = options.humanWaitMs ?? 4 * 60_000;
     this.queueing = !!options.queue;
     this.parallel = !!options.parallel;
@@ -1062,11 +1115,15 @@ export class ThreadRuntime {
         ...(active.batch && active.batch.length > 1 ? { batch: active.batch.slice(1).flatMap(id => { const r = this.state.runs.find(x => x.id === id); return r ? [{ id: r.id, input: r.input, ...(r.author ? { author: r.author } : {}) }] : []; }) } : {}), ...(active.startedAt && this.queueing ? { startedAt: active.startedAt } : {}), ...(active.images?.length ? { images: active.images.length } : {}), ...(active.files?.length ? { files: active.files.map(({ name, label, bytes, pages, lines, kind }) => ({ name, label, bytes, kind, ...(pages !== undefined ? { pages } : {}), ...(lines !== undefined ? { lines } : {}) })) } : {}) },
       status: 'running', ...queue,
     };
-    if (latest && !['running', 'completed'].includes(latest.status)) return {
+    if (latest && latest.status !== 'running' && !usableRun(latest)) return {
       messages: this.observed(id),
-      lastRunId: latest.id, live: null, status: latest.status, source: 'transport-observations', ...queue,
+      // Why it is read-only (the app offers Check and unlock).
+      lastRunId: latest.id, live: null, status: latest.status, usable: false, source: 'transport-observations', code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'delivery_uncertain'), ...queue,
     };
-    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, source: 'backend-history', ...queue };
+    // A stopped turn: the app marks its (partial) reply as stopped, and why.
+    const stopped = latest?.status === 'stopped' ? { stopped: { runId: latest.batchOf ?? latest.id, code: String([...latest.events].reverse().find(event => event.type === 'stopped')?.data.code ?? 'cancelled') } } : {};
+    // `usable`: whether the conversation takes new turns (a stopped turn, or one Check and unlock settled, is usable whatever its status).
+    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, usable: !latest || usableRun(latest), source: 'backend-history', ...stopped, ...(latest?.checked ? { checked: { ...latest.checked } } : {}), ...queue };
   }
   private emit(run: Run, type: string, data: Record<string, unknown>) {
     // Sequence numbers continue from the last event (compacted runs have fewer events than their last number).
@@ -1308,7 +1365,7 @@ export class ThreadRuntime {
     if (this.queueing) return this.enqueue(thread, input, images, imageMetadata, uploadIds, author, automation, extra.decision);
     const latest = this.delivered(thread.id).at(-1);
     if (input.parentRunId !== (latest?.id ?? null)) throw new RuntimeFault('history_conflict');
-    if (latest && latest.status !== 'completed') throw new RuntimeFault('delivery_uncertain');
+    if (latest && !usableRun(latest)) throw new RuntimeFault('delivery_uncertain');
     if (!this.retain(ThreadRuntime.MAX_RUNS)) throw new RuntimeFault('capacity_reached');
     // Re-validate staged uploads (exist, unchanged, within the per-message count) before opening anything.
     let staged: ReturnType<UploadStaging['load']> = [];
@@ -1319,6 +1376,8 @@ export class ThreadRuntime {
       return { id: run.id, status: run.status };
     });
   }
+  /** Longest wait, after a turn was stopped, for the agent to confirm the backend run ended and record it (else the turn counts as uncertain). */
+  static readonly STOP_SETTLE_MS = 3 * 60_000;
   /** Most runs a shared runtime keeps (a single-owner runtime keeps {@link MAX_RUNS}). Older finished turns are forgotten first (see {@link retain}). */
   static readonly MAX_SHARED_RUNS = 2000;
   /** Most runs a single-owner runtime keeps. */
@@ -1344,8 +1403,8 @@ export class ThreadRuntime {
   }
   private enqueue(thread: Thread, input: RunInput, images: DecodedImage[], imageMetadata: RunImage[], uploadIds: string[], author?: RunAuthor, automation?: RunAutomation, decision?: RunDecision) {
     const latest = this.delivered(thread.id).at(-1);
-    // A conversation whose last turn did not finish stays read-only; queued turns behind it are never sent.
-    if (latest && latest.status !== 'completed' && latest.status !== 'running') throw new RuntimeFault('delivery_uncertain');
+    // A conversation whose last turn did not finish (and was not stopped cleanly) stays read-only; queued turns behind it are never sent.
+    if (latest && !usableRun(latest) && latest.status !== 'running') throw new RuntimeFault('delivery_uncertain');
     if (this.state.runs.filter(r => r.threadId === thread.id && r.status === 'queued').length >= MAX_QUEUED) throw new RuntimeFault('queue_full', 429);
     if (!this.retain(ThreadRuntime.MAX_SHARED_RUNS)) throw new RuntimeFault('capacity_reached');
     // Uploads are checked now (exist, unchanged) and stored when the turn is sent.
@@ -1410,7 +1469,7 @@ export class ThreadRuntime {
       const thread = this.state.threads.find(t => t.id === run.threadId);
       const latest = this.delivered(run.threadId).at(-1);
       const payload = this.queued.get(run.id);
-      if (!thread || thread.state !== 'ready' || thread.archived || !payload || (latest && latest.status !== 'completed')) { this.withdraw(run, 'not_sent'); return; }
+      if (!thread || thread.state !== 'ready' || thread.archived || !payload || (latest && !usableRun(latest))) { this.withdraw(run, 'not_sent'); return; }
       let staged: ReturnType<UploadStaging['load']> = [];
       try { staged = payload.uploads.length ? this.uploads!.load(payload.uploads) : []; }
       catch (error) { const fault = fileFault(error); this.withdraw(run, fault instanceof RuntimeFault ? fault.code : 'not_sent'); return; }
@@ -1473,42 +1532,28 @@ export class ThreadRuntime {
     return run;
   }
   private async drive(lane: Lane, session: RuntimeSession, run: Run, control: AbortController, content: UserContent, turn: { others: Run[]; replyMode?: ReplyMode; addressed?: boolean } = { others: [] }) {
+    // How long a turn runs is the agent's business (see TurnLimits: an idle timeout and a hard cap, both paused
+    // while a person is asked something). The runtime only bounds each human wait: a prompt nobody answers stops the turn.
     let timedOut = false;
-    const expire = () => { timedOut = true; control.abort(); };
-    let remaining = this.deadlineMs;
-    // The installed harness caps external tools at five minutes. Finish human
-    // waits explicitly before that limit, rather than accepting a detached result.
-    let remainingWait = this.humanWaitMs;
-    let resumedAt = Date.now();
-    let timer = setTimeout(expire, remaining);
-    // Human reading time does not consume inference time, but the whole turn
-    // remains bounded even if the browser is abandoned or prompts repeat.
-    let hardDeadline = Date.now() + this.deadlineMs + this.humanWaitMs;
-    let hardTimer = setTimeout(expire, this.deadlineMs + this.humanWaitMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let streamed = false;
     let disconnect = () => {};
     try {
       disconnect = session.agent.interactions.connect((request, signal) => new Promise((resolve, reject) => {
-        clearTimeout(timer);
-        remaining = Math.max(1, remaining - (Date.now() - resumedAt));
         const waitingAt = Date.now();
         // A prompt that expires on its own (a web search review) waits until then, plus a margin for the tool to
-        // withdraw it, instead of the shared human-wait budget; the turn's hard limit moves with it.
+        // withdraw it, instead of the human-wait budget.
         const expiresAt = request.expiresAt ? Date.parse(request.expiresAt) : NaN;
         const ownExpiry = Number.isFinite(expiresAt) && expiresAt > waitingAt;
-        const wait = ownExpiry ? expiresAt - waitingAt + EXPIRY_MARGIN_MS : remainingWait;
-        timer = setTimeout(expire, Math.max(1, wait));
-        if (ownExpiry && waitingAt + wait + remaining > hardDeadline) {
-          clearTimeout(hardTimer); hardDeadline = waitingAt + wait + remaining; hardTimer = setTimeout(expire, hardDeadline - waitingAt);
-        }
-        const resume = () => {
-          clearTimeout(timer); if (!ownExpiry) remainingWait -= Date.now() - waitingAt;
-          resumedAt = Date.now(); timer = setTimeout(expire, remaining);
-        };
+        const wait = ownExpiry ? expiresAt - waitingAt + EXPIRY_MARGIN_MS : this.humanWaitMs;
+        clearTimeout(timer);
+        timer = setTimeout(() => { timedOut = true; control.abort(); }, Math.max(1, wait));
+        const done = () => { clearTimeout(timer); timer = undefined; };
         const abort = () => {
           if (lane.pending?.request.id === request.id) {
             lane.pending = undefined;
             this.emit(run, 'interaction_ended', { id: request.id, code: timedOut ? 'timed_out' : ownExpiry && Date.now() >= expiresAt - 1000 ? 'expired' : 'cancelled' });
-            resume();
+            done();
           }
           reject(new RuntimeFault('interaction_cancelled'));
         };
@@ -1516,7 +1561,7 @@ export class ThreadRuntime {
         lane.pending = { runId: run.id, request, resolve: value => {
           signal.removeEventListener('abort', abort);
           if (lane.pending?.request.id === request.id) lane.pending = undefined;
-          resume(); resolve(value);
+          done(); resolve(value);
         } };
         if (signal.aborted) { abort(); return; }
         this.emit(run, 'interaction', request);
@@ -1544,9 +1589,11 @@ export class ThreadRuntime {
       // An approved web research result arrives with this turn: untrusted content for memory provenance.
       const sources = run.decision?.kind === 'web-research' && run.decision.choice?.id === 'approve' ? { sources: [{ kind: 'web' as const, label: 'web research', reviewed: true }] } : {};
       const tag = { otid: run.id };
+      const limits = this.turnLimits ? { limits: { ...this.turnLimits } } : {};
       const result = await session.agent.stream(typeof content === 'string'
-        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust }
-        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust });
+        ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust, ...limits }
+        : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust, ...limits });
+      streamed = true;
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
@@ -1566,25 +1613,38 @@ export class ThreadRuntime {
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
       run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
-      run.status = control.signal.aborted ? 'cancelled' : 'failed'; run.endedAt = new Date().toISOString();
-      const code = timedOut ? 'timed_out' : run.status === 'cancelled' ? 'cancelled' : error instanceof RuntimeFault && error.message === 'interaction_incomplete' ? 'interaction_incomplete' : 'runtime_failed';
-      if (lane.pending?.runId === run.id) this.emit(run, 'interaction_ended', { id: lane.pending.request.id, code });
-      this.emit(run, 'failed', { code });
+      clearTimeout(timer);
+      // A stopped turn (Stop, an unanswered prompt, or a turn limit): the agent cancels the backend run, waits until
+      // Letta confirms it ended and is idle, and records it as settled. Then the outcome is known and the conversation stays usable.
+      const outcome = streamed && session.agent.lastTurn ? await settledWithin(session.agent.lastTurn(), ThreadRuntime.STOP_SETTLE_MS) : undefined;
+      run.endedAt = new Date().toISOString();
+      const stopped = outcome?.end === 'stopped' && !(error instanceof RuntimeFault && error.message === 'interaction_incomplete');
+      const code = timedOut ? 'timed_out' : stopped ? (outcome.reason && outcome.reason !== 'aborted' ? outcome.reason : 'cancelled')
+        : control.signal.aborted ? 'cancelled' : error instanceof RuntimeFault && error.message === 'interaction_incomplete' ? 'interaction_incomplete' : 'runtime_failed';
+      if (lane.pending?.runId === run.id) { this.emit(run, 'interaction_ended', { id: lane.pending.request.id, code }); lane.pending = undefined; }
+      if (stopped) {
+        run.status = 'stopped'; this.compact(run);
+        this.emit(run, 'stopped', { code, ...(outcome.delivered !== undefined ? { delivered: outcome.delivered } : {}) });
+      } else {
+        run.status = control.signal.aborted ? 'cancelled' : 'failed';
+        this.emit(run, 'failed', { code });
+      }
     } finally {
       // The other messages of a combined turn end with it (they were delivered together).
       for (const other of turn.others) {
         other.status = run.status; other.endedAt = run.endedAt;
-        if (run.status === 'completed') this.emit(other, 'completed', {}); else this.emit(other, 'failed', { code: String(run.events.at(-1)?.data.code ?? 'runtime_failed') });
+        const last = run.events.at(-1);
+        if (run.status === 'completed') this.emit(other, 'completed', {}); else if (run.status === 'stopped') this.emit(other, 'stopped', { ...(last?.data ?? {}) }); else this.emit(other, 'failed', { code: String(last?.data.code ?? 'runtime_failed') });
       }
       // Keep the pre-run display snapshot current for browser reconnects without
       // closing a running SDK session or replaying any transcript into the agent.
       session.history = [...session.history, ...this.displayTurn(run, turn.others)];
-      lane.pending = undefined; disconnect(); clearTimeout(timer); clearTimeout(hardTimer); lane.active = undefined; lane.usedAt = Date.now();
+      lane.pending = undefined; disconnect(); clearTimeout(timer); lane.active = undefined; lane.usedAt = Date.now();
       this.changed();
       // The next queued turn of this conversation (or another waiting for a free slot).
       if (this.queueing) {
         // A failed turn leaves the conversation read-only: what waited behind it is never sent.
-        if (run.status !== 'completed') for (const next of this.state.runs.filter(r => r.threadId === run.threadId && r.status === 'queued')) this.withdraw(next, 'not_sent');
+        if (!usableRun(run)) for (const next of this.state.runs.filter(r => r.threadId === run.threadId && r.status === 'queued')) this.withdraw(next, 'not_sent');
         this.pump();
       }
     }
@@ -1734,11 +1794,42 @@ export class ThreadRuntime {
     this.authorize(owner);
     return this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId && t.state === 'ready')?.id;
   }
+  /**
+   * "Check and unlock": a conversation whose last turn has an uncertain
+   * outcome (failed, cancelled without confirmation, interrupted by a
+   * restart) is inspected in Letta, read-only (see `AgentHost.check`): is a
+   * run still active, and is the turn's message (its OTID, the run ID) in the
+   * history? When no run is active, the turn is recorded as settled (in the
+   * agent's identity state and here, as `run.checked`) and the conversation
+   * is usable again. Nothing is ever replayed: a message Letta never got
+   * stays unsent. Returns what Letta has.
+   * @throws `not_locked` when the conversation is usable already, `check_unavailable` without host support
+   */
+  async check(owner: string, threadId: string): Promise<ConversationCheck & { status: Run['status'] }> {
+    const thread = this.thread(owner, threadId);
+    if (!this.host.check) throw new RuntimeFault('check_unavailable');
+    const latest = this.delivered(thread.id).at(-1);
+    if (!latest || latest.status === 'running' || usableRun(latest) || !thread.conversationId) throw new RuntimeFault('not_locked');
+    if (this.rewinding(thread.id)) throw new RuntimeFault('rewind_in_progress');
+    const lead = latest.batchOf ? this.state.runs.find(r => r.id === latest.batchOf) ?? latest : latest;
+    const lane = this.lane(thread.id);
+    return this.exclusive(lane, async () => {
+      // The conversation's own session is closed first: the check opens a read-only one.
+      if (lane.current) await this.closeLane(lane);
+      const result = await this.host.check!(thread.conversationId!, lead.tagged !== false ? lead.id : undefined);
+      if (result.unlocked) {
+        const at = new Date().toISOString();
+        for (const run of this.state.runs.filter(r => r.id === lead.id || r.batchOf === lead.id)) run.checked = { at, ...(result.delivered !== undefined ? { delivered: result.delivered } : {}) };
+        this.save(); this.changed();
+      }
+      return { ...result, status: lead.status };
+    });
+  }
   /** The latest turn of a thread that reached the agent, and its status (what a new turn's `parentRunId` must name). */
-  latestRun(owner: string, threadId: string): { id: string; status: Run['status'] } | undefined {
+  latestRun(owner: string, threadId: string): { id: string; status: Run['status']; usable: boolean } | undefined {
     this.thread(owner, threadId);
     const latest = this.delivered(threadId).at(-1);
-    return latest ? { id: latest.id, status: latest.status } : undefined;
+    return latest ? { id: latest.id, status: latest.status, usable: latest.status === 'running' ? false : usableRun(latest) } : undefined;
   }
   private closing = false;
   async close() {
