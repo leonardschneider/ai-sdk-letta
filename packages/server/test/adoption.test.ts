@@ -130,7 +130,7 @@ test('the single-user session lists adopted agents next to the app\'s own one, b
   const assets = join(dir, 'assets'); mkdirSync(assets); writeFileSync(join(assets, 'index.html'), '<!doctype html>');
   const runtime = new ThreadRuntime({ open: async () => { throw new Error('not opened'); }, close: async () => {} }, join(dir, 'own.json'), 'local-gui');
   await registry.adopt({ agentId: BLOG });
-  const server = guiApp(runtime, 'local-gui', 0, assets, { id: 'example-assistant', name: 'Example Assistant' }, undefined, undefined, undefined, registry.gui()).listen(0, '127.0.0.1');
+  const server = guiApp(runtime, 'local-gui', 0, assets, { id: 'example-assistant', name: 'Example Assistant' }, undefined, undefined, undefined, undefined, registry.gui()).listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   try {

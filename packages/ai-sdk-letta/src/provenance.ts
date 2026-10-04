@@ -25,7 +25,8 @@ import type { GitRunner } from './revert.js';
 
 /** A source of content a turn read. `untrusted` content may carry instructions written by someone else. */
 export type ContentSource = {
-  kind: 'web' | 'attachment' | 'atlassian' | 'tool';
+  /** `browser`: a page in the headless browser, or the dev server's output (web app development). */
+  kind: 'web' | 'attachment' | 'atlassian' | 'tool' | 'browser';
   /** What exactly: the tool name, a file name, a URL (display only; shortened). */
   label?: string;
   /** A person reviewed it before the agent saw it (web research approved in the app). Still untrusted: reviewed is not vouched for. */
@@ -122,14 +123,16 @@ export function withSource(provenance: TurnProvenance, source: ContentSource): T
  * memory tools and the agent's own bookkeeping tools bring none.
  */
 export function sourceOfTool(name: string, internal: ReadonlySet<string> = TRUSTED_TOOLS): ContentSource | undefined {
+  // Page content (browser tools, dev server output) is untrusted whatever the trusted tools say.
+  if (name.startsWith('browser_') || name === 'dev_server_logs' || name === 'dev_server_start') return { kind: 'browser', label: name };
   if (internal.has(name)) return undefined;
   if (name === 'web_search') return { kind: 'web', label: 'web research' };
   if (name.startsWith('atlassian_')) return { kind: 'atlassian', label: name };
   if (name === 'read_file' || name === 'search_files') return { kind: 'attachment', label: name };
   return { kind: 'tool', label: name };
 }
-/** Tools whose results carry nothing written by others: asking people, deciding, scheduling, listing files, staying silent. */
-export const TRUSTED_TOOLS: ReadonlySet<string> = new Set(['ask_user', 'stay_silent', 'request_decision', 'cancel_decision', 'schedule_task', 'list_files', 'memory_provenance', 'Read', 'Write', 'Edit', 'Bash']);
+/** Tools whose results carry nothing written by others: asking people, deciding, scheduling, listing files, staying silent, the web development guide and controls. */
+export const TRUSTED_TOOLS: ReadonlySet<string> = new Set(['ask_user', 'stay_silent', 'request_decision', 'cancel_decision', 'schedule_task', 'list_files', 'memory_provenance', 'Read', 'Write', 'Edit', 'Bash', 'web_dev_guide', 'dev_server_stop', 'allow_web_origin']);
 
 /** The trailers of a provenance (empty values omitted). */
 export function provenanceTrailers(provenance: TurnProvenance): Record<string, string | undefined> {
@@ -164,7 +167,7 @@ export function parseProvenanceTrailers(trailers: Readonly<Record<string, string
   const sources: ContentSource[] = [];
   const listed = trailers[PROVENANCE_TRAILERS.sources];
   if (listed && listed !== 'none') for (const part of listed.split(';').map(s => s.trim()).filter(Boolean)) {
-    const match = /^(web|attachment|atlassian|tool)(?:=(.*?))?(\+reviewed)?$/.exec(part);
+    const match = /^(web|attachment|atlassian|tool|browser)(?:=(.*?))?(\+reviewed)?$/.exec(part);
     if (match) sources.push({ kind: match[1] as ContentSource['kind'], ...(match[2] ? { label: match[2] } : {}), ...(match[3] ? { reviewed: true } : {}) });
   }
   const writer = trailers[PROVENANCE_TRAILERS.writer];

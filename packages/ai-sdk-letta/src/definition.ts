@@ -2,7 +2,8 @@ import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
 import { REQUEST_DECISION_TOOL } from './decisions.js';
-import { resolveSandboxConfig, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
+import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
+import { includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, webDevEnabled, WEB_DEV_NOTE, type ResolvedWebDevConfig, type WebDevConfig } from './webdev.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 
 /**
@@ -145,6 +146,14 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   /** Memory protection and review, e.g. `{ protected: ['persona.md', 'policies/**'], reviewer: 'anthropic/claude-sonnet-5' }`. See {@link MemorySettings}. */
   memory?: Partial<MemorySettings>;
   /**
+   * Web app development (with `webDevTools` and a sandbox): the services
+   * container's memory and idle timeout, e.g. `{ memory: '3G' }`. With the
+   * web development tools, the sandbox uses `WEBDEV_IMAGE` (Node, Chromium,
+   * chrome-devtools-mcp) unless `sandbox.image` names another.
+   * @default { memory: '3G', idleTimeoutMs: 1800000 }
+   */
+  webDev?: WebDevConfig;
+  /**
    * Adopt an existing local Letta agent in place (for example one made with
    * Letta Code): this definition opens that agent, by ID, with its memory and
    * conversations. It is never created, and its system prompt, model and
@@ -170,6 +179,8 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly replyMode: ReplyModeSetting;
   readonly webSearch: Readonly<WebSearchSettings>;
   readonly memory: Readonly<MemorySettings>;
+  /** Web development settings (used when the definition has `webDevTools`). */
+  readonly webDev: ResolvedWebDevConfig;
   /** An existing Letta agent this definition adopts in place (see {@link AgentDefinitionInput.adopt}). */
   readonly adopt?: Readonly<{ agentId: string }>;
 }
@@ -215,7 +226,11 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (permissions.web_search === 'allow') throw new Error('web_search results are reviewed by a person before the agent sees them; its permission must be "ask" or "deny"');
   // Network commands always need a human: approval is the only network switch.
   if (permissions.run_command_online === 'allow') throw new Error('run_command_online uses the network; its permission must be "ask" or "deny"');
-  const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(input.sandbox);
+  // Approving an outside origin for the app always needs a person.
+  if (permissions.allow_web_origin === 'allow') throw new Error('allow_web_origin lets the app reach the internet; its permission must be "ask" or "deny"');
+  // Web development needs Node and Chromium: its image, unless the definition names another.
+  const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(includesWebDevTools(input.tools) && input.sandbox && typeof input.sandbox === 'object' && input.sandbox.image === undefined ? { ...input.sandbox, image: WEBDEV_IMAGE } : input.sandbox);
+  const webDev = resolveWebDevConfig(input.webDev);
   const missing = names.filter(name => !Object.hasOwn(permissions, name));
   if (missing.length) throw new Error(`Missing permission for tool(s): ${missing.join(', ')}. Every tool needs "allow", "ask" or "deny".`);
   const dreaming = { ...DEFAULT_DREAMING, ...input.dreaming };
@@ -234,7 +249,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   return Object.freeze({
     ...(adopt ? { adopt } : {}),
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
   });
 }
 
@@ -245,6 +260,9 @@ function resolveMemory(input: unknown): Readonly<MemorySettings> {
   if (unknown.length) throw new Error(`Unknown memory setting(s): ${unknown.join(', ')}. Supported: protected, reviewer, reviewTimeoutMs, approveDreams, trustJiminy, trustedTools.`);
   const { protected: patterns = DEFAULT_MEMORY.protected, reviewer = DEFAULT_MEMORY.reviewer, reviewTimeoutMs = DEFAULT_MEMORY.reviewTimeoutMs, approveDreams = DEFAULT_MEMORY.approveDreams, trustJiminy = DEFAULT_MEMORY.trustJiminy, trustedTools = DEFAULT_MEMORY.trustedTools } = input as Partial<Record<keyof MemorySettings, unknown>>;
   if (!Array.isArray(trustedTools) || trustedTools.some(t => typeof t !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(t))) throw new Error('memory.trustedTools must be tool names');
+  // What a page or a dev server shows is never the app's own content.
+  const browser = (trustedTools as string[]).filter(t => t.startsWith('browser_') || isBrowserOutputTool(t));
+  if (browser.length) throw new Error(`memory.trustedTools cannot include ${browser.join(', ')}: browser and dev server output is page content, always untrusted`);
   if (!Array.isArray(patterns) || patterns.length > 100 || patterns.some(p => typeof p !== 'string' || !/^[\w .@-]+(?:\/[\w .@-]+)*(?:\/\*\*)?$/.test(p) || p.split('/').some(part => part === '..' || part === '.' || part.startsWith('.')))) throw new Error('memory.protected must be up to 100 memory paths such as "persona.md" or "policies/**"');
   if (typeof reviewer !== 'string' || !(reviewer === 'auto' || reviewer === 'off' || /^[\w.-]+\/[\w.:-]+$/.test(reviewer))) throw new Error('memory.reviewer must be "auto", "off" or a model handle such as "anthropic/claude-sonnet-5"');
   if (typeof reviewTimeoutMs !== 'number' || !Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs < 5000 || reviewTimeoutMs > 600_000) throw new Error('memory.reviewTimeoutMs must be 5000–600000');
@@ -297,7 +315,7 @@ export function memoryPolicyInstructions(dreaming: DreamingSettings): string {
 export function creationOptions(definition: AgentDefinition, cwd: string): CreateAgentOptions {
   return {
     name: definition.name, model: definition.model, cwd, memfs: true,
-    baseTools: [], skillSources: [], systemPrompt: `${definition.instructions}\n\n${memoryPolicyInstructions(definition.dreaming)}`,
+    baseTools: [], skillSources: [], systemPrompt: `${definition.instructions}\n\n${webDevEnabled(definition) ? `${WEB_DEV_NOTE}\n\n` : ''}${memoryPolicyInstructions(definition.dreaming)}`,
     // Do not pass `dreaming` here: the SDK applies it with scope 'both', which
     // mutates the user's global Letta defaults. The runtime installs the
     // definition's settings with scope 'local_project' in the private state cwd.

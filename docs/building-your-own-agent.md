@@ -401,7 +401,7 @@ test('after request_decision, the rest of the turn is paused', async () => {
 });
 ```
 
-## 7. Optional built-ins: files, shell, images, Atlassian, web search
+## 7. Optional built-ins: files, shell, web apps, images, Atlassian, web search
 
 All built-ins are opt-in, like every tool.
 
@@ -444,6 +444,37 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128    
 The README has the details: [Files](../README.md#files) (types, limits,
 PDFs) and [Shell commands](../README.md#shell-commands-sandbox) (workspace,
 project folders, isolation, `sandbox` options, custom providers).
+
+**Web apps with a live preview.** `webDevTools` (on top of `sandboxTools`
+and a built-in sandbox) lets the agent run a dev server in the sandbox and
+test the app in a headless Chrome (`browser_*`, from chrome-devtools-mcp,
+including WebMCP), while people watch it in the browser app's Preview pane.
+The sandbox then uses the larger `WEBDEV_IMAGE` (Node, Chromium). Every tool
+is `'allow'` except `allow_web_origin`, which asks a person before the app
+may load from an outside origin (for that conversation only).
+
+```ts
+// src/web-agent.ts
+import { defineAgent, sandboxTools, SANDBOX_TOOL_PERMISSIONS, webDevTools, WEBDEV_TOOL_PERMISSIONS, WEBDEV_IMAGE } from 'ai-sdk-letta';
+
+export const webDeveloper = defineAgent({
+  id: 'web-developer',
+  name: 'Web Developer',
+  model: 'openai-codex/gpt-5.5',
+  instructions: 'You build small web apps for the user and test them before you say they are done.',
+  tools: { ...sandboxTools, ...webDevTools },
+  permissions: { ...SANDBOX_TOOL_PERMISSIONS, ...WEBDEV_TOOL_PERMISSIONS },
+  sandbox: { provider: 'docker' },  // the image defaults to WEBDEV_IMAGE with these tools
+  webDev: { memory: '3G', idleTimeoutMs: 30 * 60_000 },
+});
+// The definition picked the web development image, and asks before any outside origin.
+console.log(webDeveloper.sandbox?.image === WEBDEV_IMAGE, webDeveloper.permissions.allow_web_origin); // true 'ask'
+```
+
+The browser tools also need `npm install --save-exact @ai-sdk/mcp@2.0.60`.
+Serve it with `startGuiServer` as usual: the server adds the preview
+listener (its own origin, `http://p-<token>.localhost:<port>`). Details,
+the isolation model and limits: [Web app development](../README.md#web-app-development-preview-and-browser).
 
 **Images** need no tool: a user turn may carry up to 4 PNG, JPEG, GIF or
 WebP images (5 MB each), if the model accepts images. From code, pass the

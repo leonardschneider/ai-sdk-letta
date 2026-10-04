@@ -86,6 +86,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
   adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean };
+  /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
+  webDev?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

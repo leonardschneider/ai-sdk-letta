@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
+import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
 import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, RemoveAgentDialog } from './adoption.js';
@@ -32,6 +32,8 @@ import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
+import { PreviewPanel, usePreviewStatus } from './preview.js';
+import { PREVIEW_LAYOUT_KEY, PREVIEW_WIDTH, clampPreviewWidth, devServerRunning, readPreviewLayout, type PreviewLayout } from './preview-model.js';
 import { AtlassianDialog, AtlassianRow, useAtlassianStatus } from './integrations.js';
 import { LAYOUT_KEY, RESOURCES_WIDTH, clampWidth, readLayout, type Layout } from './resources-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
@@ -149,11 +151,32 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [resourcesDrawer, setResourcesDrawer] = useState(false);
   const resourcesOpen = narrow ? resourcesDrawer : layout.resources;
   const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
-  const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
+  const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setPreviewDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
+  // Web app development: the Preview pane (right of the chat, before Resources), a drawer on a phone. It opens by itself when a dev server starts.
+  const webDevEnabled = !!agent.webDev;
+  const [previewLayout, setPreviewLayoutState] = useState<PreviewLayout>(() => readPreviewLayout(localStorage.getItem(PREVIEW_LAYOUT_KEY)));
+  const setPreviewLayout = useCallback((update: (previous: PreviewLayout) => PreviewLayout) => setPreviewLayoutState(previous => { const next = update(previous); localStorage.setItem(PREVIEW_LAYOUT_KEY, JSON.stringify(next)); return next; }), []);
+  const [previewDrawer, setPreviewDrawer] = useState(false);
+  const previewOpen = webDevEnabled && (narrow ? previewDrawer : previewLayout.open);
+  const togglePreview = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(open => !open); } else setPreviewLayout(l => ({ ...l, open: !l.open })); }, [narrow, setPreviewLayout]);
   const [turns, setTurns] = useState(0);
   // Bumped whenever the server reports a change (long poll): memory reviews and toasts follow it.
   const [serverChanges, setServerChanges] = useState(0);
   const memoryPending = useMemoryToasts(memoryEnabled && !connecting && !unreachable, serverChanges + turns);
+  // While a turn runs (or the pane is open) the status is polled, so a dev server started mid-turn shows up.
+  const [previewStatus, reloadPreview] = usePreviewStatus(current.draft ? undefined : current.id, webDevEnabled && !connecting && !unreachable, serverChanges + turns, webDevEnabled && (previewOpen || running));
+  // A dev server that starts (or restarts) in the open conversation opens the pane, once per start; closing it again is respected.
+  // The first status of a conversation is only remembered: opening a conversation whose server still runs does not pop the pane open.
+  const announced = useRef<{ thread?: string; started?: string }>({});
+  useEffect(() => {
+    if (!previewStatus || current.draft) return;
+    const started = devServerRunning(previewStatus) ? previewStatus.devServer.startedAt : undefined;
+    const previous = announced.current;
+    announced.current = { thread: current.id, started };
+    if (previous.thread !== current.id || !started || started === previous.started) return;
+    if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(true); } else setPreviewLayout(l => l.open ? l : { ...l, open: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewStatus]);
   const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
@@ -658,6 +681,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         if (document.querySelector('[role="menu"], [role="dialog"]')) return;
         if (drawer) { setDrawer(false); return; }
         if (narrow && resourcesDrawer) { setResourcesDrawer(false); return; }
+        if (narrow && previewDrawer) { setPreviewDrawer(false); return; }
         const target = event.target as HTMLElement | null;
         if (!running || !mayAct || target?.closest('.dock, input, .composer')) return;
         event.preventDefault(); void cancel();
@@ -744,15 +768,15 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     <LatexContext.Provider value={latex}>
     <RewindContext.Provider value={rewindState}>
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && resourcesDrawer) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
-        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--resources-width': `${layout.resourcesWidth}px` } as React.CSSProperties}>
+      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && (resourcesDrawer || previewDrawer)) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
+        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--resources-width': `${layout.resourcesWidth}px`, '--preview-width': `${previewLayout.width}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf}/> } : {})}
             footer={<>{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
-        <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); }}/>
+        <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); }}/>
         <main className="main">
           <header className="topbar">
             <button type="button" className="icon-btn menu-btn" aria-label={feed.decisions.length ? `Open sidebar (${feed.decisions.length === 1 ? '1 decision' : `${feed.decisions.length} decisions`} waiting)` : 'Open sidebar'} aria-controls="sidebar" aria-expanded={drawer} data-dot={feed.decisions.length > 0 || undefined} onClick={() => setDrawer(true)}><Menu size={18}/></button>
@@ -765,6 +789,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {memoryEnabled && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
+            {webDevEnabled && !current.draft && <button type="button" className="icon-btn preview-btn" aria-label={previewOpen ? 'Hide preview' : 'Show preview'} aria-controls="preview" aria-expanded={previewOpen} data-active={previewOpen || undefined} data-live={devServerRunning(previewStatus) || undefined} title={devServerRunning(previewStatus) ? 'Preview (dev server running)' : 'Preview'} onClick={togglePreview}><AppWindow size={18}/></button>}
             {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
@@ -831,8 +856,13 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
         </main>
+        {webDevEnabled && !current.draft && <aside id="preview" className="webprev-pane" aria-label="Preview" hidden={!previewOpen}>
+          {!narrow && <Resizer label="Resize preview" min={PREVIEW_WIDTH.min} max={PREVIEW_WIDTH.max} width={previewLayout.width} clamp={clampPreviewWidth} reset={PREVIEW_WIDTH.initial} onWidth={width => setPreviewLayout(l => ({ ...l, width }))}/>}
+          {previewOpen && <PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
+            onClose={() => { if (narrow) setPreviewDrawer(false); else setPreviewLayout(l => ({ ...l, open: false })); }} onChanged={() => void reloadPreview()}/>}
+        </aside>}
         {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
-          {!narrow && <Resizer width={layout.resourcesWidth} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
+          {!narrow && <Resizer label="Resize resources" min={RESOURCES_WIDTH.min} max={RESOURCES_WIDTH.max} width={layout.resourcesWidth} clamp={clampWidth} reset={320} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
           <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
             onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
@@ -855,15 +885,15 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   </InteractionContext.Provider>;
 }
 
-/** Drag handle on the Resources panel's left edge; arrow keys resize too. The width is kept between visits. */
-function Resizer({ width, onWidth }: { width: number; onWidth(width: number): void }) {
+/** Drag handle on a right panel's left edge (Resources, Preview); arrow keys resize too. The width is kept between visits. */
+function Resizer({ width, onWidth, label, min, max, clamp, reset }: { width: number; onWidth(width: number): void; label: string; min: number; max: number; clamp(width: number): number; reset: number }) {
   const start = useRef<{ x: number; width: number } | undefined>(undefined);
-  return <div className="resizer" role="separator" aria-orientation="vertical" aria-label="Resize resources" aria-valuemin={RESOURCES_WIDTH.min} aria-valuemax={RESOURCES_WIDTH.max} aria-valuenow={width} tabIndex={0}
+  return <div className="resizer" role="separator" aria-orientation="vertical" aria-label={label} aria-valuemin={min} aria-valuemax={max} aria-valuenow={width} tabIndex={0}
     onPointerDown={event => { event.preventDefault(); (event.target as Element).setPointerCapture(event.pointerId); start.current = { x: event.clientX, width }; document.body.dataset.resizing = ''; }}
-    onPointerMove={event => { if (start.current) onWidth(clampWidth(start.current.width + start.current.x - event.clientX)); }}
+    onPointerMove={event => { if (start.current) onWidth(clamp(start.current.width + start.current.x - event.clientX)); }}
     onPointerUp={() => { start.current = undefined; delete document.body.dataset.resizing; }}
-    onDoubleClick={() => onWidth(320)}
-    onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onWidth(clampWidth(width + (event.key === 'ArrowLeft' ? 24 : -24))); } }}/>;
+    onDoubleClick={() => onWidth(reset)}
+    onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onWidth(clamp(width + (event.key === 'ArrowLeft' ? 24 : -24))); } }}/>;
 }
 
 /** Fixed server codes that mean "refused before delivery" for images, with their toast text. */
