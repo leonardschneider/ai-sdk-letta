@@ -1014,6 +1014,7 @@ npm run tui -- --resume            # reopen the last conversation
 npm run tui -- --new "Planning"    # new conversation
 npm run tui -- --conversation ID   # a specific conversation
 npm run tui -- --list              # list conversations and exit (no TTY needed)
+npm run tui -- --agent blog-2cc740f1 # an existing agent added in the GUI (Add agent)
 ```
 
 Inside: `/resume [title or ID]`, `/search [text]` (this agent's
@@ -1159,6 +1160,53 @@ agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
 "Searched files for “budget”"), collapsed like other tools. Use it from code with `startGuiServer(definition, assetsDir, options)`
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
+
+### Your existing Letta agents (Add agent)
+
+The single-user GUI can open agents you already use in Letta Code, **in
+place**: the same agent by ID, with its own memory (MemFS) and conversations.
+Nothing is copied and no agent is ever created for it. Click the agent name
+at the top of the sidebar, then **Add agent…**: the picker lists your local
+Letta agents with their model, last activity and number of conversations
+(Letta Code's own subagents, reflection agents and the app's temporary
+agents are never listed). Pick one and the tools it gets here (files,
+decisions and questions by default; the sandbox and web search when the
+server has them), then **Add**. The same menu switches between agents.
+
+- **Conversations.** All its conversations show in the sidebar, including
+  `default`, titled by their summary or first message; new ones made in
+  Letta Code appear next time the list loads. Opening one only reads its
+  history: nothing is sent and no session starts until you send a message.
+  Letta Code's own tool calls show as collapsed "Used Bash" lines. New
+  conversations are named. `default` works but cannot be rewound.
+- **One place at a time.** While a Letta Code session of the agent runs
+  (`letta --agent <id>` or `--conv <conversation>`), adding it or sending
+  to it is refused ("Letta Code is using this agent right now"), with a
+  retry. A session started with plain `letta` (resuming its last agent) is
+  not visible to the app; recent activity only shows as a warning in the
+  picker. Close it in Letta Code first.
+- **Unchanged until you ask.** Its system prompt, model and tags stay as
+  they are, and dreaming stays as Letta Code configured it (the app does
+  not start dreams of an adopted agent). **Update instructions…** shows the
+  short section the app would append (the tools it has here and how its
+  memory is protected) as a diff; it is applied only when you click
+  **Apply**, and **Revert** restores the earlier prompt.
+- **Memory from adoption on.** The usual protection and review apply
+  ([Memory provenance and review](#memory-provenance-and-review-jiminy)),
+  including the older layout (`system/**`, so `system/persona.md`). Memory
+  history before adoption shows as "Before adoption". Commits the agent's
+  own Letta Code sessions make (outside the app's turns) show as "From
+  Letta Code": Jiminy may review them and flag one, but never reverts or
+  holds them. At the end of a turn, the app commits only the memory files
+  the turn changed, never edits that were already uncommitted.
+- **Remove from app…** forgets it in this app only: the Letta agent, its
+  memory and conversations stay, and Letta Code keeps working with it.
+
+Added agents are recorded in `<state>/adopted.json` and come back after a
+restart. In the terminal UI, `npm run tui -- --agent <id>` opens one (the ID
+the app shows, such as `blog-2cc740f1`; same state directory). From code:
+`startGuiServer(definition, assets, { adoption: { sandbox } })` (on by
+default; `adoption: false` turns it off).
 
 ## Sharing with your team (Tailscale)
 
@@ -1574,6 +1622,14 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 
 ## Limitations
 
+- **Existing agents (Add agent).** An adopted agent is one agent with one
+  memory: use it in the app or in Letta Code, not both at once. The app
+  refuses to add or send to an agent whose Letta Code session it can see
+  (`--agent`, `--conv`); a plain `letta` that resumed its last agent is not
+  visible (only a "recent activity" hint). Letta Code tools (shell, file
+  editing, subagents) are not available in the app, and their earlier calls
+  show only as collapsed "Used <tool>" lines. Its `default` conversation
+  cannot be rewound. The app does not start dreams of an adopted agent.
 - **Web search.** It needs your own SearXNG (Letta Code's `web_search` and
   `fetch_webpage` are Letta server tools, not available on the local
   backend). Results are as good as SearXNG's engines (some rate-limit or
