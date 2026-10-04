@@ -89,6 +89,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean; project?: string; sandbox?: boolean };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
+  /** The name of its project folder (mounted at `/project`): the Resources panel shows it read-only. */
+  project?: string;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */
