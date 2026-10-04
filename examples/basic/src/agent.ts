@@ -59,7 +59,7 @@ const webDev = process.env.WEBDEV === '1';
  * For anything else (policies, origins, version), MCP_APPS can be the JSON
  * of the `mcpApps` option. Every app tool asks before it runs unless its
  * policy says otherwise, and each app runs in its own container without
- * network (MCP_APPS_IMAGE: Node and Python, built once, about 220 MB). See
+ * network (MCP_APPS_IMAGE: Node and Python, built once in seconds, about 90 MB). See
  * "MCP Apps" in the README.
  */
 function mcpApps(): McpAppConfig[] {

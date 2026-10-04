@@ -19,6 +19,7 @@ npm run tui                               # terminal
 npm run gui                               # browser, http://127.0.0.1:4400
 TEXT_STATS_PERMISSION=ask npm run tui     # require approval for every text_stats call
 WEB_SEARCH=1 SEARXNG_URL=http://127.0.0.1:8888 npm run gui   # web search (see "Web search" in the main README); WEB_SEARCH_REVIEW_MS=60000 for a 1-minute review in the turn (then it waits as a decision)
+MCP_APPS="basic=./server-basic-vanillajs-2.0.3.tgz --stdio" npm run gui   # an MCP App from a local npm tarball (see "MCP Apps" in the main README)
 AGENT_ID=my-sandbox LETTA_MODEL=anthropic/claude-sonnet-4-5 npm run tui
 ```
 

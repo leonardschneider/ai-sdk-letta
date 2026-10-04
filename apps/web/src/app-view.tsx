@@ -131,9 +131,9 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       bridge.onopenlink = async ({ url }) => {
         const href = openableLink(url, location.origin);
         if (!href) throw fail({ code: -32000, message: 'Invalid URL' });
-        // A new tab without opener or referrer: the app never learns about this page.
-        const opened = window.open(href, '_blank', 'noopener,noreferrer');
-        if (opened === null && !window.confirm(`Open ${href}?`)) throw fail({ code: -32000, message: 'Link opening denied by user' });
+        // A new tab without opener or referrer: the app never learns about this page. (window.open with noopener always returns null, so a link is clicked instead.)
+        const link = Object.assign(document.createElement('a'), { href, target: '_blank', rel: 'noopener noreferrer' });
+        link.click();
         return {};
       };
       bridge.onsizechange = ({ height: h }) => { if (placement === 'inline' && modeRef.current === 'inline') setHeight(current => inlineHeight(h, current)); };
