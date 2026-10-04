@@ -220,7 +220,7 @@ export function ProjectDialog({ agent, onClose, onSaved }: { agent: AgentInfo; o
       <label className="automations-heading" htmlFor="project-path">Folder</label>
       <input id="project-path" className="member-input mono" data-autofocus value={path} maxLength={1000} placeholder="/Users/you/blog" spellCheck={false} autoComplete="off" disabled={!sandbox || saving}
         onChange={event => { setPath(event.target.value); setProblem(''); }} aria-invalid={!!problem || undefined} aria-describedby="project-help"/>
-      <p id="project-help" className="adopt-meta">{!sandbox ? 'This server has no sandbox, so it cannot mount a project folder.' : current ? `Current: ${current}` : 'None yet. Paste the folder’s full path.'} Folders with credentials in <code>.git/config</code>, your home folder and <code>~/.letta</code> are refused. Changing it restarts {agent.name}’s sandbox.</p>
+      <p id="project-help" className="adopt-meta">{!sandbox ? 'This server has no sandbox, so it cannot mount a project folder.' : current ? `Current: ${current}.` : 'None yet. Paste the folder’s full path.'} Folders with credentials in <code>.git/config</code>, your home folder and <code>~/.letta</code> are refused. Changing it restarts {agent.name}’s sandbox.</p>
       {problem && <p className="form-error" role="alert">{problem}</p>}
       <div className="modal-actions">
         {current && <button type="button" className="btn ghost" disabled={saving} onClick={() => void save(null)}>Clear</button>}
