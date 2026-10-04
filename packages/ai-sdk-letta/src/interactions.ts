@@ -64,6 +64,27 @@ export class ToolInteractions {
   private queue: Pending[] = [];
   private active?: Pending;
   private closed = false;
+  private watchers = new Set<(waiting: boolean) => void>();
+  private waiting = false;
+
+  /**
+   * Call `listener` whenever a person starts (`true`) or stops (`false`)
+   * being asked something: a prompt is open or queued. Turn clocks pause
+   * then (see `TurnLimits`). Returns an unsubscribe function.
+   */
+  watch(listener: (waiting: boolean) => void): () => void {
+    this.watchers.add(listener);
+    if (this.waiting) listener(true);
+    return () => { this.watchers.delete(listener); };
+  }
+  /** Whether a prompt is open or queued. */
+  get pending(): boolean { return this.waiting; }
+  private notify() {
+    const waiting = this.queue.length > 0;
+    if (waiting === this.waiting) return;
+    this.waiting = waiting;
+    for (const listener of [...this.watchers]) { try { listener(waiting); } catch { /* observer */ } }
+  }
 
   /** Attach the renderer. Returns a disconnect function that cancels all pending prompts. */
   readonly connect = (handler: InteractionHandler): (() => void) => {
@@ -91,6 +112,7 @@ export class ToolInteractions {
       const abort = () => { this.finish(pending, undefined, new Error('tool_cancelled')); };
       combined.addEventListener('abort', abort, { once: true });
       this.queue.push(pending);
+      this.notify();
       this.pump();
     });
   }
@@ -113,6 +135,7 @@ export class ToolInteractions {
     const index = this.queue.indexOf(pending);
     if (index < 0) return;
     this.queue.splice(index, 1);
+    this.notify();
     pending.cleanup();
     if (this.active === pending) this.active = undefined;
     // Close the renderer before showing another prompt, including abort races.

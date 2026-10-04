@@ -11,6 +11,7 @@ import type { TurnActor } from './credentials.js';
 import type { UnattendedPolicy } from './tools.js';
 import { REQUEST_DECISION_TOOL } from './decisions.js';
 import type { ContentSource } from './provenance.js';
+import { formatDuration, resolveTurnLimits, TurnClock, type TurnLimits, type TurnStopReason } from './turn-limits.js';
 
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
@@ -42,8 +43,41 @@ export interface TurnInfo { otid?: string; actor?: TurnActor; unattended?: Unatt
   /** The conversation trusts Jiminy for this turn (see `MemorySettings.trustJiminy`); undefined: the agent's setting. */
   trustJiminy?: boolean }
 
-/** Durable delivery hooks: `begin` before sending, `complete` after a confirmed finish. */
-export interface DeliveryHooks { begin(): void; complete(): void }
+/**
+ * Durable delivery hooks: `begin` before sending (with the turn's OTID, when
+ * it has one), `complete` after a confirmed finish.
+ *
+ * `settle`, when given, runs after a turn that was sent was stopped (its
+ * abort signal, or a turn limit) and the Letta stream confirmed that its run
+ * ended: it checks that the backend is idle and records the turn as stopped
+ * (see `IdentityLease.settleTurn`), and says whether the message reached the
+ * backend history. When it succeeds the outcome is known and the agent stays
+ * usable; when it throws (or is missing), the delivery stays uncertain and
+ * the agent refuses further turns.
+ */
+export interface DeliveryHooks { begin(otid?: string): void; complete(): void; settle?(turn: { otid?: string }): Promise<{ delivered?: boolean } | void> }
+/**
+ * How a turn ended, once its stream and any stop settled (see
+ * {@link LettaAgent.lastTurn}):
+ * - `completed`;
+ * - `stopped`: the application aborted it, or a turn limit was reached
+ *   (`reason`), and the outcome is known: nothing was sent, or the backend
+ *   confirmed the run ended and the stop was recorded. The agent stays
+ *   usable. `delivered`: whether the message reached the backend history
+ *   (when known);
+ * - `failed`: the turn failed or its outcome is uncertain; the agent refuses
+ *   further turns.
+ */
+export type TurnOutcome = { end: 'completed' | 'stopped' | 'failed'; reason?: TurnStopReason; delivered?: boolean };
+/** Longest wait, after a turn is stopped, for the Letta stream to confirm that its run ended. */
+export const STOP_CONFIRM_MS = 60_000;
+/** The error a turn stopped by a {@link TurnLimits} limit is aborted with (`reason`: which one). */
+export class TurnLimitError extends Error {
+  override readonly name = 'TurnLimitError';
+  constructor(readonly reason: Exclude<TurnStopReason, 'aborted'>, limits: TurnLimits) {
+    super(reason === 'idle_timeout' ? `Turn stopped: no progress for ${formatDuration(limits.idleMs)}` : `Turn stopped: it reached the ${formatDuration(limits.maxMs)} limit`);
+  }
+}
 
 /** Options for constructing a {@link LettaAgent} directly (normally done by `openLettaAgent`). */
 export interface LettaAgentOptions<TOOLS extends ToolSet> {
@@ -94,6 +128,8 @@ export interface LettaAgentOptions<TOOLS extends ToolSet> {
   name?: string;
   /** Who a turn acts for when the call names no `actor` (the local user in single-user apps). @default none */
   defaultActor?: TurnActor;
+  /** How long a turn may run (see {@link TurnLimits}). @default 10 minutes idle, 6 hours of work */
+  limits?: Partial<TurnLimits>;
 }
 
 /**
@@ -157,6 +193,12 @@ export type LettaCallOptions = {
    * being refused up front. Undefined: the agent's setting.
    */
   trustJiminy?: boolean;
+  /**
+   * Tighter limits for this turn only (see {@link TurnLimits}): each one is
+   * the smaller of this and the agent's (`0` counts as no limit). They can
+   * never extend the agent's limits.
+   */
+  limits?: Partial<TurnLimits>;
 };
 /**
  * The note an unattended turn starts with (display history never shows it).
@@ -403,6 +445,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   private busy = false;
   private unusable = false;
   private active?: AbortController;
+  /** How long a turn may run (see {@link TurnLimits}). */
+  readonly limits: TurnLimits;
+  /** The running (or last) turn's outcome, once known (see {@link lastTurn}). */
+  private ending?: Promise<TurnOutcome>;
 
   constructor(options: LettaAgentOptions<TOOLS>) {
     this.id = options.id;
@@ -422,6 +468,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     this.listening = !!options.listening;
     this.name = options.name;
     this.defaultActor = options.defaultActor ? Object.freeze({ ...options.defaultActor }) : undefined;
+    this.limits = resolveTurnLimits(options.limits);
   }
   private settled?: Promise<void>;
   /** Resolves when the work after the last turn (see `afterTurn`) is done. */
@@ -438,11 +485,47 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
   /** Abort any running turn, cancel pending prompts, and refuse further turns. */
   close(): void { this.unusable = true; this.active?.abort(); this.interactions.close(); }
 
+  /**
+   * How the last turn ended, once it settled (see {@link TurnOutcome}). A
+   * stopped turn (its abort signal fired, or a turn limit was reached)
+   * resolves only after the backend confirmed its run ended and the stop was
+   * recorded, or after that failed. `undefined` before the first turn.
+   */
+  lastTurn(): Promise<TurnOutcome | undefined> { return this.ending ?? Promise.resolve(undefined); }
+  /** Track a new turn's outcome (see {@link lastTurn}). */
+  private trackTurn(): TurnState {
+    let resolve!: (outcome: TurnOutcome) => void;
+    this.ending = new Promise<TurnOutcome>(r => { resolve = r; });
+    let done = false;
+    const state: TurnState = { started: false, settle: outcome => {
+      if (done) return;
+      done = true;
+      if (outcome.end === 'failed') this.unusable = true;
+      resolve(outcome);
+    } };
+    return state;
+  }
+  /** The turn failed or its outcome is uncertain: refuse further turns. */
+  private fail(state: TurnState) { this.unusable = true; state.settle({ end: 'failed' }); }
+  /** Limits of one turn: the agent's, tightened by the call's (see {@link LettaCallOptions.limits}). */
+  private turnLimits(call?: Partial<TurnLimits>): TurnLimits {
+    if (call === undefined) return this.limits;
+    if (!call || typeof call !== 'object' || Object.keys(call).some(key => key !== 'idleMs' && key !== 'maxMs')) throw new Error('Invalid limits');
+    const checked = resolveTurnLimits({ idleMs: call.idleMs ?? this.limits.idleMs, maxMs: call.maxMs ?? this.limits.maxMs });
+    const max = !checked.maxMs ? this.limits.maxMs : !this.limits.maxMs ? checked.maxMs : Math.min(checked.maxMs, this.limits.maxMs);
+    return resolveTurnLimits({ idleMs: Math.min(checked.idleMs, this.limits.idleMs), maxMs: max });
+  }
+
   private async prepare(options: Call<TOOLS>) {
-    if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
-    if (this.busy) throw new Error('A turn is already running');
+    const refuse = () => {
+      if (this.unusable) throw new Error('Session closed or delivery uncertain; inspect backend history before reopening (no retries).');
+      if (this.busy) throw new Error('A turn is already running');
+    };
+    refuse();
+    // A stopped turn settles first (its run ends, the stop is recorded); then this turn may start.
+    if (this.ending) { await this.ending; refuse(); }
     for (const [key, value] of Object.entries(options)) {
-      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder', 'sources', 'trustJiminy'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
+      if (!['prompt', 'messages', 'abortSignal', 'otid', 'speaker', 'speakers', 'replyMode', 'addressed', 'actor', 'unattended', 'reminder', 'sources', 'trustJiminy', 'limits'].includes(key) && value !== undefined) throw new Error(`Unsupported agent option: ${key}`);
     }
     if (options.actor !== undefined && (!options.actor || typeof options.actor !== 'object' || typeof options.actor.id !== 'string' || !options.actor.id || options.actor.id.length > 200)) throw new Error('Invalid actor');
     if (options.reminder !== undefined && typeof options.reminder !== 'string') throw new Error('Invalid reminder');
@@ -452,6 +535,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     if (options.replyMode !== undefined && (!REPLY_MODES.includes(options.replyMode) || !this.listening)) throw new Error(this.listening ? 'Invalid replyMode' : 'replyMode needs an agent opened with listening');
     if (options.speakers !== undefined && (!Array.isArray(options.speakers) || !options.speakers.length || options.speakers.length > 50 || options.speakers.some(s => !s || typeof s.name !== 'string') || options.speaker !== undefined)) throw new Error('Invalid speakers');
     if (options.otid !== undefined && (typeof options.otid !== 'string' || !OTID.test(options.otid))) throw new Error('Invalid otid');
+    const limits = this.turnLimits(options.limits);
     if (options.prompt !== undefined && options.messages !== undefined) throw new Error('Use prompt or messages, not both');
     const messages = typeof options.prompt === 'string' ? [...this.history, { role: 'user' as const, content: options.prompt }] : options.messages ?? options.prompt;
     if (!Array.isArray(messages) || !messages.length) throw new Error('Expected a new user turn');
@@ -494,18 +578,35 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       + (options.replyMode || speakers.length > 1 ? turnNote({ speakers, replyMode: options.replyMode, addressed: !!options.addressed, agentName: this.name }) : speakers[0] ? speakerNote(speakers[0]) : '');
     const silence = !!options.replyMode && options.replyMode !== 'always' && !options.addressed;
     const message: SendMessage = !preface ? turn.message : typeof turn.message === 'string' ? `${preface}${turn.message}` : [{ type: 'text', text: preface }, ...turn.message];
-    return { otid: options.otid, info, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, files: turn.files, silence, actor, unattended };
+    return { otid: options.otid, info, messages: structuredClone(compactTranscript(messages)), message, prompt: parsed.text.trim() ? parsed.text : parsed.attachments.length > parsed.images.length ? '[File]' : '[Image]', signal, control, limits, state: this.trackTurn(), files: turn.files, silence, actor, unattended };
   }
 
-  private model(message: SendMessage, signal: AbortSignal, otid?: string, silence = false, actor?: TurnActor, unattended?: UnattendedPolicy): LanguageModelV4 {
+  private model(turn: PreparedTurn): LanguageModelV4 {
+    const { message, signal, otid, silence, actor, unattended, limits, control, state } = turn;
     const run = async (emit: (part: LanguageModelV4StreamPart) => void) => {
+      state.started = true;
       let session: TurnSession | undefined;
       let completed = false;
-      const abort = () => { void session?.abort().catch(() => {}); session?.close(); };
+      // The message was handed to Letta (the durable marker is written first): from then on a stop must be confirmed.
+      let begun = false;
+      // Stopped: the turn's own terminal result arrived after the abort (the backend's run ended).
+      let confirmed = false;
+      // The turn's clock (idle timeout and hard cap, paused while a person is asked something).
+      const clock = new TurnClock(limits, reason => control.abort(new TurnLimitError(reason, limits)));
+      const unwatch = this.interactions.watch(waiting => { if (waiting) clock.pause(); else clock.resume(); });
+      const abort = () => { clock.stop(); void session?.abort().catch(() => {}); session?.close(); };
+      // After an abort, the stream is read until the turn's terminal result, for at most STOP_CONFIRM_MS.
+      let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      let confirmWindow = () => {};
+      const unconfirmed = new Promise<never>((_, reject) => { confirmWindow = () => { stopTimer = setTimeout(() => reject(new Error('stop_unconfirmed')), STOP_CONFIRM_MS); }; });
+      signal.addEventListener('abort', confirmWindow, { once: true });
+      unconfirmed.catch(() => {});
       const calls = new Map<string, string>();
       const memoryCalls = new Set<string>();
       // stay_silent calls: never AI SDK tool calls; a successful one with no reply text makes the turn "listened".
       const silentCalls = new Map<string, string | undefined>();
+      // A tool call still running is not idleness (a long build, a sandbox command).
+      const busy = () => clock.setBusy(calls.size + memoryCalls.size + silentCalls.size > 0);
       let listened: { reason?: string } | undefined;
       let wrote = false;
       let requestedDecision = false;
@@ -520,11 +621,21 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         signal.throwIfAborted();
         session = this.open(signal, { silence, ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}) });
         signal.addEventListener('abort', abort, { once: true });
-        this.delivery?.begin();
+        clock.start();
+        this.delivery?.begin(otid);
+        begun = true;
         await (otid ? session.send(message, { otid }) : session.send(message));
-        signal.throwIfAborted();
-        for await (const event of session.stream()) {
-          signal.throwIfAborted();
+        const events = session.stream()[Symbol.asyncIterator]();
+        while (true) {
+          const next = await Promise.race([events.next(), unconfirmed]);
+          if (next.done) break;
+          const event = next.value;
+          if (signal.aborted) {
+            // Stopped: nothing more is shown; wait for the run's own end (never another turn's).
+            if (event.type === 'result') { confirmed = true; break; }
+            continue;
+          }
+          clock.progress();
           if (event.type === 'assistant') {
             endReasoning();
             if (!event.content) continue;
@@ -539,23 +650,23 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             endText(); endReasoning();
             if (calls.has(event.toolCallId) || memoryCalls.has(event.toolCallId) || silentCalls.has(event.toolCallId)) throw new Error('Duplicate tool call');
             // Harness memory operations are not application tool cards/history.
-            if (this.memoryTools.includes(event.toolName)) { memoryCalls.add(event.toolCallId); continue; }
+            if (this.memoryTools.includes(event.toolName)) { memoryCalls.add(event.toolCallId); busy(); continue; }
             if (this.listening && event.toolName === STAY_SILENT_TOOL) {
               const reason = event.toolInput && typeof event.toolInput.reason === 'string' ? event.toolInput.reason.slice(0, 500) : undefined;
-              silentCalls.set(event.toolCallId, reason); continue;
+              silentCalls.set(event.toolCallId, reason); busy(); continue;
             }
             if (!Object.hasOwn(this.tools, event.toolName)) throw new Error('Unexpected tool call');
-            calls.set(event.toolCallId, event.toolName);
+            calls.set(event.toolCallId, event.toolName); busy();
             emit({ type: 'tool-call', toolCallId: event.toolCallId, toolName: event.toolName, input: JSON.stringify(event.toolInput), providerExecuted: true });
           } else if (event.type === 'tool_result') {
             // The SDK can emit provisional Bash output as a tool_result before
             // the authoritative result. Only known internal calls may use it.
             if (memoryCalls.has(event.toolCallId) && event.uuid.startsWith('synthetic-tool-return-stream-')) continue;
-            if (memoryCalls.delete(event.toolCallId)) continue;
+            if (memoryCalls.delete(event.toolCallId)) { busy(); continue; }
             if (silentCalls.has(event.toolCallId)) {
               // The tool refuses when this turn needs a reply; only an accepted call listens.
               const reason = silentCalls.get(event.toolCallId);
-              silentCalls.delete(event.toolCallId);
+              silentCalls.delete(event.toolCallId); busy();
               if (!event.isError) listened = { ...(reason ? { reason } : {}) };
               continue;
             }
@@ -568,7 +679,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             // So is one whose web research now waits for review as a decision.
             if (toolName === 'web_search' && !event.isError && result && typeof result === 'object' && (result as { awaiting_review?: unknown }).awaiting_review === true) requestedDecision = true;
             emit({ type: 'tool-result', toolCallId: event.toolCallId, toolName, result: result ?? 'null', isError: event.isError });
-            calls.delete(event.toolCallId);
+            calls.delete(event.toolCallId); busy();
           } else if (event.type === 'stream_event' && event.event.message_type === 'usage_statistics') {
             if (typeof event.event.prompt_tokens === 'number') tokens.inputTokens.total = event.event.prompt_tokens;
             if (typeof event.event.completion_tokens === 'number') tokens.outputTokens.total = event.event.completion_tokens;
@@ -584,14 +695,22 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             return;
           }
         }
+        if (confirmed) signal.throwIfAborted();
         throw new Error('Letta stream closed before completion');
       } catch (error) {
-        this.unusable = true;
+        // A stop is settled below once the backend confirmed it; anything else leaves the delivery uncertain.
+        if (!signal.aborted || (begun && !confirmed)) this.fail(state);
         throw error;
       } finally {
+        clock.stop(); unwatch();
+        signal.removeEventListener('abort', confirmWindow);
+        if (stopTimer) clearTimeout(stopTimer);
         signal.removeEventListener('abort', abort);
         if (!completed) void session?.abort().catch(() => {});
         session?.close();
+        // Letta confirmed the turn finished: its delivery is complete, whatever the reader does next.
+        if (completed) { try { this.delivery?.complete(); state.settle({ end: 'completed' }); } catch { this.fail(state); } }
+        else if (signal.aborted && (!begun || confirmed)) void this.settleStop(state, stopReason(signal), begun, otid);
       }
     };
     return {
@@ -621,35 +740,72 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             try { controller.enqueue({ type: 'error', error }); } catch { /* reader closed */ }
           }).finally(() => { try { controller.close(); } catch { /* reader closed */ } });
         },
-        cancel: () => this.close(),
+        // The reader went away: stop the turn (its outcome then settles like any stop).
+        cancel: () => { this.active?.abort(); },
       }) }),
     };
   }
 
-  /** Run one turn and wait for the full result. */
+  /**
+   * A stopped turn whose outcome is known: nothing was sent, or the backend
+   * confirmed its run ended. Record it (the delivery's `settle` hook) and
+   * keep the agent usable; when the hook is missing or fails, the delivery
+   * stays uncertain. Agents without delivery hooks (tests, custom hosts)
+   * trust the confirmation.
+   */
+  private async settleStop(state: TurnState, reason: TurnStopReason, sent: boolean, otid?: string) {
+    if (!sent) { state.settle({ end: 'stopped', reason, delivered: false }); return; }
+    if (!this.delivery) { state.settle({ end: 'stopped', reason }); return; }
+    if (!this.delivery.settle) { this.fail(state); return; }
+    try {
+      const settled = await this.delivery.settle({ ...(otid ? { otid } : {}) });
+      state.settle({ end: 'stopped', reason, ...(settled && typeof settled.delivered === 'boolean' ? { delivered: settled.delivered } : {}) });
+    } catch { this.fail(state); }
+  }
+
+  /** Run one turn and wait for the full result. A turn stopped by a {@link TurnLimits} limit rejects with a {@link TurnLimitError}. */
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
     try {
-      const result = await generateText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor, turn.unattended), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
-      this.delivery?.complete();
+      const result = await generateText({ model: this.model(turn), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal });
+      if (this.unusable) throw new Error('Session closed or delivery uncertain');
       this.history = [...turn.messages, ...result.response.messages];
       return result;
-    } catch (error) { this.unusable = true; throw error; }
+    } catch (error) {
+      // A stop settles on its own (see lastTurn); anything else leaves the delivery uncertain.
+      if (!turn.signal.aborted) this.fail(turn.state);
+      else if (!turn.state.started) turn.state.settle({ end: 'stopped', reason: stopReason(turn.signal), delivered: false });
+      throw turn.signal.aborted && turn.signal.reason instanceof TurnLimitError ? turn.signal.reason : error;
+    }
     finally { this.busy = false; this.active = undefined; this.finishTurn(turn.info); }
   }
 
-  /** Run one turn as a stream (text deltas, provider-executed tool calls and results). */
+  /**
+   * Run one turn as a stream (text deltas, provider-executed tool calls and
+   * results). A stopped turn (its abort signal, or a {@link TurnLimits}
+   * limit) ends the stream with an `abort` part; {@link lastTurn} then says
+   * whether the agent stays usable.
+   */
   async stream(options: AgentStreamParameters<never, TOOLS> & LettaCallOptions) {
     const turn = await this.prepare(options);
-    return streamText({ model: this.model(turn.message, turn.signal, turn.otid, turn.silence, turn.actor, turn.unattended), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
-      onError: () => { this.unusable = true; this.busy = false; this.finishTurn(turn.info); },
-      onAbort: () => { this.close(); this.busy = false; this.finishTurn(turn.info); },
+    const done = () => { this.busy = false; this.active = undefined; this.finishTurn(turn.info); };
+    return streamText({ model: this.model(turn), prompt: turn.prompt, tools: this.tools, maxRetries: 0, stopWhen: stepCountIs(1), abortSignal: turn.signal,
+      // A stop settles on its own (see lastTurn): the agent stays usable when its outcome is known.
+      onError: () => { if (!turn.signal.aborted) this.fail(turn.state); done(); },
+      onAbort: () => { if (!turn.state.started) turn.state.settle({ end: 'stopped', reason: stopReason(turn.signal), delivered: false }); done(); },
       onFinish: result => {
-        try { if (!this.unusable && result.finishReason === 'stop') this.delivery?.complete(); }
-        catch (error) { this.unusable = true; throw error; }
-        finally { this.busy = false; this.active = undefined; this.finishTurn(turn.info); }
-        this.history = [...turn.messages, ...result.response.messages];
+        try {
+          if (this.unusable || result.finishReason !== 'stop') { this.fail(turn.state); return; }
+          this.history = [...turn.messages, ...result.response.messages];
+        } finally { done(); }
       },
     });
   }
 }
+
+/** How a turn's outcome is reported (see {@link LettaAgent.lastTurn}). `started`: its model run began (its stream reports the end). */
+type TurnState = { started: boolean; settle(outcome: TurnOutcome): void };
+/** A validated turn, ready to send. */
+type PreparedTurn = { message: SendMessage; signal: AbortSignal; control: AbortController; otid?: string; silence: boolean; actor?: TurnActor; unattended?: UnattendedPolicy; limits: TurnLimits; state: TurnState };
+/** Why a stopped turn's signal fired. */
+const stopReason = (signal: AbortSignal): TurnStopReason => signal.reason instanceof TurnLimitError ? signal.reason.reason : 'aborted';

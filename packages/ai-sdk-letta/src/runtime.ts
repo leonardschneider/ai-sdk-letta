@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { MemoryGuard, type MemoryGuardEvents } from './memory-guard.js';
 import { chooseReviewerModel, lettaReviewer, sweepReviewers, type MemoryReviewer } from './jiminy.js';
 import { provenanceLabel, sourceOfTool, trustEligible, turnProvenance, TRUSTED_TOOLS } from './provenance.js';
+import { envTurnLimits, resolveTurnLimits, SDK_TURN_TIMEOUT_MS, type TurnLimits } from './turn-limits.js';
 import { dreamHookCommand, dreamHookSupported, parseDreamRequest, reviewDreamRequest, type DreamRequest } from './dream-review.js';
 import type { UnattendedPolicy } from './tools.js';
 
@@ -276,9 +277,33 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
   readonly memory?: MemoryGuard;
   /** Open a conversation. Opening one that is already open is refused; close it first. */
   open(target: ConversationTarget): Promise<ConversationSession<TOOLS>>;
+  /**
+   * "Check and unlock" a conversation whose last turn has an uncertain
+   * outcome (see {@link ConversationCheck}). Read-only towards Letta: nothing
+   * is sent or replayed. The conversation must not be open here; close it first.
+   */
+  check(conversationId: string, otid?: string): Promise<ConversationCheck>;
   /** Close every open conversation and the SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
+
+/**
+ * What "Check and unlock" found (see {@link AgentHost.check}). It reads
+ * Letta only: whether a run is still active on the conversation, and
+ * whether the turn's message (its OTID) is in the history.
+ *
+ * - `unlocked`: no run is active, so the outcome is known: the turn is
+ *   recorded as settled (`IdentityLease.settleTurn`, outcome `reconciled`)
+ *   and the conversation opens again. Nothing is replayed: a message that
+ *   never arrived (`delivered: false`) is not resent.
+ * - `active`: a run is still active (or the backend is busy): still locked;
+ *   check again later.
+ * - `delivered`: the message with `otid` is in the history (`undefined`
+ *   without an OTID). `reply`: the visible text Letta has after it (at most
+ *   2,000 characters); `tools`: tool calls after it, and how many have no
+ *   result (interrupted).
+ */
+export type ConversationCheck = { unlocked: boolean; active: boolean; delivered?: boolean; reply?: string; tools: { calls: number; unfinished: number }; pending: boolean };
 
 /**
  * Options for {@link openAgentHost}. `listening`: conversations shared by
@@ -294,19 +319,45 @@ type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
 };
 
 /**
- * Longest a whole turn may take before the Letta SDK gives up on it. In the
- * installed SDK (0.8.22), `appServer.requestTimeoutMs` is one wall-clock
- * timer per turn, started when the turn begins and never extended (not even
- * while a tool waits for a person). It must therefore cover inference plus
- * the longest human wait: the harness keeps an external tool for at most five
- * minutes (see {@link foregroundToolsCommand}), and the HTTP runtime's own
- * deadlines (three minutes of inference plus four of human waiting) end a
- * turn first. Requests other than turns get explicit, short timeouts.
+ * The Letta SDK's per-turn timeout of conversation sessions: effectively
+ * unbounded (see {@link SDK_TURN_TIMEOUT_MS}). Turns are bounded by the
+ * runtime's own limits instead (see `TurnLimits`: an idle timeout that
+ * resets on progress, and a hard cap on working time), which stop a turn
+ * cleanly and keep the conversation usable.
+ * @deprecated kept for compatibility; equal to {@link SDK_TURN_TIMEOUT_MS}.
  */
-export const TURN_TIMEOUT_MS = 600_000;
+export const TURN_TIMEOUT_MS = SDK_TURN_TIMEOUT_MS;
 /** Timeout of the session's setup and status requests (not turns). */
 const REQUEST_TIMEOUT_MS = 60_000;
-const lettaClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: TURN_TIMEOUT_MS, startupTimeoutMs: 60_000 } });
+/** Longest wait for a conversation's session to start (the SDK's own startup timeout covers only the app-server process). */
+const STARTUP_TIMEOUT_MS = 180_000;
+/** Longest wait, after a turn was stopped, for the backend to report no active run (see {@link waitIdle}). */
+const IDLE_WAIT_MS = 30_000;
+/**
+ * Wait until the backend reports the conversation idle (no active run, no
+ * queued work, nothing waiting for an answer), as {@link assertIdle} checks.
+ * @throws when it is still busy after {@link IDLE_WAIT_MS}
+ */
+async function waitIdle(session: Pick<LettaCodeSession, 'getDeviceStatus'>, waitMs = IDLE_WAIT_MS): Promise<void> {
+  const until = Date.now() + waitMs;
+  for (let attempt = 0; ; attempt++) {
+    const status = await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS });
+    try { assertIdle(status); return; }
+    catch (error) { if (Date.now() >= until) throw error; }
+    await new Promise(resolve => setTimeout(resolve, Math.min(2000, 250 * (attempt + 1))));
+  }
+}
+/** Timeout of requests of the host's own client (creating the agent, listing models). */
+const SETUP_TIMEOUT_MS = 600_000;
+/** The host's client: agent creation and model lists. */
+const setupClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: SETUP_TIMEOUT_MS, startupTimeoutMs: 60_000 } });
+/** A conversation's client: its turns are bounded by the runtime's limits, not by the SDK (see {@link TURN_TIMEOUT_MS}). */
+const lettaClient = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: SDK_TURN_TIMEOUT_MS, startupTimeoutMs: 60_000 } });
+/** `promise`, or a rejection with `message` after `ms` (for SDK requests that would otherwise inherit the unbounded turn timeout). */
+function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); timer.unref?.(); })]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Open (creating on first use) the persistent Letta agent of a definition on
@@ -318,10 +369,20 @@ export async function openAgentHost<TOOLS extends ToolSet>(definition: AgentDefi
   return hostInternals(definition, options);
 }
 
+/**
+ * "Check and unlock" one conversation of a definition's agent (see
+ * {@link AgentHost.check}): acquires the identity lock, checks, and releases
+ * it. For apps that open one conversation at a time (the single-user server).
+ */
+export async function checkConversation<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, conversationId: string, options: Pick<OpenAgentOptions, 'stateDirectory'> & { otid?: string } = {}): Promise<ConversationCheck> {
+  const host = await hostInternals(definition, { ...(options.stateDirectory ? { stateDirectory: options.stateDirectory } : {}), traces: false });
+  try { return await host.check(conversationId, options.otid); } finally { await host.close(); }
+}
+
 async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, options: AgentHostOptions): Promise<Internals<TOOLS>> {
   const paths = statePaths(resolveStateDirectory(options.stateDirectory));
   const cwd = paths.agents;
-  const client = lettaClient();
+  const client = setupClient();
   let release: (() => void) | undefined;
   const open = new Set<OpenedConversation<TOOLS>>();
   let closing: Promise<void> | undefined;
@@ -358,7 +419,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         } finally { await inspector.close(); }
       },
     });
-    const { identity, selectConversation, createConversation, assertNoPendingTurn, beginTurn, completeTurn } = lease;
+    const { identity, selectConversation, createConversation, assertNoPendingTurn, beginTurn, completeTurn, settleTurn, settledTurn } = lease;
+    // How long a turn may run: the definition's limits, then the environment's, then the defaults.
+    const limits: TurnLimits = resolveTurnLimits({ ...envTurnLimits(), ...definition.turnLimits });
     release = lease.release;
     // Files of earlier versions are moved into the resources once; their folders are named after the conversations' titles.
     let resources: ResourceStore | undefined;
@@ -538,7 +601,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           return guard.allows(name, input.file_path, provenance)?.message;
         };
         session = sessionClient.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, sessionOptions(bridge, () => memoryRoot, cwd, definition.name, memoryPolicy));
-        const ready = await session.ready();
+        const ready = await within(session.ready(), STARTUP_TIMEOUT_MS, 'Timed out opening the conversation');
         if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
         assertIdle(await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         if (options.foregroundExternalTools !== false && bridge.tools.length) {
@@ -549,7 +612,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         }
         const live = session;
         const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
-        assertHistorySettled(history.messages);
+        // A turn that was stopped (or checked) is settled up to the history it left (see settleTurn).
+        assertHistorySettled(history.messages, settledTurn(conversationId));
         const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
@@ -591,11 +655,20 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           id: definition.id, tools: definition.tools, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
             turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
-          delivery: { begin: () => beginTurn(conversationId), complete: () => completeTurn(conversationId) },
+          limits,
+          delivery: { begin: otid => beginTurn(conversationId, otid), complete: () => completeTurn(conversationId),
+            // A stopped turn: once the backend is idle (the harness cancelled the run and closed its tools), record it as settled.
+            settle: async ({ otid }) => {
+              await waitIdle(live);
+              const records = (await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS), 200)).messages;
+              const delivered = otid ? records.some(message => (message as unknown as { otid?: unknown }).otid === otid) : undefined;
+              settleTurn(conversationId, { outcome: 'stopped', ...(delivered !== undefined ? { delivered } : {}), ...(otid ? { otid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
+              return delivered !== undefined ? { delivered } : {};
+            } },
           // Whatever the agent changed in the resources during the turn becomes one commit.
           // Folder renames of this conversation wait while a turn runs, then apply after that commit.
           // Memory: what the turn changed is committed and recorded with its ID (see MemoryJournal), so a rewind can undo it.
@@ -676,10 +749,52 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       } catch (error) { await shutdown(); throw error; }
     };
 
+    const check = async (conversationId: string, otid?: string): Promise<ConversationCheck> => {
+      if (closing) throw new Error('Agent host closed');
+      if (!validConversationId(conversationId)) throw new Error('Invalid conversation ID');
+      if (otid !== undefined && !/^[A-Za-z0-9._:-]{1,100}$/.test(otid)) throw new Error('Invalid otid');
+      if (opened.has(conversationId)) throw new Error('Conversation is open; close it before checking it');
+      if (conversationId !== 'default') {
+        const manager = managementClient(REQUEST_TIMEOUT_MS);
+        try { const conversation = await manager.conversations.retrieve(conversationId); if (conversation.agent_id !== identity.agentId) throw new Error('Conversation belongs to another agent'); }
+        finally { await manager.close(); }
+      }
+      const pending = lease.pendingTurn(conversationId);
+      const turnOtid = otid ?? pending?.otid;
+      opened.add(conversationId);
+      // An inspection session: stateless (memory, skills and settings untouched), no tools, never sends.
+      const inspector = lettaClient();
+      const session = inspector.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, { stateless: true, cwd, toolset: { base: 'none' }, allowedTools: [], tools: [], permissionMode: 'strict', skillSources: [] } as LettaCodeClientSessionOptions);
+      try {
+        const ready = await within(session.ready(), STARTUP_TIMEOUT_MS, 'Timed out opening the conversation');
+        if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
+        let active = false;
+        try { assertIdle(await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS })); } catch { active = true; }
+        const records = (await loadHistory(query => historyPage(session, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages;
+        const index = turnOtid ? records.findIndex(message => (message as unknown as { otid?: unknown }).otid === turnOtid) : -1;
+        const delivered = turnOtid ? index >= 0 : undefined;
+        const after = index >= 0 ? records.slice(index + 1) : [];
+        const reply = projectHistory(after, [], 0).filter(message => message.role === 'assistant').flatMap(message => message.parts).filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('\n').trim();
+        const calls = new Set<string>();
+        let unfinished = 0;
+        for (const message of after) {
+          const row = message as unknown as { message_type?: string; tool_call?: { tool_call_id?: unknown }; tool_call_id?: unknown };
+          if ((row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') && typeof row.tool_call?.tool_call_id === 'string') calls.add(row.tool_call.tool_call_id);
+        }
+        const answered = new Set(after.map(message => (message as unknown as { message_type?: string; tool_call_id?: unknown })).filter(row => row.message_type === 'tool_return_message' && typeof row.tool_call_id === 'string').map(row => row.tool_call_id as string));
+        for (const id of calls) if (!answered.has(id)) unfinished++;
+        const result: ConversationCheck = { unlocked: false, active, ...(delivered !== undefined ? { delivered } : {}), ...(reply ? { reply: reply.length > 2000 ? `${reply.slice(0, 1999)}…` : reply } : {}), tools: { calls: calls.size, unfinished }, pending: !!pending };
+        if (active) return result;
+        settleTurn(conversationId, { outcome: 'reconciled', ...(delivered !== undefined ? { delivered } : {}), ...(turnOtid ? { otid: turnOtid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
+        return { ...result, unlocked: true };
+      } finally { session.close(); await inspector.close().catch(() => {}); opened.delete(conversationId); }
+    };
+
     return {
       definition, identity, lease, ...(resources ? { resources } : {}), get memory() { return guard; },
       openConversation,
       open: async target => { const { agent, conversationId, title, history, rewind, memory, harnessCommand, webDev, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, memory, harnessCommand, ...(webDev ? { webDev } : {}), close: closeConversation }; },
+      check,
       close,
     };
   } catch (error) { await close(); throw error; }
