@@ -2,14 +2,14 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import { TextMessagePartProvider } from '@assistant-ui/react';
 import { ContextMenu, DropdownMenu } from 'radix-ui';
 import {
-  ChevronRight, Download, Ellipsis, ExternalLink, File, FileCode, FileImage, FileSpreadsheet, FileText, FileType, Folder, FolderInput, FolderOpen, FolderPlus, LoaderCircle, MessageSquare, Pencil, RefreshCw, Trash, Upload, X,
+  Archive, ChevronRight, Download, Ellipsis, ExternalLink, File, FileCode, FileImage, FileSpreadsheet, FileText, FileType, Folder, FolderInput, FolderOpen, FolderPlus, LoaderCircle, MessageSquare, Pencil, RefreshCw, Trash, Upload, X,
 } from 'lucide-react';
 import { api, apiPath, errorCode, uploadResource } from './api.js';
 import { Modal } from './modal.js';
 import { Markdown } from './markdown.js';
 import { useToast } from './toasts.js';
 import {
-  ancestors, baseName, canDrop, find, iconKind, joinPath, parentPath, parseAtlassianDocument, parseDelimited, previewKind, resourceError, shortSize, validName, walk,
+  ARCHIVED_RESOURCES_KEY, ancestors, baseName, canDrop, find, footerText, iconKind, joinPath, parentPath, parseAtlassianDocument, parseDelimited, previewKind, readShowArchived, resourceError, shortSize, splitArchived, validName, walk,
   type ResourceNode, type ResourceTree,
 } from './resources-model.js';
 
@@ -71,6 +71,9 @@ export function ResourcesPanel(props: Props) {
   const [dropTarget, setDropTarget] = useState<string>();
   const [busy, setBusy] = useState(0);
   const [fresh, setFresh] = useState<ReadonlySet<string>>(() => new Set());
+  // Folders of archived conversations: hidden unless asked for (persisted). Nothing moves on disk.
+  const [showArchived, setShowArchivedState] = useState(() => readShowArchived(localStorage.getItem(ARCHIVED_RESOURCES_KEY)));
+  const setShowArchived = (value: boolean) => { setShowArchivedState(value); localStorage.setItem(ARCHIVED_RESOURCES_KEY, String(value)); };
   const known = useRef<Set<string> | undefined>(undefined);
   const version = useRef('');
   /** After the server restarted (session gone), stop polling until the page is refreshed. */
@@ -79,6 +82,9 @@ export function ResourcesPanel(props: Props) {
   const fileInput = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
 
+  const split = useMemo(() => splitArchived(tree?.children ?? [], tree?.archived), [tree]);
+  /** What the tree shows: the normal folders, then the archived ones when asked for. */
+  const shown = useMemo(() => showArchived ? [...split.visible, ...split.archived] : split.visible, [split, showArchived]);
   const currentFolder = useMemo(() => tree ? Object.entries(tree.threads).find(([, id]) => id === props.threadId)?.[0] : undefined, [tree, props.threadId]);
 
   const load = useCallback(async (quiet = false) => {
@@ -206,9 +212,9 @@ export function ResourcesPanel(props: Props) {
   const visibleRows = useMemo(() => {
     const rows: ResourceNode[] = [];
     const add = (nodes: readonly ResourceNode[]) => { for (const node of nodes) { rows.push(node); if (node.type === 'folder' && expanded.has(node.path)) add(node.children ?? []); } };
-    if (tree) add(tree.children);
+    add(shown);
     return rows;
-  }, [tree, expanded]);
+  }, [shown, expanded]);
   function onKeyDown(event: React.KeyboardEvent) {
     if (pending || (event.target as HTMLElement).closest('input')) return;
     const index = visibleRows.findIndex(n => n.path === selected);
@@ -224,6 +230,7 @@ export function ResourcesPanel(props: Props) {
   }
 
   const empty = tree && !tree.children.length;
+  const ctx: TreeContext = { expanded, toggle, selected, setSelected, pending, rename, createFolder, actions, current: currentFolder, fresh, dropTarget, setDropTarget, handleDrop, preview };
   return <div className="resources" aria-busy={busy > 0 || undefined}>
     <div className="res-head">
       <h2 className="res-title">Resources</h2>
@@ -245,13 +252,23 @@ export function ResourcesPanel(props: Props) {
       {!tree && !error && <p className="res-empty muted">Loading…</p>}
       {empty && <p className="res-empty">No files yet. Attach files in a chat, drop files here, or ask the agent to create some.</p>}
       {pending?.kind === 'new-folder' && pending.parent === '' && <NameField depth={0} initial="New folder" folder onDone={name => void createFolder('', name ?? '')}/>}
-      {tree?.children.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={{ expanded, toggle, selected, setSelected, pending, rename, createFolder, actions, current: currentFolder, fresh, dropTarget, setDropTarget, handleDrop, preview }}/>)}
+      {tree && split.visible.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={ctx}/>)}
+      {tree && !empty && !split.visible.length && !showArchived && <p className="res-empty">Only archived conversations have files here.</p>}
+      {!!split.archived.length && <div className="res-archived" role="none">
+        <button type="button" className="res-archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived(!showArchived)}>
+          <ChevronRight size={13} className="res-chev" data-open={showArchived || undefined} aria-hidden="true"/><Archive size={13} aria-hidden="true"/>
+          <span>{showArchived ? 'Hide archived' : 'Show archived'} ({split.archived.length})</span>
+        </button>
+        {showArchived && <div role="group" aria-label="Archived" className="res-archived-group">
+          {split.archived.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={ctx}/>)}
+        </div>}
+      </div>}
       {tree?.truncated && <p className="res-empty muted">Showing the first 5,000 entries.</p>}
     </div>
-    {tree && <p className="res-foot">{countFiles(tree)} · versioned with git</p>}
+    {tree && <p className="res-foot">{footerText(shown, showArchived ? 0 : split.archived.length)} · versioned with git</p>}
     {preview && <Preview path={preview} node={tree ? find(tree.children, preview) : undefined} onClose={() => setPreview(undefined)}/>}
     {confirm && <ConfirmDelete node={confirm} onCancel={() => setConfirm(undefined)} onConfirm={() => void remove(confirm)}/>}
-    {moving && tree && <MoveDialog node={moving} tree={tree} onCancel={() => setMoving(undefined)} onMove={folder => { setMoving(undefined); void move(moving.path, folder); }}/>}
+    {moving && tree && <MoveDialog node={moving} tree={{ ...tree, children: shown }} onCancel={() => setMoving(undefined)} onMove={folder => { setMoving(undefined); void move(moving.path, folder); }}/>}
   </div>;
 
   function acceptsDrag(event: React.DragEvent) { return event.dataTransfer.types.includes(DRAG_TYPE) || event.dataTransfer.types.includes('Files'); }
@@ -267,11 +284,6 @@ function selectedFolder(tree: ResourceTree | undefined, selected: string | undef
   if (!tree || !selected) return undefined;
   const node = find(tree.children, selected);
   return node?.type === 'folder' ? node.path : node ? parentPath(node.path) : undefined;
-}
-function countFiles(tree: ResourceTree) {
-  let files = 0; let bytes = 0;
-  for (const node of walk(tree.children)) if (node.type === 'file') { files++; bytes += node.bytes ?? 0; }
-  return `${files.toLocaleString()} file${files === 1 ? '' : 's'}, ${shortSize(bytes) || '0 B'}`;
 }
 
 type Actions = {

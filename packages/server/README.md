@@ -55,6 +55,12 @@ default, also for threads saved by earlier versions), `'on'` or `'off'`.
 Threads are listed with `latex`; `GET /api/session` (GUI) returns the
 agent's `ui: { latex }`. It returns the thread as listed.
 
+`GET /v1/resources` returns the tree with `threads` (conversation folder
+path → thread ID) and `archived`, the paths of the folders whose
+conversation is archived; the browser app hides those by default. Nothing
+moves on disk, and `version` changes when a conversation is archived or
+restored.
+
 `POST /v1/resources/move` takes `{ from, to }` (paths from the root) and
 returns `{ path, from, commit? }`. Renaming a conversation's own folder
 renames the conversation too (`titleFromFolderName`: the name as typed,

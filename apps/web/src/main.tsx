@@ -160,6 +160,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const previewOpen = webDevEnabled && (narrow ? previewDrawer : previewLayout.open);
   const togglePreview = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(open => !open); } else setPreviewLayout(l => ({ ...l, open: !l.open })); }, [narrow, setPreviewLayout]);
   const [turns, setTurns] = useState(0);
+  const [archives, setArchives] = useState(0);
   // Bumped whenever the server reports a change (long poll): memory reviews and toasts follow it.
   const [serverChanges, setServerChanges] = useState(0);
   const memoryPending = useMemoryToasts(memoryEnabled && !connecting && !unreachable, serverChanges + turns);
@@ -404,6 +405,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
     if (body.title !== undefined) setTurns(n => n + 1);
+    // Archived conversations' folders are hidden there: refresh it too.
+    if (body.archived !== undefined) setArchives(n => n + 1);
     return updated;
   }
   async function rename(id: string, title: string) {
@@ -863,7 +866,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         </aside>}
         {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
           {!narrow && <Resizer label="Resize resources" min={RESOURCES_WIDTH.min} max={RESOURCES_WIDTH.max} width={layout.resourcesWidth} clamp={clampWidth} reset={320} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
-          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
+          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
             onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}

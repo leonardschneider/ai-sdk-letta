@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
@@ -1122,18 +1122,28 @@ export class ThreadRuntime {
    * this runtime knows it) and the user's own folders. `version` changes with
    * the content; pass it back as `since` to get `{ unchanged: true }` cheaply.
    */
-  async resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; changes: number }> {
+  /**
+   * The resources tree, with `threads` (conversation folder path → thread ID)
+   * and `archived`: the paths of the folders whose conversation is archived
+   * (the browser hides them by default; nothing moves on disk). The version
+   * changes when a conversation is archived or restored.
+   */
+  async resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; archived: string[]; changes: number }> {
     this.authorize(owner);
     // Before the first conversation there is no agent yet, so nothing to list (not an error).
-    if (this.host.attachmentsRoot && !this.state.threads.some(t => t.agentId)) return { children: [], truncated: false, version: 'empty', threads: {}, changes: 0 };
+    if (this.host.attachmentsRoot && !this.state.threads.some(t => t.agentId)) return { children: [], truncated: false, version: 'empty', threads: {}, archived: [], changes: 0 };
     return this.withResources(owner, store => {
       const tree = store.tree();
       const threads: Record<string, string> = {};
+      const archived: string[] = [];
       for (const { conversationId, path } of store.conversations()) {
         const thread = this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId);
         if (thread) threads[path] = thread.id;
+        if (thread?.archived) archived.push(path);
       }
-      return { ...tree, threads, changes: store.commits };
+      archived.sort();
+      const version = archived.length ? createHash('sha256').update(`${tree.version}\0${archived.join('\0')}`).digest('hex').slice(0, 20) : tree.version;
+      return { ...tree, version, threads, archived, changes: store.commits };
     });
   }
   /** Add a file to a folder (any type, up to the per-file limit). One commit. */

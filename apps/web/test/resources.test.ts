@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ancestors, canDrop, clampWidth, DEFAULT_LAYOUT, find, iconKind, parseDelimited, previewKind, readLayout, resourceError, shortSize, validName, walk, type ResourceNode } from '../src/resources-model.js';
+import { ancestors, canDrop, clampWidth, DEFAULT_LAYOUT, fileStats, find, footerText, iconKind, parseDelimited, previewKind, readLayout, readShowArchived, resourceError, shortSize, splitArchived, validName, walk, type ResourceNode } from '../src/resources-model.js';
 
 const tree: ResourceNode[] = [
   { name: 'Trip', path: 'Trip', type: 'folder', modifiedAt: '', conversationId: 'conv-1', children: [
@@ -26,6 +26,42 @@ test('tree helpers: walk, find, ancestors, and where a drag may drop', () => {
   assert.equal(canDrop('Trip', 'Trip/Data'), false, 'not into itself');
   assert.equal(canDrop('Trip', 'Trip'), false);
   assert.equal(canDrop('Archive', ''), false);
+});
+
+test('archived conversations: their folders leave the tree (with their files), user folders stay; nothing else changes', () => {
+  const nested: ResourceNode[] = [
+    ...tree,
+    { name: 'Old trip', path: 'Old trip', type: 'folder', modifiedAt: '', conversationId: 'conv-2', children: [{ name: 'plan.md', path: 'Old trip/plan.md', type: 'file', bytes: 100, modifiedAt: '' }] },
+    // A conversation folder the user moved into one of their folders.
+    { name: 'Projects', path: 'Projects', type: 'folder', modifiedAt: '', children: [
+      { name: 'Q3', path: 'Projects/Q3', type: 'folder', modifiedAt: '', conversationId: 'conv-3', children: [{ name: 'q3.csv', path: 'Projects/Q3/q3.csv', type: 'file', bytes: 50, modifiedAt: '' }] },
+      { name: 'keep.txt', path: 'Projects/keep.txt', type: 'file', bytes: 5, modifiedAt: '' },
+    ] },
+  ];
+  const before = JSON.stringify(nested);
+  const split = splitArchived(nested, ['Old trip', 'Projects/Q3']);
+  assert.deepEqual([...walk(split.visible)].map(n => n.path), ['Trip', 'Trip/Data', 'Trip/Data/a.csv', 'Trip/notes.md', 'Archive', 'Projects', 'Projects/keep.txt']);
+  assert.deepEqual(split.archived.map(n => n.path), ['Old trip', 'Projects/Q3'], 'in tree order, with their content');
+  assert.deepEqual([...walk(split.archived)].map(n => n.path), ['Old trip', 'Old trip/plan.md', 'Projects/Q3', 'Projects/Q3/q3.csv']);
+  assert.equal(JSON.stringify(nested), before, 'the tree itself is left as it was');
+  // A user folder named like an archived path is not touched unless it is listed; a file never is.
+  assert.deepEqual(splitArchived(nested, ['Projects/keep.txt']).archived, []);
+  // Nothing archived, or an older server without the field: everything shows.
+  for (const archived of [[], undefined]) { const all = splitArchived(nested, archived); assert.equal(all.visible.length, nested.length); assert.deepEqual(all.archived, []); }
+  // Restored: the folder is back in the normal tree.
+  assert.ok(splitArchived(nested, ['Projects/Q3']).visible.some(n => n.path === 'Old trip'));
+});
+
+test('the footer counts only the files shown, and says how many archived folders are hidden', () => {
+  const nested: ResourceNode[] = [...tree, { name: 'Old', path: 'Old', type: 'folder', modifiedAt: '', conversationId: 'conv-2', children: [{ name: 'x.md', path: 'Old/x.md', type: 'file', bytes: 1024, modifiedAt: '' }] }];
+  const split = splitArchived(nested, ['Old']);
+  assert.deepEqual(fileStats(split.visible), { files: 2, bytes: 2058 });
+  assert.equal(footerText(split.visible, split.archived.length), '2 files, 2 KB · 1 archived hidden');
+  assert.equal(footerText([...split.visible, ...split.archived], 0), '3 files, 3 KB', 'shown: counted, nothing hidden');
+  assert.equal(footerText([], 2), '0 files, 0 B · 2 archived hidden');
+  assert.equal(footerText([{ name: 'a', path: 'a', type: 'file', bytes: 1, modifiedAt: '' }], 0), '1 file, 1 B');
+  // The toggle is off unless it was turned on.
+  assert.equal(readShowArchived(null), false); assert.equal(readShowArchived('false'), false); assert.equal(readShowArchived('true'), true); assert.equal(readShowArchived('{'), false);
 });
 
 test('names are validated like the server does', () => {

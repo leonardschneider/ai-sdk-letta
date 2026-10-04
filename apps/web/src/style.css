@@ -492,6 +492,14 @@ body[data-resizing] iframe { pointer-events: none; }
 .res-row:hover .res-size, .res-row[data-menu-open] .res-size { display: none; }
 .res-menu:hover { background: var(--active); color: var(--text); }
 @media (hover: none) { .res-menu { opacity: 1; } .res-row:hover .res-size { display: inline; } }
+.res-archived { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.res-archived-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; border: 0; background: transparent; padding: 3px 6px; border-radius: 7px; color: var(--text-3); font-size: 12px; font-weight: 600; text-align: left; }
+.res-archived-toggle:hover { background: var(--hover); color: var(--text-2); }
+.res-archived-toggle:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--focus); }
+.res-archived-group .res-row { color: var(--text-2); }
+.res-archived-group .res-icon { opacity: .6; }
+.res-archived-group .res-icon[data-kind="folder"], .res-archived-group .res-icon[data-kind="conversation"] { color: var(--text-3); }
+.res-archived-group .res-badge { color: var(--text-3); }
 .res-placeholder { color: var(--text-3); font-size: 12.5px; font-style: italic; min-height: 26px; }
 .res-editing { background: var(--bg-elev); }
 .res-input { margin: 0; padding: 2px 6px; font-size: 13.5px; }
