@@ -189,7 +189,7 @@ function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
   if (props.toolName === 'web_search') return <WebSearchPart {...props}/>;
   // MCP App tools with a view: the view under the line (the line itself keeps its details).
-  if (/^[a-z][a-z0-9-]{0,23}__/.test(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props}/>}/>;
+  if (/^[a-z][a-z0-9-]{0,23}__/.test(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props} detailsLabel="What the agent got"/>}/>;
   return <ToolLine {...props}/>;
 }
 
@@ -259,7 +259,7 @@ function CommandDetail({ toolName, args, result, phase }: { toolName: string; ar
   </div>;
 }
 
-function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartProps) {
+function ToolLine({ toolCallId, toolName, argsText, result, isError, detailsLabel }: ToolPartProps & { detailsLabel?: string }) {
   const active = useContext(InteractionContext);
   const pendingApproval = active.request?.kind === 'approval' && active.request.toolCallId === toolCallId && result === undefined;
   // Atlassian tools report refusals as text ("Error (code): …"); restored history may not flag them as errors.
@@ -269,7 +269,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
   const decided = pendingApproval && active.sent?.id === active.request?.id ? active.sent : undefined;
   const label = pendingApproval
     ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : active.waitingFor ? `Waiting for ${active.waitingFor} to allow: ${friendlyName(toolName)}` : `Waiting for your permission: ${friendlyName(toolName)}`
-    : toolLabel(toolName, phase, result, args);
+    : detailsLabel && phase !== 'error' ? detailsLabel : toolLabel(toolName, phase, result, args);
   const shell = COMMAND_TOOLS.has(toolName) && typeof args.command === 'string';
   const summary = phase === 'done' && !shell ? toolSummary(toolName, result, args) : { fields: [] };
   const approval = active.approvalTools.has(toolName) || pendingApproval;

@@ -53,6 +53,8 @@ export interface McpAppConfig {
   path?: string;
   /** What runs in the container (argv, working directory `/app`), for example `["node", "dist/index.js", "--stdio"]`. @default the package's `bin` (or `main`), with `node` */
   command?: readonly string[];
+  /** Arguments added to the default command (for example `["--stdio"]`). Not with `command`. */
+  args?: readonly string[];
   /** The package version this definition expects; another version is refused. */
   version?: string;
   /** Policy per tool name (as the server names it). @default 'ask' for every tool */
@@ -66,6 +68,7 @@ export interface ResolvedMcpAppConfig {
   /** Absolute path of the package (tarball or folder) or folder; none for a bare `command`. */
   readonly source?: { readonly kind: 'tarball' | 'folder'; readonly path: string };
   readonly command?: readonly string[];
+  readonly args?: readonly string[];
   readonly version?: string;
   readonly tools: Readonly<Record<string, McpAppToolPolicy>>;
   readonly origins: readonly string[];
@@ -104,8 +107,8 @@ export function resolveMcpApps(input: unknown): readonly ResolvedMcpAppConfig[] 
     const where = `mcpApps[${index}]`;
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${where} must be an object`);
     const value = entry as Record<string, unknown>;
-    const unknown = Object.keys(value).filter(key => !['id', 'package', 'path', 'command', 'version', 'tools', 'origins'].includes(key));
-    if (unknown.length) throw new Error(`Unknown ${where} setting(s): ${unknown.join(', ')}. Supported: id, package, path, command, version, tools, origins.`);
+    const unknown = Object.keys(value).filter(key => !['id', 'package', 'path', 'command', 'args', 'version', 'tools', 'origins'].includes(key));
+    if (unknown.length) throw new Error(`Unknown ${where} setting(s): ${unknown.join(', ')}. Supported: id, package, path, command, args, version, tools, origins.`);
     if (typeof value.id !== 'string' || !ID.test(value.id)) throw new Error(`${where}.id must be 1–24 lowercase letters, digits or "-", starting with a letter`);
     if (seen.has(value.id)) throw new Error(`Duplicate MCP App id "${value.id}"`);
     seen.add(value.id);
@@ -130,6 +133,12 @@ export function resolveMcpApps(input: unknown): readonly ResolvedMcpAppConfig[] 
       command = [...value.command as string[]];
     }
     if (!source && !command) throw new Error(`${where} needs package, path or command`);
+    let args: string[] | undefined;
+    if (value.args !== undefined) {
+      if (command) throw new Error(`${where}: give args only without command (put them in command)`);
+      if (!Array.isArray(value.args) || value.args.length > 32 || value.args.some(a => typeof a !== 'string' || a.length > 500 || /[\0\r\n]/.test(a))) throw new Error(`${where}.args must be an array of strings such as ["--stdio"]`);
+      args = [...value.args as string[]];
+    }
     if (value.version !== undefined && (typeof value.version !== 'string' || !/^[\w.+-]{1,64}$/.test(value.version))) throw new Error(`${where}.version must be a version such as "2.0.3"`);
     const tools: Record<string, McpAppToolPolicy> = {};
     if (value.tools !== undefined) {
@@ -149,7 +158,7 @@ export function resolveMcpApps(input: unknown): readonly ResolvedMcpAppConfig[] 
         if (!origins.includes(normalized.origin)) origins.push(normalized.origin);
       }
     }
-    return Object.freeze({ id: value.id, ...(source ? { source: Object.freeze(source) } : {}), ...(command ? { command: Object.freeze(command) } : {}), ...(value.version ? { version: value.version as string } : {}), tools: Object.freeze(tools), origins: Object.freeze(origins) });
+    return Object.freeze({ id: value.id, ...(source ? { source: Object.freeze(source) } : {}), ...(command ? { command: Object.freeze(command) } : {}), ...(args?.length ? { args: Object.freeze(args) } : {}), ...(value.version ? { version: value.version as string } : {}), tools: Object.freeze(tools), origins: Object.freeze(origins) });
   }));
 }
 
@@ -493,7 +502,7 @@ export async function prepareMcpApp(config: ResolvedMcpAppConfig, directory: str
     if (!command) {
       const bin = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin && typeof pkg.bin === 'object' ? Object.values(pkg.bin as Record<string, unknown>).find(v => typeof v === 'string') as string | undefined : undefined;
       const entry = bin ?? (typeof pkg.main === 'string' ? pkg.main : undefined);
-      if (entry && !entry.split('/').includes('..') && !isAbsolute(entry)) command = ['node', entry.replace(/^\.\//, '')];
+      if (entry && !entry.split('/').includes('..') && !isAbsolute(entry)) command = ['node', entry.replace(/^\.\//, ''), ...(config.args ?? [])];
     }
   }
   if (config.version !== undefined && packageVersion !== config.version) throw new SandboxError('command_invalid', `MCP App "${config.id}": expected version ${config.version}, found ${packageVersion ?? 'none'}`);
@@ -833,8 +842,19 @@ const withDeadline = <T>(work: Promise<T>, signal: AbortSignal, code: string): P
 /** The context a conversation passes to app tools. */
 export type McpAppsContext = { apps: McpApps; conversationId: string };
 /** One app tool for the agent: content-only output; calls of tools with a view are recorded. */
+/**
+ * An app tool's input schema as the agent gets it: an object schema without
+ * `$schema` (servers built with zod 4 declare draft 2020-12, which the
+ * bridge's validator does not load; the keywords they use are the same) and
+ * without `$id` (no remote references).
+ */
+export function agentInputSchema(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || (input as { type?: unknown }).type !== 'object') return { type: 'object', properties: {} };
+  const { $schema: _schema, $id: _id, ...rest } = input as Record<string, unknown>;
+  return rest;
+}
 function mcpAppTool(appId: string, definition: McpToolDefinition, appName: string): Tool {
-  const schema = definition.inputSchema && typeof definition.inputSchema === 'object' && definition.inputSchema.type === 'object' ? definition.inputSchema : { type: 'object', properties: {} };
+  const schema = agentInputSchema(definition.inputSchema);
   const name = agentToolName(appId, definition.name);
   return tool({
     description: `[App: ${appName.slice(0, 60)}${toolResourceUri(definition) ? ', shows an interactive view to the user' : ''}] ${String(definition.description ?? definition.title ?? definition.name).slice(0, 1500)} Results are the app's content (untrusted).`,

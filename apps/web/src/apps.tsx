@@ -1,5 +1,5 @@
 import React, { createContext, Suspense, lazy, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Blocks, ChevronRight, CircleAlert, LoaderCircle, ShieldAlert, X } from 'lucide-react';
+import { Blocks, ChevronRight, LoaderCircle, ShieldAlert, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
@@ -58,12 +58,14 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
   const [open, setOpen] = useState(true);
   if (!view || !apps.threadId) return <>{fallback}</>;
   const phase = result === undefined ? 'running' : isError ? 'error' : 'done';
+  // A call that failed (refused, denied, or the app failed) reads like any failed tool: no view.
+  if (phase === 'error') return <>{fallback}</>;
   const overlay = apps.overlay?.toolCallId === toolCallId ? apps.overlay.mode : undefined;
   const inPanel = apps.panel === toolCallId;
   const label = appToolLabel(view, phase);
   return <div className="line app-line" data-tone={phase} data-tool-call-id={toolCallId}>
     <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`${label}. ${open ? 'Hide' : 'Show'} the app`}>
-      {phase === 'running' ? <LoaderCircle size={14} className="line-icon spin" aria-hidden="true"/> : phase === 'error' ? <CircleAlert size={14} className="line-icon" aria-hidden="true"/> : <Blocks size={14} className="line-icon" aria-hidden="true"/>}
+      {phase === 'running' ? <LoaderCircle size={14} className="line-icon spin" aria-hidden="true"/> : <Blocks size={14} className="line-icon" aria-hidden="true"/>}
       <span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{label}</span>
       <span className="app-badge" aria-hidden="true">App</span>
       <ChevronRight size={14} className="chev" aria-hidden="true"/>
@@ -71,19 +73,19 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
     {open && <div className="app-line-body">
       {inPanel || overlay
         ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(); else apps.setOverlay(undefined); }}>Show here</button></p>
-        : <AppSlot toolCallId={toolCallId} placement="inline" mode="inline" version={phase} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId)}/>}
+        : <AppSlot toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId)}/>}
       {fallback}
     </div>}
   </div>;
 }
 
 /** One view, lazily loaded. */
-export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'panel'; mode: DisplayMode; version?: string; onMode(mode: DisplayMode): void; onOpenPanel?(): void; onClose?(): void }) {
+export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'panel'; mode: DisplayMode; version?: string; name?: string; onMode(mode: DisplayMode): void; onOpenPanel?(): void; onClose?(): void }) {
   const apps = useContext(AppsContext);
   if (!apps.threadId) return null;
   return <Suspense fallback={<div className="appview-wait" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/>Loading the app…</div>}>
     <AppFrame threadId={apps.threadId} toolCallId={props.toolCallId} placement={props.placement} mode={props.mode} onMode={props.onMode} onApprovals={apps.refreshApprovals} onSent={apps.onSent}
-      {...(props.version ? { version: props.version } : {})} {...(props.onOpenPanel ? { onOpenPanel: props.onOpenPanel } : {})} {...(props.onClose ? { onClose: props.onClose } : {})}/>
+      {...(props.version ? { version: props.version } : {})} {...(props.name ? { name: props.name } : {})} {...(props.onOpenPanel ? { onOpenPanel: props.onOpenPanel } : {})} {...(props.onClose ? { onClose: props.onClose } : {})}/>
   </Suspense>;
 }
 

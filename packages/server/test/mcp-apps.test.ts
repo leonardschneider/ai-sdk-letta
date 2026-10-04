@@ -52,6 +52,8 @@ async function fixture(policies: Record<string, 'allow' | 'ask' | 'deny'> = {}) 
   // The agent calls the view tool once (as the tool bridge would), in the thread's conversation.
   const conversationId = runtime.conversationOf('owner', thread)!;
   await apps.callAsAgent('test__show', { label: 'hi' }, { conversationId, toolCallId: 'call-1' });
+  // OpenAI-style IDs carry a '|'.
+  await apps.callAsAgent('test__show', { label: 'openai' }, { conversationId, toolCallId: 'call_A0Td5zq|fc_05dd421' });
   return { runtime, apps, gate, thread, turns, directory, cleanup: async () => { await runtime.close(); await apps.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
@@ -77,9 +79,12 @@ test('instances: one origin per view, served once, CSP computed on the server', 
     }
     assert.equal(f.gate.sandboxPage(token).status, 410, 'single use');
     assert.equal(f.gate.sandboxPage('0'.repeat(32)).status, 404);
+    const openai = await f.gate.instance('owner', f.thread, { toolCallId: 'call_A0Td5zq|fc_05dd421' }) as { result: { structuredContent: { label: string } } };
+    assert.equal(openai.result.structuredContent.label, 'openai');
+    await assert.rejects(f.gate.instance('owner', f.thread, { toolCallId: '../x' }), /invalid_input/);
     // Another thread, or another owner, cannot mint a view of this call.
     const other = randomUUID(); await f.runtime.create('owner', other, 'Other');
-    await assert.rejects(f.gate.instance('owner', other, { toolCallId: 'call-1' }), /not_found/);
+    assert.deepEqual(await f.gate.instance('owner', other, { toolCallId: 'call-1' }), { status: 'none' }, 'nothing minted for a call of another thread');
     await assert.rejects(f.gate.instance('intruder', f.thread, { toolCallId: 'call-1' }), /forbidden/);
   } finally { await f.cleanup(); }
 });

@@ -91,7 +91,7 @@ export {
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';
 export {
-  McpApps, McpAppRecords, McpAppError, ProcessStdioTransport, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
+  McpApps, McpAppRecords, McpAppError, ProcessStdioTransport, agentInputSchema, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
   mcpAppConnector, containerLauncher, mcpAppRunArgs, prepareMcpApp, prepareMcpApps, MCP_APP_LIMITS, MCP_APPS_CONTEXT, MCP_APP_PROXY_PORT,
   type McpAppConfig, type ResolvedMcpAppConfig, type McpAppToolPolicy, type McpToolDefinition, type McpToolVisibility, type McpAppCspDomains, type McpCallResult, type McpAppClient, type McpAppConnector,
   type McpAppRuntime, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppsOptions, type McpAppsContext,

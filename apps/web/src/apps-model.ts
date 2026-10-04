@@ -14,6 +14,9 @@ export type AppInstance = {
   result?: { content?: unknown[]; structuredContent?: Record<string, unknown>; isError?: boolean; [key: string]: unknown };
   reason?: string; at: string; truncated?: boolean; changed?: boolean;
 };
+/** The instance route's answer when the call is not recorded (yet). */
+export type NoInstance = { status: 'none' };
+
 /** An app action waiting for a person (`GET /v1/threads/:id/apps/approvals`). */
 export type AppApprovalView = {
   id: string; kind: 'call' | 'message' | 'context'; threadId: string; app: string; appName: string; toolCallId: string; createdAt: string; expiresAt: string;

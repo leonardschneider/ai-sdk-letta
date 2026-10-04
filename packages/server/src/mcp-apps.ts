@@ -170,10 +170,12 @@ export class AppGate {
    */
   async instance(owner: string, threadId: string, input: unknown): Promise<Record<string, unknown>> {
     const { toolCallId, placement } = (input ?? {}) as { toolCallId?: unknown; placement?: unknown };
-    if (typeof toolCallId !== 'string' || !/^[\w.:-]{1,200}$/.test(toolCallId)) throw new RuntimeFault('invalid_input', 400);
+    // Tool call IDs come from the model provider (OpenAI: `call_…|fc_…`); they only ever select a record of this thread.
+    if (typeof toolCallId !== 'string' || !/^[\w.:|+=-]{1,300}$/.test(toolCallId)) throw new RuntimeFault('invalid_input', 400);
     const conversations = this.options.runtime.conversationsOf(owner, threadId);
     const record = this.apps.records.get(toolCallId, conversations);
-    if (!record) throw new RuntimeFault('not_found', 404);
+    // Not recorded (yet): the call may only be starting. Nothing is minted; the page asks again while the call runs.
+    if (!record) return { status: 'none' };
     const config = this.apps.config(record.app);
     if (!config) throw new RuntimeFault('app_unknown', 404);
     if (!this.apps.enabled(record.app)) throw new RuntimeFault('app_disabled', 409);

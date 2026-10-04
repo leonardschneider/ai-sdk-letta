@@ -5,7 +5,8 @@ import { writeFileSync } from 'node:fs';
 if (process.argv[2]) writeFileSync(process.argv[2], String(process.pid));
 const VIEW = 'ui://test/view.html';
 const tools = [
-  { name: 'show', title: 'Show', description: 'Shows the view.', inputSchema: { type: 'object', properties: { label: { type: 'string' } } }, _meta: { ui: { resourceUri: VIEW } } },
+  // As servers built with zod 4 declare it: draft 2020-12.
+  { name: 'show', title: 'Show', description: 'Shows the view.', inputSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { label: { type: 'string' }, size: { type: 'number' } }, additionalProperties: false }, _meta: { ui: { resourceUri: VIEW } } },
   { name: 'record', description: 'App only.', inputSchema: { type: 'object', properties: { note: { type: 'string' } } }, _meta: { ui: { resourceUri: VIEW, visibility: ['app'] } } },
   { name: 'secret', description: 'Model only.', inputSchema: { type: 'object', properties: {} }, _meta: { ui: { visibility: ['model'] } } },
   { name: 'plain', description: 'No metadata.', inputSchema: { type: 'object', properties: {} } },

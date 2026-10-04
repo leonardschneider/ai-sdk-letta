@@ -3,7 +3,7 @@ import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client';
 import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
-import { acceptFrameMessage, approvalError, hostContext, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, type AppApprovalView, type AppInstance, type DisplayMode, type Placement } from './apps-model.js';
+import { acceptFrameMessage, approvalError, hostContext, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
 
 /**
  * One MCP App view (spec 2026-01-26): the view's HTML in a sandbox proxy
@@ -57,13 +57,15 @@ export type AppFrameProps = {
   onClose?(): void;
   /** Its server-side record changed (a call finished): render again. */
   version?: string;
+  /** The app's name, shown while it loads. */
+  name?: string;
 };
 
 /**
  * The frame of one view and its bridge. Teardown (unmount, reload, mode
  * change of another instance) sends `ui/resource-teardown` first.
  */
-export default function AppFrame({ threadId, toolCallId, placement, mode, onMode, onOpenPanel, onApprovals, onSent, onClose, version }: AppFrameProps) {
+export default function AppFrame({ threadId, toolCallId, placement, mode, onMode, onOpenPanel, onApprovals, onSent, onClose, version, name: knownName }: AppFrameProps) {
   const frame = useRef<HTMLIFrameElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number>(INLINE_HEIGHT.initial);
@@ -82,10 +84,21 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
     const onTheme = () => { void bridge?.sendHostContextChange({ theme: theme() }); };
     (async () => {
       let instance: AppInstance;
-      try { instance = await api<AppInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement }); }
+      try {
+        // A call that is starting is recorded a moment later: ask again while it runs (a finished call is there at once).
+        let answer: AppInstance | NoInstance;
+        for (let attempt = 0; ; attempt++) {
+          answer = await api<AppInstance | NoInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement });
+          if ((answer as AppInstance).instance || disposed || version !== 'running' || attempt >= 40) break;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        if (disposed) return;
+        if (!(answer as AppInstance).instance) { setState({ phase: 'failed', error: version === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
+        instance = answer as AppInstance;
+      }
       catch (error) {
         const code = errorCode(error);
-        if (!disposed) setState({ phase: 'failed', error: code === 'app_disabled' ? 'This app is disabled.' : code === 'app_unavailable' ? 'The app is not running. It may still be starting, or it failed to start (see Apps).' : code === 'not_found' ? 'This app’s view is no longer available.' : 'Couldn’t load the app.' });
+        if (!disposed) setState({ phase: 'failed', error: code === 'app_disabled' ? 'This app is disabled.' : code === 'app_unavailable' ? 'The app is not running. It may still be starting, or it failed to start (see Apps).' : code === 'not_found' ? 'No view for this call: it did not run, or it is no longer available.' : 'Couldn’t load the app.' });
         return;
       }
       if (disposed) return;
@@ -177,7 +190,7 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
   const fixed = placement === 'panel' || mode !== 'inline';
   const canFullscreen = !declared || declared.includes('fullscreen');
   const canPip = !!declared?.includes('pip');
-  const name = state.instance?.app.name ?? 'App';
+  const name = state.instance?.app.name ?? knownName ?? 'App';
   return <div className="appview" data-placement={placement} data-mode={mode} data-border={state.instance?.prefersBorder === false ? 'none' : undefined} data-phase={state.phase}>
     <div className="appview-bar">
       <span className="app-badge" title="An interactive view of an MCP App: its content comes from the app">App</span>

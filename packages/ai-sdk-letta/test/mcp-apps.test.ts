@@ -194,6 +194,9 @@ test('apps: the agent sees content only (bounded); structuredContent is recorded
   try {
     const { tools, permissions } = apps.agentTools();
     const bridge = createToolBridge({ tools, permissions, context: () => ({ [MCP_APPS_CONTEXT]: { apps, conversationId: 'conv-1' } }) });
+    // canUseTool validates against the tool's schema (a draft 2020-12 schema must not make it fail closed).
+    assert.deepEqual(await bridge.canUseTool('test__show', { label: 'hello' }), { behavior: 'allow' });
+    assert.equal((await bridge.canUseTool('test__show', { label: 'hello', extra: 1 })).behavior, 'deny', 'still validated');
     const out = await bridge.execute('test__show', 'call-1', { label: 'hello' });
     assert.equal(out.isError, false);
     assert.deepEqual(out.content, [{ type: 'text', text: 'shown hello' }]);

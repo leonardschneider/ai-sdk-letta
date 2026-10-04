@@ -55,23 +55,28 @@ const webDev = process.env.WEBDEV === '1';
  * views of MCP servers, installed from local package tarballs (`npm pack`)
  * or folders; never from a URL. Each path may be prefixed with an ID
  * (`clock=./clock-1.0.0.tgz`); otherwise one is derived from the file name.
- * Every app tool asks before it runs, and each runs in its own container
- * without network (MCP_APPS_IMAGE: Node and Python, built once, about
- * 100 MB). See "MCP Apps" in the README.
+ * Arguments for the server follow a space (`basic=./basic.tgz --stdio`).
+ * For anything else (policies, origins, version), MCP_APPS can be the JSON
+ * of the `mcpApps` option. Every app tool asks before it runs unless its
+ * policy says otherwise, and each app runs in its own container without
+ * network (MCP_APPS_IMAGE: Node and Python, built once, about 220 MB). See
+ * "MCP Apps" in the README.
  */
 function mcpApps(): McpAppConfig[] {
   const raw = process.env.MCP_APPS?.trim();
   if (!raw) return [];
+  if (raw.startsWith('[')) return JSON.parse(raw) as McpAppConfig[];
   const used = new Set<string>();
   return raw.split(',').map(s => s.trim()).filter(Boolean).map(entry => {
-    const named = /^([a-z][a-z0-9-]{0,23})=(.+)$/.exec(entry);
-    const path = named ? named[2]! : entry;
+    const [spec = '', ...args] = entry.split(/\s+/);
+    const named = /^([a-z][a-z0-9-]{0,23})=(.+)$/.exec(spec);
+    const path = named ? named[2]! : spec;
     const derived = (path.split('/').filter(Boolean).pop() ?? 'app').replace(/\.tgz$/i, '').replace(/^modelcontextprotocol-/, '').replace(/-\d+\.\d+\.\d+.*$/, '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^[^a-z]+/, '').slice(0, 24).replace(/-+$/, '');
     let id = named?.[1] ?? (derived || 'app');
     for (let n = 2; used.has(id); n++) id = `${id.slice(0, 21)}-${n}`;
     used.add(id);
-    // A tarball or a folder with a package.json is a package; any other folder is a plain path.
-    return { id, package: path };
+    // A tarball or a package folder; extra arguments go to the package's own command (its bin).
+    return { id, package: path, ...(args.length ? { args } : {}) };
   });
 }
 const apps = mcpApps();

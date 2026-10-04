@@ -782,8 +782,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     closePanel: () => setAppPanel(undefined),
     setOverlay: value => { if (value && appPanel === value.toolCallId) setAppPanel(undefined); setAppOverlay(value); },
     refreshApprovals: refreshAppApprovals,
-    // A message the view sent (allowed) starts a turn here: follow it.
-    onSent: () => { void refreshView().catch(() => {}); setTimeout(() => void refreshView().catch(() => {}), 800); },
+    // A message the view sent (allowed) starts a turn here: the long poll follows it (a refresh here could hold the runtime while you send).
+    onSent: () => {},
   };
   return <AppsContext.Provider value={appsState}>
   <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer, ...(waitingFor ? { waitingFor } : {}) }}>
@@ -828,7 +828,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                       {!readOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
-                <AppApprovalCards approvals={appApprovals} onDecided={() => { refreshAppApprovals(); void refreshView().catch(() => {}); }}/>
+                <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals}/>
                 {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">
