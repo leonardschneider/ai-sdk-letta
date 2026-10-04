@@ -440,6 +440,18 @@ export function containerLauncher(config: Pick<ResolvedSandboxConfig, 'provider'
 }
 
 /**
+ * Prepare a definition's MCP Apps ahead of the first start: build the
+ * runtime image (once per machine) and remove stale containers. Optional;
+ * the server does the same when it starts the apps.
+ */
+export async function prepareMcpApps(sandbox: Pick<ResolvedSandboxConfig, 'provider' | 'binary'> | { provider: unknown; binary?: string }, log?: (line: string) => void): Promise<void> {
+  const cli = cliOf(sandbox as Pick<ResolvedSandboxConfig, 'provider' | 'binary'>);
+  if (!cli) return;
+  await sweepStaleSandboxes(sandbox as Pick<ResolvedSandboxConfig, 'provider' | 'binary'>);
+  await ensureImage(cli, MCP_APPS_IMAGE, log);
+}
+
+/**
  * Unpack (tarballs) and check an app's files: `<directory>/<id>/<sha>/package`,
  * the package version against `version`, and the default command from its
  * `bin` or `main`. Tarball entries that would leave the folder are refused.
