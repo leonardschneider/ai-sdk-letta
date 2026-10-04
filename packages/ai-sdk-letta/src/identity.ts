@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -11,7 +11,9 @@ import { join } from 'node:path';
  * `namedOnly`: the mapping was created by a version that never uses the
  * `default` conversation, so pickers do not offer it (it is empty).
  */
-export type Identity = { version: 2; definitionId: string; name: string; backend: string; agentId: string; conversationId?: string; namedOnly?: true };
+export type Identity = { version: 2; definitionId: string; name: string; backend: string; agentId: string; conversationId?: string; namedOnly?: true;
+  /** The definition adopted an existing agent in place (see `AgentDefinition.adopt`): it was never created here, and its `default` conversation is offered. */
+  adopted?: true; adoptedAt?: string };
 
 /** Letta conversation IDs accepted by this library (`default` is the agent's default conversation). */
 export const validConversationId = (id: string): boolean => id === 'default' || /^(?:conv-|local-conv-)[a-zA-Z0-9-]+$/.test(id);
@@ -23,6 +25,38 @@ export interface IdentityBackend {
   create(): Promise<string>;
   /** Confirm the mapped agent still exists and matches; throw otherwise. */
   validate(id: string): Promise<void>;
+  /**
+   * Adopt this existing agent instead of creating one (see
+   * `AgentDefinition.adopt`). `create` is then never called, and a mapping
+   * that names another agent is refused.
+   */
+  adopt?: string;
+}
+
+/** The other logical IDs whose mapping in `directory` names `agentId` (an agent belongs to one definition at a time). */
+export function claimsOf(directory: string, agentId: string, except?: string): string[] {
+  let names: string[] = [];
+  try { names = readdirSync(directory).filter(name => /^[a-z0-9-]+\.json$/.test(name)); } catch { return []; }
+  return names.flatMap(name => {
+    const id = name.slice(0, -5);
+    if (id === except) return [];
+    try { const stored = JSON.parse(readFileSync(join(directory, name), 'utf8')) as { agentId?: unknown; definitionId?: unknown }; return stored.agentId === agentId ? [id] : []; } catch { return []; }
+  });
+}
+
+/**
+ * Forget a definition's mapping (an adopted agent removed from the app). The
+ * Letta agent is never touched. Refused while the identity is locked or has
+ * an uncertain creation or turn.
+ * @returns whether a mapping was removed
+ */
+export function forgetIdentity(directory: string, definitionId: string): boolean {
+  if (!/^[a-z0-9-]+$/.test(definitionId)) throw new Error('Invalid logical agent identity');
+  const base = join(directory, definitionId);
+  let names: string[] = [];
+  try { names = readdirSync(directory); } catch { return false; }
+  if (names.some(name => name === `${definitionId}.lock` || (name.startsWith(`${definitionId}.`) && name.endsWith('.pending.json')))) throw new Error('identity_busy');
+  try { unlinkSync(`${base}.json`); return true; } catch { return false; }
 }
 
 /** Handle returned by {@link acquireIdentity}. Holds an exclusive lock until `release()`. */
@@ -74,6 +108,7 @@ export async function acquireIdentity(directory: string, definition: { id: strin
     if (exists(conversationPending)) throw new Error(`Unresolved conversation creation intent: ${conversationPending}. Reconcile with backend before continuing; refusing to create a duplicate.`);
     let identity: Identity;
     let migrate = false;
+    let adoptedNow = false;
     const save = () => {
       if (released) throw new Error('Identity lock already released');
       durableWrite(`${file}.new`, identity);
@@ -82,9 +117,21 @@ export async function acquireIdentity(directory: string, definition: { id: strin
     };
     if (exists(file)) {
       const stored = read(file);
-      if (![1, 2].includes(stored.version) || stored.definitionId !== definition.id || stored.name !== definition.name || stored.backend !== backend || (stored.conversationId !== undefined && (typeof stored.conversationId !== 'string' || !validConversationId(stored.conversationId))) || (stored.conversationId === undefined && stored.namedOnly !== true) || (stored.namedOnly !== undefined && stored.namedOnly !== true) || (stored.version === 1 && stored.conversationId !== 'default') || !validLocalAgentId(stored.agentId)) throw new Error('Invalid identity mapping or backend mismatch; refusing to recreate agent');
+      if (![1, 2].includes(stored.version) || stored.definitionId !== definition.id || stored.name !== definition.name || stored.backend !== backend || (stored.conversationId !== undefined && (typeof stored.conversationId !== 'string' || !validConversationId(stored.conversationId))) || (stored.conversationId === undefined && stored.namedOnly !== true && stored.adopted !== true) || (stored.namedOnly !== undefined && stored.namedOnly !== true) || (stored.version === 1 && stored.conversationId !== 'default') || !validLocalAgentId(stored.agentId)) throw new Error('Invalid identity mapping or backend mismatch; refusing to recreate agent');
+      if (api.adopt !== undefined && stored.agentId !== api.adopt) throw new Error('The mapping of this definition names another agent; refusing to adopt');
       migrate = stored.version === 1;
       identity = { ...stored, version: 2 };
+    } else if (api.adopt !== undefined) {
+      // Adopt in place: map the existing agent; nothing is created, ever.
+      if (!validLocalAgentId(api.adopt)) throw new Error('Invalid adopted agent ID');
+      const claimed = claimsOf(directory, api.adopt, definition.id);
+      if (claimed.length) throw new Error(`agent_claimed: this agent is already used by ${claimed.join(', ')}`);
+      await api.validate(api.adopt);
+      identity = { version: 2, definitionId: definition.id, name: definition.name, backend, agentId: api.adopt, adopted: true, adoptedAt: new Date().toISOString() };
+      durableWrite(`${file}.new`, identity);
+      renameSync(`${file}.new`, file);
+      syncDirectory();
+      adoptedNow = true;
     } else {
       durableWrite(pending, { definitionId: definition.id, name: definition.name, backend, createdAt: new Date().toISOString(), state: 'creation-uncertain' });
       const agentId = await api.create();
@@ -97,7 +144,7 @@ export async function acquireIdentity(directory: string, definition: { id: strin
       syncDirectory();
       unlinkSync(pending);
     }
-    await api.validate(identity.agentId);
+    if (!adoptedNow) await api.validate(identity.agentId);
     if (migrate) save();
     const selectConversation = (id: string) => {
       if (!validConversationId(id)) throw new Error('Invalid conversation ID');

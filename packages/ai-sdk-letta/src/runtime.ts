@@ -19,6 +19,7 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
+import { adoptionRefusal, lettaCodeActivity } from './adoption.js';
 import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
 import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
 import { MemoryJournal } from './memory-journal.js';
@@ -319,8 +320,15 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
   })();
   try {
     const backend = localBackendDirectory();
+    // Adopted agents (made elsewhere, such as Letta Code) are opened in place: never created, and refused while Letta Code uses them.
+    if (definition.adopt) {
+      const activity = lettaCodeActivity(definition.adopt.agentId, { backendDirectory: backend });
+      if (activity.active) throw new Error(`letta_code_active: ${activity.reason}`);
+    }
     const lease = await acquireIdentity(cwd, definition, backend, {
+      ...(definition.adopt ? { adopt: definition.adopt.agentId } : {}),
       create: async () => {
+        if (definition.adopt) throw new Error('An adopted agent is never created');
         const models = await client.models.list();
         if (!models.entries.some(model => model.handle === definition.model)) throw new Error(`Model "${definition.model}" is not available on the local Letta backend; connect its provider first`);
         return client.createAgent(creationOptions(definition, cwd));
@@ -330,7 +338,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const inspector = managementClient();
         try {
           const agent = await inspector.agents.retrieve(id);
-          if (agent.id !== id || agent.name !== definition.name) throw new Error('Mapped agent identity mismatch; refusing to recreate');
+          if (definition.adopt) { const refused = adoptionRefusal(agent); if (refused || agent.id !== id) throw new Error(refused ?? 'agent_missing'); }
+          else if (agent.id !== id || agent.name !== definition.name) throw new Error('Mapped agent identity mismatch; refusing to recreate');
           if (!agent.tags?.includes('git-memory-enabled')) throw new Error('Mapped agent has MemFS disabled; refusing to continue');
         } finally { await inspector.close(); }
       },
@@ -370,7 +379,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     // The memory guard is created with the first conversation (it needs the memory directory) and shared by all.
     const guardFor = (journal: MemoryJournal) => guard ??= (() => {
       const created = MemoryGuard.open({ journal, settings: { protected: definition.memory.protected, reviewer: definition.memory.reviewer, reviewTimeoutMs: definition.memory.reviewTimeoutMs },
-        ...(reviewer ? { reviewer } : {}), ...(guardEvents ? { events: guardEvents } : {}), file: join(paths.memory, `${identity.agentId}.reviews.json`) });
+        ...(reviewer ? { reviewer } : {}), ...(guardEvents ? { events: guardEvents } : {}), file: join(paths.memory, `${identity.agentId}.reviews.json`),
+        ...(definition.adopt ? { adopted: { email: `${identity.agentId}@letta.com`, ...(identity.adoptedAt ? { since: identity.adoptedAt } : {}) } } : {}) });
       created.watch();
       void created.resume();
       return created;
@@ -508,7 +518,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const live = session;
         const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
         assertHistorySettled(history.messages);
-        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening });
+        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
         // Dreams reviewed before they merge when the harness supports it (capability), otherwise right after.
@@ -621,7 +631,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             finally { await updater.close(); }
           },
         };
-        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening });
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         const harnessCommand = async (command: 'reflect', args = '') => {
           if (command !== 'reflect') throw new Error('Unsupported harness command');
           const response = await live.sendCommand<{ type: string; success?: boolean; output?: unknown; error?: unknown }>({ type: 'execute_command', command_id: command, runtime: { agent_id: identity.agentId, conversation_id: conversationId }, args: args.slice(0, 2000) }, { responseType: 'execute_command_response', timeoutMs: REQUEST_TIMEOUT_MS });
@@ -720,14 +730,14 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     const conversation = await host.openConversation(choice);
     const { live, conversationId } = conversation;
     // Navigation reads through this same mapped runtime; it never enumerates other agents.
-    let listedIds = new Set<string>(identity.namedOnly ? [] : ['default']);
+    let listedIds = new Set<string>(identity.namedOnly && !identity.adopted ? [] : ['default']);
     const navigation: NavigationSource = {
       agentId: identity.agentId, currentId: conversationId,
       list: async signal => {
         assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         const reader = managementClient(15_000);
         try {
-          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly);
+          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly || !!identity.adopted);
           listedIds = new Set(result.entries.map(entry => entry.id));
           return result;
         } finally { await reader.close(); }

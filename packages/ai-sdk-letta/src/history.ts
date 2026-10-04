@@ -126,7 +126,16 @@ export interface ProjectionOptions {
    * becomes `reasoning` parts. Without it, reasoning is omitted as before.
    */
   listening?: boolean;
+  /**
+   * Also show completed calls of tools that are not the app's (for example
+   * Letta Code's own tools in an adopted agent's conversations), as inert
+   * tool parts with a short text output (at most {@link FOREIGN_OUTPUT_LIMIT}
+   * characters). The app renders them as collapsed "Used <tool>" lines.
+   */
+  foreignTools?: boolean;
 }
+/** Longest output of a foreign tool call kept for display. */
+export const FOREIGN_OUTPUT_LIMIT = 2000;
 
 /** Display projection only. Never reconstruct the model's context from this.
  * Completed allowlisted app tools become inert output cards; everything else is
@@ -183,15 +192,18 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
         projected.push(listened);
         continue;
       }
-      if (!call || typeof id !== 'string' || typeof name !== 'string' || !appTools.includes(name) || shownCalls.has(id)) continue;
+      const foreign = !!options.foreignTools && typeof name === 'string' && /^[\w.:-]{1,64}$/.test(name) && !appTools.includes(name);
+      if (!call || typeof id !== 'string' || typeof name !== 'string' || (!appTools.includes(name) && !foreign) || shownCalls.has(id)) continue;
       const output = returns.get(id);
       if (!output || !['success', 'error'].includes(String(output.status))) continue;
       let input: unknown;
-      try { input = typeof call.arguments === 'string' ? JSON.parse(sanitizeText(call.arguments)) : JSON.parse(sanitizeText(JSON.stringify(call.arguments))); }
-      catch { continue; }
-      const text = textContent(output.tool_return);
+      try { input = typeof call.arguments === 'string' ? JSON.parse(sanitizeText(call.arguments)) : JSON.parse(sanitizeText(JSON.stringify(call.arguments ?? {}))); }
+      catch { if (!foreign) continue; input = {}; }
+      if (foreign && (input === null || typeof input !== 'object' || Array.isArray(input))) input = {};
+      const raw = typeof output.tool_return === 'string' || Array.isArray(output.tool_return) ? textContent(output.tool_return) : textContent(JSON.stringify(output.tool_return ?? ''));
+      const text = foreign && raw.length > FOREIGN_OUTPUT_LIMIT ? `${raw.slice(0, FOREIGN_OUTPUT_LIMIT)}… [truncated]` : raw;
       let value: unknown = text;
-      try { value = JSON.parse(text); } catch { /* text output */ }
+      if (!foreign) { try { value = JSON.parse(text); } catch { /* text output */ } }
       shownCalls.add(id);
       projected.push({ id: `history-${message.id}`, role: 'assistant', ...timestamp(row), parts: [{
         type: 'dynamic-tool', toolName: name, toolCallId: id, input,

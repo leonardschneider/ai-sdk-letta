@@ -31,8 +31,8 @@ export {
 export { dreamHookSupported, dreamHookCommand, parseDreamRequest, reviewDreamRequest, DREAM_HOOK_CAPABILITY, type DreamRequest, type DreamResponse } from './dream-review.js';
 export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenAgentsOf, transcriptsDirectory, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
 export { planRevert, changedBy, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
-export { acquireIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
-export { HISTORY_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
+export { acquireIdentity, claimsOf, forgetIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
+export { HISTORY_LIMIT, FOREIGN_OUTPUT_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
 export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler, type ApprovalPreview } from './interactions.js';
 export {
@@ -79,3 +79,8 @@ export { readPage, readableText, isBlockedAddress, checkPageUrl, PageError, PAGE
 export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUMMARIZER_NAME, type LettaSummarizerOptions } from './web-summarizer.js';
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
+export {
+  AdoptionStore, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
+  ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
+  type AdoptionRecord, type AdoptedToolSet, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
+} from './adoption.js';

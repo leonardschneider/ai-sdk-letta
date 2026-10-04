@@ -48,7 +48,7 @@ export type TurnProvenance = {
   /** Untrusted content the turn read. */
   sources: ContentSource[];
   /** Who wrote the change: the agent in a turn, reflection (dreaming), or the harness (rewind, review). */
-  writer: 'agent' | 'reflection' | 'harness';
+  writer: 'agent' | 'reflection' | 'harness' | 'letta-code';
   /** A person approved this change (a re-applied memory review). */
   approvedBy?: { id: string; name: string };
   /** The person a claim in this change named confirmed it (a re-applied claim confirmation). */
@@ -171,14 +171,14 @@ export function parseProvenanceTrailers(trailers: Readonly<Record<string, string
   const approved = /^([^ ]+) \((.*)\)$/.exec(trailers[PROVENANCE_TRAILERS.approvedBy] ?? '');
   const floor = trailers[PROVENANCE_TRAILERS.automationFloor];
   const confirmed = /^([^ ]+) \((.*)\)$/.exec(trailers[PROVENANCE_TRAILERS.confirmedBy] ?? '');
-  return { ...(confirmed ? { confirmedBy: { id: confirmed[1]!, name: confirmed[2]! } } : {}), actor, ...(trailers[PROVENANCE_TRAILERS.unattended] === 'yes' ? { unattended: true } : {}), sources, writer: writer === 'reflection' || writer === 'harness' ? writer : 'agent', ...(approved ? { approvedBy: { id: approved[1]!, name: approved[2]! } } : {}),
+  return { ...(confirmed ? { confirmedBy: { id: confirmed[1]!, name: confirmed[2]! } } : {}), actor, ...(trailers[PROVENANCE_TRAILERS.unattended] === 'yes' ? { unattended: true } : {}), sources, writer: writer === 'reflection' || writer === 'harness' || writer === 'letta-code' ? writer : 'agent', ...(approved ? { approvedBy: { id: approved[1]!, name: approved[2]! } } : {}),
     ...(trailers[PROVENANCE_TRAILERS.trustMode] === 'jiminy' ? { trustMode: true } : {}), ...(floor === 'accept' || floor === 'flag' || floor === 'ask_human' ? { automationFloor: floor } : {}) };
 }
 
 /** A short, human line of a provenance: "Alice (admin) · web research, report.pdf", "n8n · unattended". */
 export function provenanceLabel(provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer' | 'approvedBy' | 'trustMode' | 'confirmedBy'>): string {
   const { actor } = provenance;
-  const who = provenance.writer === 'reflection' ? 'Dreaming' : provenance.writer === 'harness' ? 'The app' : actor.kind === 'person' ? `${actor.name ?? actor.id ?? 'Someone'}${actor.role ? ` (${actor.role})` : ''}`
+  const who = provenance.writer === 'reflection' ? 'Dreaming' : provenance.writer === 'harness' ? 'The app' : provenance.writer === 'letta-code' ? 'From Letta Code' : actor.kind === 'person' ? `${actor.name ?? actor.id ?? 'Someone'}${actor.role ? ` (${actor.role})` : ''}`
     : actor.kind === 'automation' || actor.kind === 'schedule' ? `${actor.kind === 'schedule' ? 'Scheduled task' : actor.via ?? 'Automation'}${actor.name ? ` “${actor.name}”` : ''}` : 'The agent';
   const parts = [who];
   if (provenance.unattended) parts.push('unattended');
