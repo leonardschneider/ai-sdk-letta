@@ -4,7 +4,7 @@ import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, Mes
 import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
-import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, RemoveAgentDialog } from './adoption.js';
+import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ProjectDialog, RemoveAgentDialog } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -111,7 +111,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const filesEnabled = !!agent.files;
   // The Resources panel: files, or documents saved by integrations (Atlassian) without attachments.
-  const resourcesEnabled = filesEnabled || !!agent.resources;
+  // An agent with a project folder (mounted at /project) shows it there too, read-only.
+  const resourcesEnabled = filesEnabled || !!agent.resources || !!agent.project;
   const atlassianEnabled = !!agent.integrations?.includes('atlassian');
   const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
@@ -119,6 +120,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [adoptOpen, setAdoptOpen] = useState(false);
   const [removing, setRemoving] = useState<AgentInfo>();
   const [instructionsOf, setInstructionsOf] = useState<AgentInfo>();
+  const [projectOf, setProjectOf] = useState<AgentInfo>();
   const isAdmin = agent.role === 'admin';
   const [queue, setQueue] = useState<QueuedTurn[]>([]);
   const [liveAuthor, setLiveAuthor] = useState<Author>();
@@ -162,6 +164,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const previewOpen = webDevEnabled && (narrow ? previewDrawer : previewLayout.open);
   const togglePreview = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(open => !open); } else setPreviewLayout(l => ({ ...l, open: !l.open })); }, [narrow, setPreviewLayout]);
   const [turns, setTurns] = useState(0);
+  const [archives, setArchives] = useState(0);
   // Bumped whenever the server reports a change (long poll): memory reviews and toasts follow it.
   const [serverChanges, setServerChanges] = useState(0);
   const memoryPending = useMemoryToasts(memoryEnabled && !connecting && !unreachable, serverChanges + turns);
@@ -417,6 +420,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t));
     // The conversation's folder follows its title: refresh the Resources panel now.
     if (body.title !== undefined) setTurns(n => n + 1);
+    // Archived conversations' folders are hidden there: refresh it too.
+    if (body.archived !== undefined) setArchives(n => n + 1);
     return updated;
   }
   async function rename(id: string, title: string) {
@@ -798,7 +803,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf}/> } : {})}
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf}/> } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); }}/>
@@ -894,7 +899,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         </aside>}
         {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
           {!narrow && <Resizer label="Resize resources" min={RESOURCES_WIDTH.min} max={RESOURCES_WIDTH.max} width={layout.resourcesWidth} clamp={clampWidth} reset={320} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
-          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={turns} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
+          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
             onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
@@ -902,6 +907,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {adoptOpen && local && <AddAgentDialog onClose={() => setAdoptOpen(false)} onAdded={id => { setAdoptOpen(false); local.reload(id); }}/>}
         {removing && local && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(undefined)} onRemoved={() => { setRemoving(undefined); local.reload(); }}/>}
         {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
+        {projectOf && local && <ProjectDialog agent={projectOf} onClose={() => setProjectOf(undefined)} onSaved={() => { setProjectOf(undefined); local.reload(projectOf.id); }}/>}
         {memoryOpen && <MemoryDialog agentName={agent.name} admin={!team || isAdmin} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
         {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}

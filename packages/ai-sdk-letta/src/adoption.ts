@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { LettaAgent as LettaAgentState, LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { JIMINY_NAME } from './jiminy.js';
@@ -9,7 +10,7 @@ import { validLocalAgentId } from './temporary-agents.js';
 import type { ToolSet } from 'ai';
 import { defineAgent, type AgentDefinition, type DreamingSettings, type ToolPermission } from './definition.js';
 import { fileTools, FILE_TOOL_PERMISSIONS } from './file-tools.js';
-import { sandboxTools, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
+import { checkProjectFolder, projectNote, sandboxTools, SandboxError, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
 import { decisionTools, DECISION_TOOL_PERMISSIONS } from './decisions.js';
 import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from './web-search.js';
 import { askUserTool, ASK_USER_TOOL } from './tools.js';
@@ -45,6 +46,8 @@ export type AdoptionRecord = {
   adoptedAt: string;
   /** An approved instructions update: the system prompt before it, and after it (for a revert). */
   instructions?: { before: string; after: string; at: string };
+  /** Its project folder on this computer, as the person gave it (symlinks are resolved only for the mount): mounted read-write at `/project` in its sandbox. See {@link checkAdoptedProject}. */
+  project?: string;
 };
 type AdoptionFile = { version: 1; agents: AdoptionRecord[] };
 
@@ -226,13 +229,15 @@ export class AdoptionStore {
 export const INSTRUCTIONS_BEGIN = '<!-- ai-sdk-letta: begin -->';
 export const INSTRUCTIONS_END = '<!-- ai-sdk-letta: end -->';
 
-/** The ai-sdk-letta section of an adopted agent's instructions: the tools it has here, and the memory policy. */
-export function adoptedInstructionsSection(tools: readonly string[], memoryPolicy: string): string {
+/** The ai-sdk-letta section of an adopted agent's instructions: the tools it has here, its project folder (its name, when one is mounted), and the memory policy. */
+export function adoptedInstructionsSection(tools: readonly string[], memoryPolicy: string, project?: string): string {
   return [INSTRUCTIONS_BEGIN, '## In the ai-sdk-letta app',
     'You are also used through the ai-sdk-letta app (a browser app). There, only these tools are available: '
       + (tools.length ? tools.join(', ') : 'none besides memory') + '. Letta Code tools (shell, file editing outside memory, subagents) are not available in the app; do not call them there.',
+    ...(project ? [projectNote(project)] : []),
     memoryPolicy, INSTRUCTIONS_END].join('\n');
 }
+
 
 /** `system` without the ai-sdk-letta section (if any). */
 export function withoutInstructionsSection(system: string): string {
@@ -265,6 +270,34 @@ export function instructionsUpdate(system: string, section: string): { next: str
 /** Where adoption records live in a state root. */
 export const adoptionFile = (stateDirectory: string) => join(stateDirectory, 'adopted.json');
 
+/* ------------------------------------------------------------------ */
+/* Project folder                                                      */
+/* ------------------------------------------------------------------ */
+
+const MOUNT_UNSAFE = /[,=\p{Cc}]/u;
+
+/**
+ * Check an adopted agent's project folder before recording or mounting it:
+ * an absolute path to an existing folder that is not the file system root,
+ * the home folder (or one of its ancestors), inside `~/.letta`, nor refused
+ * by `checkProjectFolder` (home-like folders, credentials in `.git/config`,
+ * linked worktrees). Returns the real path (symlinks resolved), which is
+ * what gets mounted; the record keeps the path as given.
+ * @throws {SandboxError} `project_unsafe` or `project_has_credentials`
+ */
+export function checkAdoptedProject(path: string, home = homedir()): string {
+  if (typeof path !== 'string' || !path || path.length > 1000 || !isAbsolute(path)) throw new SandboxError('project_unsafe', 'The project folder must be an absolute path, such as /Users/you/blog');
+  if (MOUNT_UNSAFE.test(path)) throw new SandboxError('project_unsafe', 'The project folder path must not contain commas, equal signs or control characters');
+  let real: string;
+  try { real = realpathSync(path); } catch { throw new SandboxError('project_unsafe', `${path} does not exist`); }
+  const realOf = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const inside = (child: string, parent: string) => { const rel = relative(parent, child); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
+  if (real === sep || real === realOf(home)) throw new SandboxError('project_unsafe', `Refusing ${path}: it is ${real === sep ? 'the file system root' : 'your home folder'}. Pick the project's own folder.`);
+  if (inside(real, realOf(join(home, '.letta')))) throw new SandboxError('project_unsafe', `Refusing ${path}: it is inside ~/.letta (Letta's own data).`);
+  if (MOUNT_UNSAFE.test(real)) throw new SandboxError('project_unsafe', 'The project folder\'s real path must not contain commas, equal signs or control characters');
+  return checkProjectFolder(real, home);
+}
+
 /** What the host offers adopted agents: a sandbox (for `sandbox`), whether web search is set up (for `web_search`), and dreaming in the app (default off). */
 export type AdoptionEnvironment = { sandbox?: SandboxConfig; webSearch?: boolean; dreaming?: Partial<DreamingSettings> };
 
@@ -278,9 +311,13 @@ export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): Adop
  * its name and model), the app's tools for the record's tool sets (each
  * with its fail-closed permission), and the default memory protection.
  * Its system prompt is never applied (see {@link instructionsUpdate}).
+ * With a project folder ({@link AdoptionRecord.project}) and the sandbox,
+ * the folder is mounted at `/project`.
  */
 export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionEnvironment = {}): AgentDefinition {
   const sets = new Set(record.tools);
+  // Its own project folder replaces the host's (if any); the sandbox checks it again and mounts its real path.
+  const sandbox = environment.sandbox && record.project ? { ...environment.sandbox, project: record.project } : environment.sandbox;
   const tools: ToolSet = {
     ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
     ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
@@ -294,7 +331,7 @@ export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionE
     // Never applied: an adopted agent keeps its own system prompt.
     instructions: 'Adopted agent: its own system prompt is kept.',
     tools, permissions, adopt: { agentId: record.agentId },
-    ...(sets.has('sandbox') && environment.sandbox ? { sandbox: environment.sandbox } : {}),
+    ...(sets.has('sandbox') && sandbox ? { sandbox } : {}),
     // Dreaming stays off unless the host turns it on: an adopted agent keeps its own Letta Code reflection settings, and the app never starts a dream of it by surprise.
     dreaming: environment.dreaming ?? { trigger: 'off' },
   });

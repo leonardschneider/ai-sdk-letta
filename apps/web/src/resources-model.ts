@@ -1,7 +1,8 @@
 /** Pure model of the Resources panel: tree helpers, file types, CSV parsing and persisted layout. No I/O. */
 
 export type ResourceNode = { name: string; path: string; type: 'file' | 'folder'; bytes?: number; modifiedAt: string; conversationId?: string; children?: ResourceNode[] };
-export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; changes: number };
+/** `archived`: paths of the folders whose conversation is archived (older servers omit it). */
+export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; archived?: string[]; changes: number };
 
 /** What a preview shows, by extension (the server decides by content again). */
 export type PreviewKind = 'table' | 'markdown' | 'text' | 'html' | 'pdf' | 'image' | 'atlassian' | 'none';
@@ -53,6 +54,38 @@ export function canDrop(from: string, folder: string): boolean {
   if (!from) return false;
   if (folder === from || folder.startsWith(`${from}/`)) return false;
   return parentPath(from) !== folder;
+}
+
+/**
+ * Split the tree into what shows by default and the folders of archived
+ * conversations (`archived`: their paths, at any depth). An archived folder
+ * leaves the tree with everything in it; the folders around it stay. The
+ * archived ones are returned in tree order. Nothing changes on disk.
+ */
+export function splitArchived(nodes: readonly ResourceNode[], archived: readonly string[] | undefined): { visible: ResourceNode[]; archived: ResourceNode[] } {
+  const hidden = new Set(archived ?? []);
+  const out: ResourceNode[] = [];
+  if (!hidden.size) return { visible: [...nodes], archived: out };
+  const prune = (list: readonly ResourceNode[]): ResourceNode[] => {
+    const kept: ResourceNode[] = [];
+    for (const node of list) {
+      if (node.type === 'folder' && hidden.has(node.path)) { out.push(node); continue; }
+      kept.push(node.children ? { ...node, children: prune(node.children) } : node);
+    }
+    return kept;
+  };
+  return { visible: prune(nodes), archived: out };
+}
+/** Files and their total size under `nodes`. */
+export function fileStats(nodes: readonly ResourceNode[]): { files: number; bytes: number } {
+  let files = 0; let bytes = 0;
+  for (const node of walk(nodes)) if (node.type === 'file') { files++; bytes += node.bytes ?? 0; }
+  return { files, bytes };
+}
+/** The panel footer: the files shown, and how many archived folders are hidden. */
+export function footerText(shown: readonly ResourceNode[], hiddenArchived: number): string {
+  const { files, bytes } = fileStats(shown);
+  return `${files.toLocaleString()} file${files === 1 ? '' : 's'}, ${shortSize(bytes) || '0 B'}${hiddenArchived ? ` · ${hiddenArchived.toLocaleString()} archived hidden` : ''}`;
 }
 
 /** Same rules as the server's name sanitizer, for inline validation: a plain visible name. */
@@ -113,6 +146,10 @@ export function readLayout(raw: string | null): Layout {
   } catch { return { ...DEFAULT_LAYOUT }; }
 }
 
+/** Whether the Resources panel shows archived conversations' folders (persisted; hidden by default). */
+export const ARCHIVED_RESOURCES_KEY = 'ai-sdk-letta-resources-archived';
+export const readShowArchived = (raw: string | null) => raw === 'true';
+
 /** Toast text for a resources error code. */
 export function resourceError(code: string): string {
   return ({
@@ -142,4 +179,45 @@ export function parseAtlassianDocument(text: string): SavedAtlassianDocument | {
     if (value?.type === 'doc' && Array.isArray(value.content)) return { document: value as { type: 'doc'; content: unknown[] } };
   } catch { /* not JSON */ }
   return undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Project folder (read-only)                                          */
+/* ------------------------------------------------------------------ */
+
+/** Git status of a project entry: a file's own; `changed` for a folder holding changes. */
+export type ProjectStatus = 'modified' | 'added' | 'deleted' | 'untracked' | 'changed';
+/** One entry of a project directory (`GET /v1/project/list`). `link: 'outside'`: a symlink leaving the project (never followed). */
+export type ProjectEntry = { name: string; path: string; type: 'file' | 'folder'; bytes?: number; modifiedAt?: string; link?: 'inside' | 'outside'; status?: ProjectStatus };
+/** One page of one project directory. */
+export type ProjectListing = { name: string; git: boolean; path: string; entries: ProjectEntry[]; offset: number; total: number; more: boolean; truncated?: boolean; changes?: number };
+
+/** A top level with more entries than this starts collapsed (unless the person opened it before). */
+export const PROJECT_LARGE = 12;
+/** Whether the project section is open: what the person chose last, else open only when its top level is small. */
+export const PROJECT_OPEN_KEY = 'ai-sdk-letta-project-open';
+export function projectOpen(saved: string | null, top: Pick<ProjectListing, 'total' | 'more'> | undefined): boolean {
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return !!top && !top.more && top.total <= PROJECT_LARGE;
+}
+/** Wording of a git status (tooltip and screen readers). */
+export function projectStatusLabel(status: ProjectStatus | undefined): string {
+  return status === 'modified' ? 'Modified (not committed)' : status === 'added' ? 'Added (not committed)' : status === 'deleted' ? 'Deleted (not committed)' : status === 'untracked' ? 'New (not committed)' : status === 'changed' ? 'Has uncommitted changes' : '';
+}
+/** A directory's next page appended to what was loaded. */
+export function appendPage(previous: ProjectListing | undefined, next: ProjectListing): ProjectListing {
+  if (!previous || next.offset === 0) return next;
+  const seen = new Set(previous.entries.map(e => e.path));
+  return { ...next, offset: 0, entries: [...previous.entries, ...next.entries.filter(e => !seen.has(e.path))] };
+}
+/** Human wording for a refused project request. */
+export function projectError(code: string): string {
+  return ({
+    project_outside: 'That link points outside the project, so it isn’t shown here.',
+    project_unavailable: 'The project folder can’t be reached. Check that it still exists.',
+    project_none: 'This agent has no project folder.',
+    file_not_found: 'That file is gone, or it is ignored by the project.',
+    file_too_large: 'That file is too large to show here (up to 25 MB).',
+  } as Record<string, string>)[code] ?? resourceError(code);
 }

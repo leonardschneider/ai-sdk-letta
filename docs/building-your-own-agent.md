@@ -1074,7 +1074,21 @@ agent runs (`letta --agent <id>`). From the adoption on, its memory is
 protected and reviewed like any agent's; commits its own Letta Code
 sessions make show as "From Letta Code" and are never reverted. The GUI
 does all of this for you with **Add agent…** (see the README, "Your
-existing Letta agents").
+existing Letta agents"). There, **Project folder…** gives each adopted
+agent its own project (recorded in `adopted.json` as `project`, checked by
+`checkAdoptedProject`, merged into its `sandbox` by `adoptedDefinition`):
+
+```ts
+import { adoptedDefinition, checkAdoptedProject, type AdoptionRecord } from 'ai-sdk-letta';
+
+const record: AdoptionRecord = {
+  definitionId: 'blog-2cc740f1', agentId: 'agent-local-2cc740f1-9438-4173-9418-aa89a45d258d',
+  name: 'blog', model: 'openai-codex/gpt-5.5', tools: ['files', 'sandbox'], adoptedAt: new Date().toISOString(),
+  project: '/Users/you/blog', // mounted read-write at /project
+};
+checkAdoptedProject(record.project!); // throws SandboxError (home folder, /, ~/.letta, credentials in .git/config)
+const blog = adoptedDefinition(record, { sandbox: { provider: 'docker' } });
+```
 
 ## 10. State, identity, starting fresh
 

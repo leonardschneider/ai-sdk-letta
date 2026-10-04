@@ -50,6 +50,8 @@
   .hljs-meta { color: #a0a8b0; }
   .hljs-deletion { color: #ffa198; }
 }
+/* Front matter of a Markdown file (YAML or TOML): metadata, quieter than the document. */
+.markdown-front-matter { margin: 0 0 1.2em; padding: 10px 14px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-3); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Maths (KaTeX). Colours follow the text, so light and dark both read. */
 .markdown .katex { font-size: 1.08em; overflow-wrap: normal; }
 /* Display maths scrolls sideways instead of widening the message (phones). */

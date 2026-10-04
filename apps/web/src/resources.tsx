@@ -2,15 +2,15 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import { TextMessagePartProvider } from '@assistant-ui/react';
 import { ContextMenu, DropdownMenu } from 'radix-ui';
 import {
-  ChevronRight, Download, Ellipsis, ExternalLink, File, FileCode, FileImage, FileSpreadsheet, FileText, FileType, Folder, FolderInput, FolderOpen, FolderPlus, LoaderCircle, MessageSquare, Pencil, RefreshCw, Trash, Upload, X,
+  Archive, ChevronRight, Download, Ellipsis, ExternalLink, File, FileCode, FileImage, FileSpreadsheet, FileText, FileType, Folder, FolderGit2, FolderInput, FolderOpen, FolderPlus, Link2Off, LoaderCircle, MessageSquare, Pencil, RefreshCw, Trash, Upload, X,
 } from 'lucide-react';
 import { api, apiPath, errorCode, uploadResource } from './api.js';
 import { Modal } from './modal.js';
 import { Markdown } from './markdown.js';
 import { useToast } from './toasts.js';
 import {
-  ancestors, baseName, canDrop, find, iconKind, joinPath, parentPath, parseAtlassianDocument, parseDelimited, previewKind, resourceError, shortSize, validName, walk,
-  type ResourceNode, type ResourceTree,
+  ARCHIVED_RESOURCES_KEY, PROJECT_OPEN_KEY, ancestors, appendPage, baseName, canDrop, find, footerText, iconKind, joinPath, parentPath, parseAtlassianDocument, parseDelimited, previewKind, projectError, projectOpen, projectStatusLabel, readShowArchived, resourceError, shortSize, splitArchived, validName, walk,
+  type ProjectEntry, type ProjectListing, type ResourceNode, type ResourceTree,
 } from './resources-model.js';
 
 /** The Atlassian renderer is large: loaded only when an `.adf.json` preview opens. */
@@ -22,6 +22,11 @@ const PREVIEW_ROWS = 500;
 
 const fileUrl = (path: string) => apiPath(`/v1/resources/file?path=${encodeURIComponent(path)}`);
 const previewUrl = (path: string) => apiPath(`/v1/resources/preview?path=${encodeURIComponent(path)}`);
+/** Where a preview reads from: the resources, or the agent's project folder (read-only). */
+type Source = { file(path: string): string; preview(path: string): string; project?: string };
+const RESOURCES: Source = { file: fileUrl, preview: previewUrl };
+const projectSource = (name: string): Source => ({ project: name,
+  file: path => apiPath(`/v1/project/file?path=${encodeURIComponent(path)}`), preview: path => apiPath(`/v1/project/preview?path=${encodeURIComponent(path)}`) });
 const atlassianMediaUrl = (path: string, id: string) => apiPath(`/v1/resources/atlassian-media?path=${encodeURIComponent(path)}&id=${encodeURIComponent(id)}`);
 
 /** File icon by name; folders open/closed; conversation folders get a chat badge. */
@@ -46,6 +51,10 @@ type Props = {
   onOpenThread?(id: string): void;
   /** A conversation was renamed with its folder (the thread as listed). */
   onThreadChanged?(thread: MovedThread): void;
+  /** The name of the agent's project folder: shown read-only below the resources. */
+  project?: string;
+  /** The agent has a project folder but no resources of its own: only the project is shown. */
+  projectOnly?: boolean;
 };
 /** The conversation a folder rename also renamed, as the server lists it. */
 type MovedThread = { id: string; title: string };
@@ -71,6 +80,10 @@ export function ResourcesPanel(props: Props) {
   const [dropTarget, setDropTarget] = useState<string>();
   const [busy, setBusy] = useState(0);
   const [fresh, setFresh] = useState<ReadonlySet<string>>(() => new Set());
+  // Folders of archived conversations: hidden unless asked for (persisted). Nothing moves on disk.
+  const [showArchived, setShowArchivedState] = useState(() => readShowArchived(localStorage.getItem(ARCHIVED_RESOURCES_KEY)));
+  const setShowArchived = (value: boolean) => { setShowArchivedState(value); localStorage.setItem(ARCHIVED_RESOURCES_KEY, String(value)); };
+  const [projectRefresh, setProjectRefresh] = useState(0);
   const known = useRef<Set<string> | undefined>(undefined);
   const version = useRef('');
   /** After the server restarted (session gone), stop polling until the page is refreshed. */
@@ -79,9 +92,13 @@ export function ResourcesPanel(props: Props) {
   const fileInput = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
 
+  const split = useMemo(() => splitArchived(tree?.children ?? [], tree?.archived), [tree]);
+  /** What the tree shows: the normal folders, then the archived ones when asked for. */
+  const shown = useMemo(() => showArchived ? [...split.visible, ...split.archived] : split.visible, [split, showArchived]);
   const currentFolder = useMemo(() => tree ? Object.entries(tree.threads).find(([, id]) => id === props.threadId)?.[0] : undefined, [tree, props.threadId]);
 
   const load = useCallback(async (quiet = false) => {
+    if (props.projectOnly) return undefined;
     try {
       const next = await api<ResourceTree>('/v1/resources');
       setError('');
@@ -107,7 +124,7 @@ export function ResourcesPanel(props: Props) {
       if (code === 'resources_empty' || code === 'files_unavailable') setTree(undefined);
       return undefined;
     }
-  }, []);
+  }, [props.projectOnly]);
 
   // Live refresh: poll while visible and the tab is shown, and at once when a turn ends.
   useEffect(() => {
@@ -206,9 +223,9 @@ export function ResourcesPanel(props: Props) {
   const visibleRows = useMemo(() => {
     const rows: ResourceNode[] = [];
     const add = (nodes: readonly ResourceNode[]) => { for (const node of nodes) { rows.push(node); if (node.type === 'folder' && expanded.has(node.path)) add(node.children ?? []); } };
-    if (tree) add(tree.children);
+    add(shown);
     return rows;
-  }, [tree, expanded]);
+  }, [shown, expanded]);
   function onKeyDown(event: React.KeyboardEvent) {
     if (pending || (event.target as HTMLElement).closest('input')) return;
     const index = visibleRows.findIndex(n => n.path === selected);
@@ -224,14 +241,15 @@ export function ResourcesPanel(props: Props) {
   }
 
   const empty = tree && !tree.children.length;
+  const ctx: TreeContext = { expanded, toggle, selected, setSelected, pending, rename, createFolder, actions, current: currentFolder, fresh, dropTarget, setDropTarget, handleDrop, preview };
   return <div className="resources" aria-busy={busy > 0 || undefined}>
     <div className="res-head">
       <h2 className="res-title">Resources</h2>
       {busy > 0 && <LoaderCircle size={14} className="spin res-spinner" aria-label="Working"/>}
       <div className="res-tools">
-        <button type="button" className="icon-btn small" aria-label="Upload files" title="Upload files to the current conversation’s folder" disabled={!tree} onClick={() => pickFiles(currentFolder ?? '')}><Upload size={15}/></button>
-        <button type="button" className="icon-btn small" aria-label="New folder" title="New folder" disabled={!tree} onClick={() => actions.newFolder(selectedFolder(tree, selected) ?? '')}><FolderPlus size={15}/></button>
-        <button type="button" className="icon-btn small" aria-label="Refresh" title="Refresh" onClick={() => { version.current = ''; void load(); }}><RefreshCw size={15}/></button>
+        {!props.projectOnly && <button type="button" className="icon-btn small" aria-label="Upload files" title="Upload files to the current conversation’s folder" disabled={!tree} onClick={() => pickFiles(currentFolder ?? '')}><Upload size={15}/></button>}
+        {!props.projectOnly && <button type="button" className="icon-btn small" aria-label="New folder" title="New folder" disabled={!tree} onClick={() => actions.newFolder(selectedFolder(tree, selected) ?? '')}><FolderPlus size={15}/></button>}
+        <button type="button" className="icon-btn small" aria-label="Refresh" title="Refresh" onClick={() => { version.current = ''; void load(); setProjectRefresh(n => n + 1); }}><RefreshCw size={15}/></button>
         <button type="button" className="icon-btn small" aria-label="Close resources" title="Close (⌘⇧E)" onClick={props.onClose}><X size={16}/></button>
       </div>
     </div>
@@ -242,16 +260,27 @@ export function ResourcesPanel(props: Props) {
       onDragLeave={event => { if (event.currentTarget === event.target) setDropTarget(undefined); }}
       onDrop={event => { if ((event.target as Element).closest('[data-path]')) return; event.preventDefault(); setDropTarget(undefined); void handleDrop(event, ''); }}>
       {error && <p className="res-empty">{error}</p>}
-      {!tree && !error && <p className="res-empty muted">Loading…</p>}
+      {!tree && !error && !props.projectOnly && <p className="res-empty muted">Loading…</p>}
       {empty && <p className="res-empty">No files yet. Attach files in a chat, drop files here, or ask the agent to create some.</p>}
       {pending?.kind === 'new-folder' && pending.parent === '' && <NameField depth={0} initial="New folder" folder onDone={name => void createFolder('', name ?? '')}/>}
-      {tree?.children.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={{ expanded, toggle, selected, setSelected, pending, rename, createFolder, actions, current: currentFolder, fresh, dropTarget, setDropTarget, handleDrop, preview }}/>)}
+      {tree && split.visible.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={ctx}/>)}
+      {tree && !empty && !split.visible.length && !showArchived && <p className="res-empty">Only archived conversations have files here.</p>}
+      {!!split.archived.length && <div className="res-archived" role="none">
+        <button type="button" className="res-archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived(!showArchived)}>
+          <ChevronRight size={13} className="res-chev" data-open={showArchived || undefined} aria-hidden="true"/><Archive size={13} aria-hidden="true"/>
+          <span>{showArchived ? 'Hide archived' : 'Show archived'} ({split.archived.length})</span>
+        </button>
+        {showArchived && <div role="group" aria-label="Archived" className="res-archived-group">
+          {split.archived.map(node => <TreeNode key={node.path} node={node} depth={0} ctx={ctx}/>)}
+        </div>}
+      </div>}
       {tree?.truncated && <p className="res-empty muted">Showing the first 5,000 entries.</p>}
+      {props.project && <ProjectSection name={props.project} visible={props.visible} refreshKey={`${String(props.refreshKey)}:${projectRefresh}`} alone={!!props.projectOnly}/>}
     </div>
-    {tree && <p className="res-foot">{countFiles(tree)} · versioned with git</p>}
+    {tree && <p className="res-foot">{footerText(shown, showArchived ? 0 : split.archived.length)} · versioned with git</p>}
     {preview && <Preview path={preview} node={tree ? find(tree.children, preview) : undefined} onClose={() => setPreview(undefined)}/>}
     {confirm && <ConfirmDelete node={confirm} onCancel={() => setConfirm(undefined)} onConfirm={() => void remove(confirm)}/>}
-    {moving && tree && <MoveDialog node={moving} tree={tree} onCancel={() => setMoving(undefined)} onMove={folder => { setMoving(undefined); void move(moving.path, folder); }}/>}
+    {moving && tree && <MoveDialog node={moving} tree={{ ...tree, children: shown }} onCancel={() => setMoving(undefined)} onMove={folder => { setMoving(undefined); void move(moving.path, folder); }}/>}
   </div>;
 
   function acceptsDrag(event: React.DragEvent) { return event.dataTransfer.types.includes(DRAG_TYPE) || event.dataTransfer.types.includes('Files'); }
@@ -267,11 +296,6 @@ function selectedFolder(tree: ResourceTree | undefined, selected: string | undef
   if (!tree || !selected) return undefined;
   const node = find(tree.children, selected);
   return node?.type === 'folder' ? node.path : node ? parentPath(node.path) : undefined;
-}
-function countFiles(tree: ResourceTree) {
-  let files = 0; let bytes = 0;
-  for (const node of walk(tree.children)) if (node.type === 'file') { files++; bytes += node.bytes ?? 0; }
-  return `${files.toLocaleString()} file${files === 1 ? '' : 's'}, ${shortSize(bytes) || '0 B'}`;
 }
 
 type Actions = {
@@ -426,13 +450,17 @@ function MoveDialog({ node, tree, onCancel, onMove }: { node: ResourceNode; tree
 /* Preview                                                             */
 /* ------------------------------------------------------------------ */
 
-function Preview({ path, node, onClose }: { path: string; node?: ResourceNode; onClose(): void }) {
+function Preview({ path, node, onClose, source = RESOURCES }: { path: string; node?: Pick<ResourceNode, 'bytes'>; onClose(): void; source?: Source }) {
   const name = baseName(path);
-  const kind = previewKind(name);
+  const listed = previewKind(name);
+  // Atlassian documents are the resources' own (their images come through the resources); in a project they are JSON text.
+  const kind = source.project && listed === 'atlassian' ? 'text' : listed;
+  const { file: fileUrl, preview: previewUrl } = source;
+  const where = source.project ? [source.project, parentPath(path)].filter(Boolean).join('/') : parentPath(path) || 'Top level';
   return <Modal label={`Preview of ${name}`} onClose={onClose} className="preview">
     <div className="preview-head">
       <ResourceIcon node={{ name, type: 'file' }}/>
-      <div className="preview-title"><h2>{name}</h2><span className="muted">{parentPath(path) || 'Top level'}{node?.bytes !== undefined ? ` · ${shortSize(node.bytes)}` : ''}</span></div>
+      <div className="preview-title"><h2>{name}</h2><span className="muted">{where}{node?.bytes !== undefined ? ` · ${shortSize(node.bytes)}` : ''}</span></div>
       {(kind === 'pdf' || kind === 'image') && <a className="icon-btn small" href={previewUrl(path)} target="_blank" rel="noopener noreferrer" aria-label="Open in a new tab" title="Open in a new tab"><ExternalLink size={15}/></a>}
       <a className="icon-btn small" href={fileUrl(path)} download={name} aria-label={`Download ${name}`} title="Download"><Download size={15}/></a>
       <button type="button" className="icon-btn small" data-autofocus aria-label="Close preview" onClick={onClose}><X size={16}/></button>
@@ -443,14 +471,14 @@ function Preview({ path, node, onClose }: { path: string; node?: ResourceNode; o
       {kind === 'pdf' && <iframe title={`PDF ${name}`} src={previewUrl(path)}/>}
       {/* No allow-scripts and no allow-same-origin: the page cannot run code, reach the app or the network. */}
       {kind === 'html' && <iframe title={`HTML ${name}`} src={previewUrl(path)} sandbox="" referrerPolicy="no-referrer"/>}
-      {(kind === 'table' || kind === 'markdown' || kind === 'text' || kind === 'atlassian') && <TextPreview path={path} kind={kind} name={name}/>}
+      {(kind === 'table' || kind === 'markdown' || kind === 'text' || kind === 'atlassian') && <TextPreview path={path} kind={kind} name={name} source={source}/>}
       {kind === 'none' && <p className="preview-empty">No preview for this type. <a href={fileUrl(path)} download={name}>Download it</a> instead.</p>}
     </div>
   </Modal>;
 }
 
 const MAX_TEXT = 400_000;
-function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'markdown' | 'text' | 'atlassian'; name: string }) {
+function TextPreview({ path, kind, name, source }: { path: string; kind: 'table' | 'markdown' | 'text' | 'atlassian'; name: string; source: Source }) {
   const [text, setText] = useState<string>();
   const [failed, setFailed] = useState('');
   useEffect(() => {
@@ -458,21 +486,21 @@ function TextPreview({ path, kind, name }: { path: string; kind: 'table' | 'mark
     setText(undefined); setFailed('');
     void (async () => {
       try {
-        const response = await fetch(previewUrl(path), { credentials: 'same-origin', signal: control.signal });
-        if (!response.ok) { let code = ''; try { code = ((await response.json()) as { error?: string }).error ?? ''; } catch { /* none */ } setFailed(resourceError(code)); return; }
+        const response = await fetch(source.preview(path), { credentials: 'same-origin', signal: control.signal });
+        if (!response.ok) { let code = ''; try { code = ((await response.json()) as { error?: string }).error ?? ''; } catch { /* none */ } setFailed(source.project ? projectError(code) : resourceError(code)); return; }
         const body = await response.text();
         setText(body);
       } catch { if (!control.signal.aborted) setFailed('Couldn’t load the preview.'); }
     })();
     return () => control.abort();
-  }, [path]);
+  }, [path, source]);
   if (failed) return <p className="preview-empty">{failed}</p>;
   if (text === undefined) return <p className="preview-empty muted">Loading…</p>;
   const cut = text.length > MAX_TEXT;
   const shown = cut ? text.slice(0, MAX_TEXT) : text;
   if (kind === 'atlassian') return <AtlassianPreview path={path} text={text}/>;
   if (kind === 'table') return <TablePreview text={shown} tab={/\.tsv$/i.test(name)} cut={cut}/>;
-  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown latex={false}/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
+  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown document/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
   return <><pre className="preview-text">{shown}</pre>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</>;
 }
 
@@ -513,5 +541,166 @@ function TablePreview({ text, tab, cut }: { text: string; tab: boolean; cut: boo
       <tbody>{body.map((row, r) => <tr key={r}><td className="row-num">{r + 1}</td>{Array.from({ length: columns }, (_, i) => <td key={i}>{row[i] ?? ''}</td>)}</tr>)}</tbody>
     </table>
     <p className="preview-note">{truncated || cut ? `Showing the first ${Math.min(total, PREVIEW_ROWS).toLocaleString()} rows.` : `${total.toLocaleString()} row${total === 1 ? '' : 's'} · ${columns} column${columns === 1 ? '' : 's'}`}</p>
+  </div>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Project folder (read-only)                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The agent's project folder (mounted at `/project` in its sandbox), below
+ * the resources: read-only, one directory at a time (listed when opened),
+ * `.git`, `node_modules` and `.gitignore` matches hidden. Files preview and
+ * download like resources; a dot marks what git sees as changed. It is
+ * refreshed when a turn ends. The app never writes here: the agent edits it
+ * with commands.
+ */
+function ProjectSection({ name, visible, refreshKey, alone }: { name: string; visible: boolean; refreshKey: string; alone: boolean }) {
+  const toast = useToast();
+  const source = useMemo(() => projectSource(name), [name]);
+  const [listings, setListings] = useState<ReadonlyMap<string, ProjectListing>>(() => new Map());
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [loading, setLoading] = useState<ReadonlySet<string>>(() => new Set());
+  const [failed, setFailed] = useState('');
+  const [saved, setSaved] = useState(() => localStorage.getItem(PROJECT_OPEN_KEY));
+  const [preview, setPreview] = useState<ProjectEntry>();
+  const [selected, setSelected] = useState<string>();
+  const listingsRef = useRef(listings);
+  listingsRef.current = listings;
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const top = listings.get('');
+  const open = alone || projectOpen(saved, top);
+  const setOpen = (value: boolean) => { localStorage.setItem(PROJECT_OPEN_KEY, String(value)); setSaved(String(value)); };
+
+  /** List one directory: its first page, or as many entries as are shown already (a refresh keeps "show more" pages). */
+  const fetchDir = useCallback(async (path: string, offset = 0, limit?: number) => {
+    const query = `path=${encodeURIComponent(path)}${offset ? `&offset=${offset}` : ''}${limit ? `&limit=${limit}` : ''}`;
+    return api<ProjectListing>(`/v1/project/list?${query}`);
+  }, []);
+  const loadDir = useCallback(async (path: string, quiet = false) => {
+    setLoading(set => new Set([...set, path]));
+    try {
+      const shown = listingsRef.current.get(path)?.entries.length ?? 0;
+      const next = await fetchDir(path, 0, shown > 200 ? Math.min(1000, shown) : undefined);
+      setListings(map => new Map(map).set(path, next));
+      if (!path) setFailed('');
+    } catch (e) {
+      const code = errorCode(e);
+      if (!path) setFailed(projectError(code));
+      else {
+        // Gone or now ignored: forget it and close it.
+        setListings(map => { const copy = new Map(map); for (const key of copy.keys()) if (key === path || key.startsWith(`${path}/`)) copy.delete(key); return copy; });
+        setExpanded(set => new Set([...set].filter(p => p !== path && !p.startsWith(`${path}/`))));
+        if (!quiet) toast(projectError(code), { tone: 'error' });
+      }
+    } finally { setLoading(set => { const copy = new Set(set); copy.delete(path); return copy; }); }
+  }, [fetchDir, toast]);
+  // The top level when shown, and every listed directory again when a turn ends (the agent may have changed files).
+  useEffect(() => {
+    if (!visible) return;
+    const paths = [...listingsRef.current.keys()];
+    for (const path of paths.length ? paths : ['']) void loadDir(path, true);
+  }, [visible, refreshKey, loadDir]);
+
+  const toggle = (path: string) => {
+    if (expanded.has(path)) { setExpanded(set => { const copy = new Set(set); copy.delete(path); return copy; }); return; }
+    setExpanded(set => new Set([...set, path]));
+    if (!listings.has(path)) void loadDir(path);
+  };
+  const more = async (path: string) => {
+    const current = listings.get(path);
+    if (!current) return;
+    setLoading(set => new Set([...set, path]));
+    try { const next = await fetchDir(path, current.entries.length); setListings(map => new Map(map).set(path, appendPage(map.get(path), next))); }
+    catch (e) { toast(projectError(errorCode(e)), { tone: 'error' }); }
+    finally { setLoading(set => { const copy = new Set(set); copy.delete(path); return copy; }); }
+  };
+  const activate = (entry: ProjectEntry) => {
+    setSelected(entry.path);
+    if (entry.link === 'outside') { toast(projectError('project_outside'), { tone: 'error' }); return; }
+    if (entry.type === 'folder') toggle(entry.path); else setPreview(entry);
+  };
+  // Arrow keys move through the rows shown.
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    // The resources tree's keys (rename, delete, ...) never apply here.
+    event.stopPropagation();
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const rows = [...(sectionRef.current?.querySelectorAll<HTMLElement>('.proj-tree .res-row[role="treeitem"]') ?? [])];
+    const index = rows.indexOf(document.activeElement as HTMLElement);
+    const next = rows[event.key === 'ArrowDown' ? Math.min(rows.length - 1, index + 1) : Math.max(0, index - 1)];
+    if (next) { event.preventDefault(); next.focus(); }
+  };
+
+  const changes = top?.changes ?? 0;
+  const ctx: ProjectContext = { listings, expanded, loading, selected, preview: preview?.path, activate, more, source };
+  return <section ref={sectionRef} className="proj" data-alone={alone || undefined} aria-label={`Project ${name}`} onKeyDown={onKeyDown}
+    // Nothing can be dropped here (no upload into the project).
+    onDragOver={event => event.stopPropagation()} onDrop={event => { event.preventDefault(); event.stopPropagation(); }}>
+    {alone
+      ? <div className="proj-head proj-head-static"><FolderGit2 size={14} aria-hidden="true"/><span className="proj-title">Project · {name}</span>{changes > 0 && <ChangesTag count={changes}/>}</div>
+      : <button type="button" className="proj-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <ChevronRight size={13} className="res-chev" data-open={open || undefined} aria-hidden="true"/><FolderGit2 size={14} aria-hidden="true"/>
+          <span className="proj-title">Project · {name}</span>
+          {changes > 0 && <ChangesTag count={changes}/>}
+          {!open && top && <span className="proj-count">{top.total}{top.more ? '+' : ''} item{top.total === 1 ? '' : 's'}</span>}
+        </button>}
+    {open && <>
+      <p className="proj-note">Read-only here; the agent edits it with commands.</p>
+      {failed && <p className="res-empty">{failed}</p>}
+      {!top && !failed && <p className="res-empty muted">Loading…</p>}
+      {top && <div className="proj-tree" role="tree" aria-label={`Project ${name}`}>
+        {top.entries.map(entry => <ProjectNode key={entry.path} entry={entry} depth={0} ctx={ctx}/>)}
+        {!top.entries.length && <p className="res-empty">Nothing to show (everything here is ignored or empty).</p>}
+        <MoreRow listing={top} depth={0} ctx={ctx}/>
+      </div>}
+    </>}
+    {preview && <Preview path={preview.path} node={preview} source={source} onClose={() => setPreview(undefined)}/>}
+  </section>;
+}
+
+const ChangesTag = ({ count }: { count: number }) => <span className="proj-changes" title={`${count} uncommitted change${count === 1 ? '' : 's'} (git status)`}>{count} changed</span>;
+
+type ProjectContext = { listings: ReadonlyMap<string, ProjectListing>; expanded: ReadonlySet<string>; loading: ReadonlySet<string>; selected?: string; preview?: string; activate(entry: ProjectEntry): void; more(path: string): Promise<void>; source: Source };
+
+function ProjectNode({ entry, depth, ctx }: { entry: ProjectEntry; depth: number; ctx: ProjectContext }) {
+  const folder = entry.type === 'folder';
+  const outside = entry.link === 'outside';
+  const isOpen = folder && ctx.expanded.has(entry.path);
+  const listing = ctx.listings.get(entry.path);
+  const status = projectStatusLabel(entry.status);
+  return <div className="res-node" data-project-path={entry.path} role="none">
+    <div className="res-row" role="treeitem" aria-level={depth + 1} aria-expanded={folder ? isOpen : undefined} aria-selected={ctx.selected === entry.path} aria-disabled={outside || undefined}
+      tabIndex={ctx.selected === entry.path || (!ctx.selected && depth === 0) ? 0 : -1} data-previewing={ctx.preview === entry.path || undefined} data-outside={outside || undefined}
+      style={{ paddingLeft: 6 + depth * 14 }} title={outside ? `${entry.name}: a link outside the project (not shown)` : status ? `${entry.path} · ${status}` : entry.path}
+      onClick={() => ctx.activate(entry)} onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.activate(entry); }
+        else if (folder && ((event.key === 'ArrowRight' && !isOpen) || (event.key === 'ArrowLeft' && isOpen))) { event.preventDefault(); ctx.activate(entry); }
+      }}>
+      {folder ? <ChevronRight size={13} className="res-chev" data-open={isOpen || undefined} aria-hidden="true"/> : <span className="res-chev-space"/>}
+      {outside ? <span className="res-icon" data-kind="outside" aria-hidden="true"><Link2Off size={15}/></span> : <ResourceIcon node={{ name: entry.name, type: entry.type }} open={isOpen}/>}
+      <span className="res-name">{entry.name}</span>
+      {entry.status && <span className="proj-dot" data-status={entry.status} role="img" aria-label={status}/>}
+      {outside && <span className="res-tag proj-outside-tag">outside</span>}
+      {!folder && !outside && <span className="res-size">{shortSize(entry.bytes)}</span>}
+      {!folder && !outside && <a className="res-menu" href={ctx.source.file(entry.path)} download={entry.name} aria-label={`Download ${entry.name}`} title="Download" onClick={event => event.stopPropagation()} tabIndex={-1}><Download size={14}/></a>}
+      {folder && ctx.loading.has(entry.path) && <LoaderCircle size={13} className="spin res-spinner" aria-label="Loading"/>}
+    </div>
+    {isOpen && <div role="group">
+      {listing?.entries.map(child => <ProjectNode key={child.path} entry={child} depth={depth + 1} ctx={ctx}/>)}
+      {listing && !listing.entries.length && <div className="res-row res-placeholder" style={{ paddingLeft: 26 + (depth + 1) * 14 }}>Empty</div>}
+      {!listing && <div className="res-row res-placeholder" style={{ paddingLeft: 26 + (depth + 1) * 14 }}>Loading…</div>}
+      {listing && <MoreRow listing={listing} depth={depth + 1} ctx={ctx}/>}
+    </div>}
+  </div>;
+}
+
+/** "Show more" when a directory has more entries than one page. */
+function MoreRow({ listing, depth, ctx }: { listing: ProjectListing; depth: number; ctx: ProjectContext }) {
+  if (!listing.more && !listing.truncated) return null;
+  const left = listing.total - listing.entries.length;
+  return <div className="proj-more" style={{ paddingLeft: 26 + depth * 14 }}>
+    {listing.more && <button type="button" className="btn small ghost" disabled={ctx.loading.has(listing.path)} onClick={() => void ctx.more(listing.path)}>Show more ({left.toLocaleString()} left)</button>}
+    {listing.truncated && !listing.more && <span className="muted">Only the first {listing.total.toLocaleString()} entries are listed.</span>}
   </div>;
 }

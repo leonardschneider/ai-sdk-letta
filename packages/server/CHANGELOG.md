@@ -1,5 +1,23 @@
 # @ai-sdk-letta/server
 
+## 0.17.0
+
+### Minor Changes
+
+- d61e973: Each adopted agent can have its own project folder, mounted read-write at `/project` in its sandbox: set it in the GUI (agent menu, **Project folder…**) or with `PUT /api/adoption/agents/<id>/project` `{ path | null }`. It is recorded in `adopted.json`, checked by the new `checkAdoptedProject` (absolute existing folder, not the home folder, `/` or `~/.letta`, no credentials in `.git/config`), and merged into the agent's sandbox by `adoptedDefinition`. The shell tools' descriptions and the "Update instructions" section tell the agent where the project is. Changing it restarts only that agent's runtime.
+
+### Patch Changes
+
+- Updated dependencies [d61e973]
+  - ai-sdk-letta@0.17.0
+
+## 0.16.1
+
+### Patch Changes
+
+- 661e49e: The Resources panel hides the folders of archived conversations by default; "Show archived (N)" at the bottom of the tree reveals them in a muted group (the choice is remembered), and restoring a conversation brings its folder back. Nothing moves on disk: git history, old file chips and the agent's access are unchanged. `GET /v1/resources` now also returns `archived`, the paths of those folders, and its `version` changes when a conversation is archived or restored.
+- ai-sdk-letta@0.16.1
+
 ## 0.16.0
 
 ### Minor Changes

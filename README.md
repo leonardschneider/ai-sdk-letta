@@ -939,7 +939,9 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
   Files the agent creates appear in the Resources panel and are committed at
   the end of the turn, owned by your user. The resources' git history is
   not mounted. An optional project folder is mounted at `/project`
-  (`sandbox.project`, or `{ path, readOnly: true }`).
+  (`sandbox.project`, or `{ path, readOnly: true }`); the Resources panel
+  shows it read-only below the resources (`GET /v1/project/list`, `/file`,
+  `/preview`; nothing there writes to it).
 - **Python packages persist.** Commands use one virtual environment,
   `/workspace/.venv`, shared by all conversations (created on first start,
   hidden and not versioned); `pip install` puts packages there, so a later
@@ -1392,6 +1394,25 @@ server has them), then **Add**. The same menu switches between agents.
   Letta Code": Jiminy may review them and flag one, but never reverts or
   holds them. At the end of a turn, the app commits only the memory files
   the turn changed, never edits that were already uncommitted.
+- **Project folder…** gives it a folder on this computer to work on (a
+  website, a repository), mounted read-write at `/project` in its sandbox;
+  conversation files stay in `/workspace`. Paste the folder's full path
+  (a symlink is fine: the app shows the path you gave and mounts its real
+  folder). Like `SandboxConfig.project`, it is refused when its
+  `.git/config` holds credentials, and so are your home folder, `/` and
+  `~/.letta`; the dialog says why. Setting it turns on the agent's
+  shell commands and restarts its sandbox (no server restart); **Clear**
+  removes it. The agent learns where it is from `run_command`'s
+  description, and **Update instructions…** adds one line about it. From
+  code: `PUT /api/adoption/agents/<id>/project` with `{ "path": "/Users/you/blog" }`
+  or `{ "path": null }` (session cookie, `Origin` and CSRF token, like the
+  other adoption routes). It needs a server with a sandbox. The Resources
+  panel shows it too, as **Project · blog** below the resources: read-only
+  (no rename, move, delete or upload; the agent edits it with commands),
+  listed one folder at a time, with `.git`, `node_modules` and what its
+  `.gitignore` ignores hidden, a dot on files git sees as changed, and the
+  usual previews and downloads. Links that point outside the folder are
+  refused.
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 
@@ -1785,7 +1806,9 @@ State lives in one directory, resolved in this order:
 **Files** stay in the agent's resources, including after a conversation is
 archived; they are never sent anywhere except to the model through the file
 tools and the sandbox. Manage them in the GUI's Resources panel, or with git
-(see [Resources](#resources)).
+(see [Resources](#resources)). The panel hides an archived conversation's
+folder by default ("Show archived" at the bottom of the tree reveals it);
+nothing moves on disk.
 
 ### Named conversations
 
@@ -1841,6 +1864,8 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   editing, subagents) are not available in the app, and their earlier calls
   show only as collapsed "Used <tool>" lines. Its `default` conversation
   cannot be rewound. The app does not start dreams of an adopted agent.
+  Its project folder is reached through `run_command` only: `list_files`,
+  `read_file` and `search_files` stay on its resources.
 - **Web search.** It needs your own SearXNG (Letta Code's `web_search` and
   `fetch_webpage` are Letta server tools, not available on the local
   backend). Results are as good as SearXNG's engines (some rate-limit or

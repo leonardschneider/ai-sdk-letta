@@ -47,7 +47,7 @@ export {
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
 export {
   sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT, WEBDEV_DOCKERFILE, WEBDEV_IMAGE, MCP_APPS_DOCKERFILE, MCP_APPS_IMAGE,
-  SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
+  SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, projectNote, withProjectDescriptions, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
   commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
@@ -86,7 +86,7 @@ export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUM
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
 export {
-  AdoptionStore, adoptedDefinition, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
+  AdoptionStore, adoptedDefinition, checkAdoptedProject, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
   ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';
