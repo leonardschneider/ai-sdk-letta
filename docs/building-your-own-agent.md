@@ -498,8 +498,10 @@ console.log(webDeveloper.sandbox?.image === WEBDEV_IMAGE, webDeveloper.permissio
 
 The browser tools also need `npm install --save-exact @ai-sdk/mcp@2.0.60`.
 Serve it with `startGuiServer` as usual: the server adds the preview
-listener (its own origin, `http://p-<token>.localhost:<port>`). Details,
-the isolation model and limits: [Web app development](../README.md#web-app-development-preview-and-browser).
+listener (its own origin, `http://p-<token>.localhost:<port>`). People can
+watch in Chrome, Safari or Firefox; the agent's own browser is always the
+headless Chromium in its container ([Browser support](../README.md#browser-support)).
+Details, the isolation model and limits: [Web app development](../README.md#web-app-development-preview-and-browser).
 
 **MCP Apps** (run mode) add interactive views: MCP servers whose tools
 come with a `ui://` HTML view, installed from a **local** package tarball or

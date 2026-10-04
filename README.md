@@ -1009,8 +1009,10 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
 
 Let the agent build web apps in its sandbox: it runs a dev server, you watch
 the app **live in a Preview pane** next to the chat, and the agent tests the
-same app with a **headless Chrome**. Add `webDevTools` to an agent with a
-built-in sandbox:
+same app with a **headless Chrome**. The Preview pane works in Chrome, Safari
+and Firefox (see [Browser support](#browser-support)); the agent's browser is
+always the headless Chromium in its container. Add `webDevTools` to an agent
+with a built-in sandbox:
 
 ```ts
 import { defineAgent, sandboxTools, SANDBOX_TOOL_PERMISSIONS, webDevTools, WEBDEV_TOOL_PERMISSIONS } from 'ai-sdk-letta';
@@ -1364,6 +1366,50 @@ agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
 "Searched files for “budget”"), collapsed like other tools. Use it from code with `startGuiServer(definition, assetsDir, options)`
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
+
+### Browser support
+
+The browser app works in **Chrome**, **Safari** and **Firefox**, including
+the [Preview pane](#web-app-development-preview-and-browser) and
+[MCP App](#mcp-apps-run-mode) views. Tested on macOS 26.5 with Chrome 154
+and Safari 26.5 (everything below), and Firefox 142 (Playwright's build; the
+main paths and the isolation checks):
+
+- **Preview pane**: the frame loads, HMR updates it in place (Vite's
+  WebSocket through the preview listener), and the address bar, reload, open
+  in a new tab and the phone width all work.
+- **MCP App views**: the sandbox proxy handshake, `ui/initialize`, inline,
+  panel, full screen and picture-in-picture, size changes, tool calls through
+  the gate (allow, ask, deny), `ui/message`, logs and open link all work.
+- **The rest**: streaming replies, Resources and Project, Markdown and LaTeX
+  previews, PDFs in the browser's own viewer, sandboxed HTML previews,
+  decisions and the bell, Memory, and light and dark mode.
+- **Isolation is the same in all three.** A page in the preview or in a view
+  cannot read the app's API or session, another conversation's preview,
+  another view, your network or the internet (unless an origin was
+  approved). It cannot navigate the app, open pop-ups, or use the camera,
+  microphone, location or fullscreen. Views cannot use the clipboard; the
+  preview may write to it, like the app you are building would. Foreign
+  pages cannot frame a preview or a view, and a view's URL works only once.
+
+Previews and views run on `http://p-<token>.localhost:<port>` and
+`http://s-<token>.localhost:<port>`, so the browser must resolve
+`*.localhost` to loopback. All three do on macOS, and all three treat these
+origins as secure contexts.
+
+Known differences:
+
+- **Safari allows WebAssembly in MCP App views.** A view's policy does not
+  include `'wasm-unsafe-eval'`, and Chrome refuses to compile WebAssembly
+  there, but Safari compiles it anyway. This gives the view nothing that its
+  scripts could not already do; `eval` stays blocked in all three.
+- **Storage in a frame is partitioned** (Safari and Chrome). What the app
+  keeps in `localStorage` inside the Preview pane is not visible when you open
+  the preview in its own tab, and the reverse is also true.
+
+The agent's own browser is separate from yours: the `browser_*` tools always
+use the headless **Chromium** in the agent's web development container
+(chrome-devtools-mcp), whichever browser you use for the app.
 
 ### Your existing Letta agents (Add agent)
 
