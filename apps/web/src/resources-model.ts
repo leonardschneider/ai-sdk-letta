@@ -1,7 +1,8 @@
 /** Pure model of the Resources panel: tree helpers, file types, CSV parsing and persisted layout. No I/O. */
 
 export type ResourceNode = { name: string; path: string; type: 'file' | 'folder'; bytes?: number; modifiedAt: string; conversationId?: string; children?: ResourceNode[] };
-export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; changes: number };
+/** `archived`: paths of the folders whose conversation is archived (older servers omit it). */
+export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; archived?: string[]; changes: number };
 
 /** What a preview shows, by extension (the server decides by content again). */
 export type PreviewKind = 'table' | 'markdown' | 'text' | 'html' | 'pdf' | 'image' | 'atlassian' | 'none';
@@ -53,6 +54,38 @@ export function canDrop(from: string, folder: string): boolean {
   if (!from) return false;
   if (folder === from || folder.startsWith(`${from}/`)) return false;
   return parentPath(from) !== folder;
+}
+
+/**
+ * Split the tree into what shows by default and the folders of archived
+ * conversations (`archived`: their paths, at any depth). An archived folder
+ * leaves the tree with everything in it; the folders around it stay. The
+ * archived ones are returned in tree order. Nothing changes on disk.
+ */
+export function splitArchived(nodes: readonly ResourceNode[], archived: readonly string[] | undefined): { visible: ResourceNode[]; archived: ResourceNode[] } {
+  const hidden = new Set(archived ?? []);
+  const out: ResourceNode[] = [];
+  if (!hidden.size) return { visible: [...nodes], archived: out };
+  const prune = (list: readonly ResourceNode[]): ResourceNode[] => {
+    const kept: ResourceNode[] = [];
+    for (const node of list) {
+      if (node.type === 'folder' && hidden.has(node.path)) { out.push(node); continue; }
+      kept.push(node.children ? { ...node, children: prune(node.children) } : node);
+    }
+    return kept;
+  };
+  return { visible: prune(nodes), archived: out };
+}
+/** Files and their total size under `nodes`. */
+export function fileStats(nodes: readonly ResourceNode[]): { files: number; bytes: number } {
+  let files = 0; let bytes = 0;
+  for (const node of walk(nodes)) if (node.type === 'file') { files++; bytes += node.bytes ?? 0; }
+  return { files, bytes };
+}
+/** The panel footer: the files shown, and how many archived folders are hidden. */
+export function footerText(shown: readonly ResourceNode[], hiddenArchived: number): string {
+  const { files, bytes } = fileStats(shown);
+  return `${files.toLocaleString()} file${files === 1 ? '' : 's'}, ${shortSize(bytes) || '0 B'}${hiddenArchived ? ` · ${hiddenArchived.toLocaleString()} archived hidden` : ''}`;
 }
 
 /** Same rules as the server's name sanitizer, for inline validation: a plain visible name. */
@@ -112,6 +145,10 @@ export function readLayout(raw: string | null): Layout {
     return { sidebar: typeof value.sidebar === 'boolean' ? value.sidebar : DEFAULT_LAYOUT.sidebar, resources: typeof value.resources === 'boolean' ? value.resources : DEFAULT_LAYOUT.resources, resourcesWidth: clampWidth(Number(value.resourcesWidth)) };
   } catch { return { ...DEFAULT_LAYOUT }; }
 }
+
+/** Whether the Resources panel shows archived conversations' folders (persisted; hidden by default). */
+export const ARCHIVED_RESOURCES_KEY = 'ai-sdk-letta-resources-archived';
+export const readShowArchived = (raw: string | null) => raw === 'true';
 
 /** Toast text for a resources error code. */
 export function resourceError(code: string): string {

@@ -243,6 +243,30 @@ test('renaming a conversation\'s folder in the panel renames the conversation; m
   } finally { await f.cleanup(); }
 });
 
+test('archived conversations: the tree lists their folders as archived (nothing moves), and its version changes on archive and restore', async () => {
+  const f = fixture();
+  try {
+    const [a, b] = [randomUUID(), randomUUID()];
+    await f.runtime.create('owner', a, 'Trip');
+    await f.runtime.create('owner', b, 'Budget');
+    await f.runtime.resourceFolder('owner', { parent: '', name: 'Notes' });
+    const before = await f.runtime.resourceTree('owner');
+    assert.deepEqual(before.archived, []);
+    const commits = f.store().commits;
+    f.runtime.updateMetadata('owner', a, { archived: true });
+    const archived = await f.runtime.resourceTree('owner');
+    assert.deepEqual(archived.archived, ['Trip']);
+    assert.deepEqual(archived.children.map(n => n.name), before.children.map(n => n.name), 'still on disk, in the same place');
+    assert.equal(archived.threads.Trip, a, 'and still linked to its conversation');
+    assert.notEqual(archived.version, before.version, 'the browser sees the change');
+    assert.equal(f.store().commits, commits, 'no commit: nothing moved or renamed');
+    f.runtime.updateMetadata('owner', a, { archived: false });
+    const restored = await f.runtime.resourceTree('owner');
+    assert.deepEqual(restored.archived, []);
+    assert.equal(restored.version, before.version);
+  } finally { await f.cleanup(); }
+});
+
 test('operations: upload, folder, move, rename, delete and restore are one commit each; chips in old messages still download after moves', async () => {
   const f = fixture();
   try {

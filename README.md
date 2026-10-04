@@ -1680,7 +1680,9 @@ State lives in one directory, resolved in this order:
 **Files** stay in the agent's resources, including after a conversation is
 archived; they are never sent anywhere except to the model through the file
 tools and the sandbox. Manage them in the GUI's Resources panel, or with git
-(see [Resources](#resources)).
+(see [Resources](#resources)). The panel hides an archived conversation's
+folder by default ("Show archived" at the bottom of the tree reveals it);
+nothing moves on disk.
 
 ### Named conversations
 
