@@ -46,7 +46,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; code?: string };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; code?: string; usable?: boolean };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -310,7 +310,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
 
   /** The conversation's state from its view: read-only (with Check and unlock) after an uncertain turn; a stopped reply marked as such. */
   function showState(view: View) {
-    const locked = isLocked(view.status);
+    // The server says whether the conversation takes new turns (a checked turn keeps its status but is usable); older servers: by status.
+    const locked = view.usable === undefined ? isLocked(view.status) : !view.usable && !view.live;
     setBlocked(locked ? lockedNotice(view.code) : '');
     setCheckable(locked); setCheckNote('');
     setStoppedNote(view.stopped ? { runId: view.stopped.runId, text: stoppedLine(view.stopped.code) } : undefined);

@@ -181,6 +181,7 @@ const reasonText: Record<string, string> = {
   tool_cancelled: 'The tool was stopped before it finished.',
   timed_out: 'The turn timed out before this finished.',
   cancelled: 'The turn was stopped before this finished.',
+  stopped: 'Interrupted: the turn was stopped before this finished.',
   interrupted: 'The server restarted before this finished; it was not replayed.',
   failed: 'The turn failed before this finished.',
   delivery_uncertain: 'Delivery could not be confirmed; nothing was replayed.',

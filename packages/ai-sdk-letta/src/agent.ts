@@ -16,8 +16,14 @@ import { formatDuration, resolveTurnLimits, TurnClock, type TurnLimits, type Tur
 /** Most characters of text in one user turn. */
 export const MAX_INPUT_CHARACTERS = 8000;
 
-/** The subset of a Letta session a turn needs. */
-export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'>;
+/**
+ * The subset of a Letta session a turn needs. `confirmStopped`, when given,
+ * runs after a stop whose end the stream has not reported yet: it resolves
+ * once the backend is idle (no active run) and makes the stream report the
+ * turn's end; it throws while the backend is still busy. (A stop that lands
+ * before the run has an ID ends without one, and the SDK does not report it.)
+ */
+export type TurnSession = Pick<LettaCodeSession, 'send' | 'stream' | 'abort' | 'close'> & { confirmStopped?(): Promise<void> };
 /** What a turn allows, passed to {@link LettaAgentOptions.open}: `silence` is true when the agent may listen without replying. */
 export type TurnOptions = { silence: boolean; actor?: TurnActor; unattended?: UnattendedPolicy };
 
@@ -594,7 +600,19 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       // The turn's clock (idle timeout and hard cap, paused while a person is asked something).
       const clock = new TurnClock(limits, reason => control.abort(new TurnLimitError(reason, limits)));
       const unwatch = this.interactions.watch(waiting => { if (waiting) clock.pause(); else clock.resume(); });
-      const abort = () => { clock.stop(); void session?.abort().catch(() => {}); session?.close(); };
+      // Stop: ask the backend to cancel the run. An abort that reaches the harness before the run started is lost, so it is
+      // asked again once the message was handed over, and whenever an event shows the run still going (at most every 2 s).
+      let abortedAt: number | undefined;
+      const cancelRun = () => { if (abortedAt !== undefined && Date.now() - abortedAt < 2000) return; abortedAt = Date.now(); void session?.abort().catch(() => {}); };
+      // A stop the stream does not report: confirmed through the backend (idle), at most every 3 s until STOP_CONFIRM_MS.
+      let confirming = false;
+      let confirmTimer: ReturnType<typeof setInterval> | undefined;
+      const confirmStop = () => {
+        if (confirming || !session?.confirmStopped) return;
+        confirming = true;
+        void session.confirmStopped().catch(() => {}).finally(() => { confirming = false; });
+      };
+      const abort = () => { clock.stop(); cancelRun(); confirmTimer = setInterval(confirmStop, 3000); };
       // After an abort, the stream is read until the turn's terminal result, for at most STOP_CONFIRM_MS.
       let stopTimer: ReturnType<typeof setTimeout> | undefined;
       let confirmWindow = () => {};
@@ -625,14 +643,17 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         this.delivery?.begin(otid);
         begun = true;
         await (otid ? session.send(message, { otid }) : session.send(message));
+        if (signal.aborted) { abortedAt = undefined; cancelRun(); }
         const events = session.stream()[Symbol.asyncIterator]();
         while (true) {
           const next = await Promise.race([events.next(), unconfirmed]);
           if (next.done) break;
           const event = next.value;
           if (signal.aborted) {
-            // Stopped: nothing more is shown; wait for the run's own end (never another turn's).
+            // Stopped: nothing more is shown; wait for the run's own end (never another turn's), asking again while it goes on.
             if (event.type === 'result') { confirmed = true; break; }
+            // The loop is waiting for input again: the run ended; let the backend confirm it.
+            if (event.type === 'loop_status' && event.status === 'WAITING_ON_INPUT') confirmStop(); else cancelRun();
             continue;
           }
           clock.progress();
@@ -705,6 +726,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         clock.stop(); unwatch();
         signal.removeEventListener('abort', confirmWindow);
         if (stopTimer) clearTimeout(stopTimer);
+        if (confirmTimer) clearInterval(confirmTimer);
         signal.removeEventListener('abort', abort);
         // A failure (not a stop, which already asked the backend to cancel): cancel whatever may still run.
         if (!completed && !signal.aborted) void session?.abort().catch(() => {});

@@ -177,6 +177,10 @@ test('uncertain: a transport failure locks the conversation; Check and unlock in
     assert.deepEqual(f.checks.at(-1)?.otid, lost.id);
     assert.deepEqual(f.sent.map(s => s.text), ['quick', 'lost']);
     assert.ok(f.runtime.runRecord('owner', lost.id)!.checked);
+    const unlocked = await f.runtime.view('owner', thread) as { status: string; usable?: boolean; checked?: { delivered?: boolean } };
+    assert.equal(unlocked.status, 'failed', 'the turn keeps its status (for the record)');
+    assert.equal(unlocked.usable, true, 'but the conversation takes new turns');
+    assert.equal(unlocked.checked?.delivered, true);
     const next = start(thread, 'quick', lost.id); await f.runtime.start('owner', next);
     await until(() => status(f, next.id) === 'completed', 'usable after check');
   } finally { await f.cleanup(); }
@@ -232,5 +236,5 @@ test('usable-run rule shared by start, enqueue, rewind and decisions: stopped an
   assert.equal(soloRefusal([run('a')], [run('a', { status: 'cancelled' })], undefined, false), 'delivery_uncertain');
   // Display: an interrupted tool of a stopped turn says so.
   const shown = displayRun(run('a', { status: 'stopped', events: [{ sequence: 1, type: 'tool_started', data: { toolCallId: 'x', name: 'run_command', input: {} } }] }));
-  assert.deepEqual(shown[1]!.parts.map(p => p.type === 'dynamic-tool' && p.state === 'output-error' ? p.errorText : null), ['Interrupted: the turn was stopped.']);
+  assert.deepEqual(shown[1]!.parts.map(p => p.type === 'dynamic-tool' && p.state === 'output-error' ? p.errorText : null), ['Turn stopped; the tool was interrupted.']);
 });

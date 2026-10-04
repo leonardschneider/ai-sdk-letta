@@ -333,7 +333,7 @@ export function displayRun(run: Run): UIMessage[] {
   }
   if (run.status !== 'completed' && run.status !== 'running') for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: run.status === 'stopped' ? 'Interrupted: the turn was stopped.' : `Turn ${run.status}; execution not confirmed.` };
+    if (part.type === 'dynamic-tool' && part.state === 'input-available') parts[i] = { ...part, state: 'output-error', errorText: run.status === 'stopped' ? 'Turn stopped; the tool was interrupted.' : `Turn ${run.status}; execution not confirmed.` };
   }
   const metadata = run.startedAt || run.author || run.source || run.decision ? { metadata: { ...(run.startedAt ? { createdAt: run.startedAt } : {}), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}) } } : {};
   // Runtime state never stores image bytes; failed/reconnecting runs show a placeholder.
@@ -1118,11 +1118,12 @@ export class ThreadRuntime {
     if (latest && latest.status !== 'running' && !usableRun(latest)) return {
       messages: this.observed(id),
       // Why it is read-only (the app offers Check and unlock).
-      lastRunId: latest.id, live: null, status: latest.status, source: 'transport-observations', code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'delivery_uncertain'), ...queue,
+      lastRunId: latest.id, live: null, status: latest.status, usable: false, source: 'transport-observations', code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'delivery_uncertain'), ...queue,
     };
     // A stopped turn: the app marks its (partial) reply as stopped, and why.
     const stopped = latest?.status === 'stopped' ? { stopped: { runId: latest.batchOf ?? latest.id, code: String([...latest.events].reverse().find(event => event.type === 'stopped')?.data.code ?? 'cancelled') } } : {};
-    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, source: 'backend-history', ...stopped, ...queue };
+    // `usable`: whether the conversation takes new turns (a stopped turn, or one Check and unlock settled, is usable whatever its status).
+    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, usable: !latest || usableRun(latest), source: 'backend-history', ...stopped, ...(latest?.checked ? { checked: { ...latest.checked } } : {}), ...queue };
   }
   private emit(run: Run, type: string, data: Record<string, unknown>) {
     // Sequence numbers continue from the last event (compacted runs have fewer events than their last number).

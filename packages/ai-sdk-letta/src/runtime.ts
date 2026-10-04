@@ -331,6 +331,8 @@ export const TURN_TIMEOUT_MS = SDK_TURN_TIMEOUT_MS;
 const REQUEST_TIMEOUT_MS = 60_000;
 /** Longest wait for a conversation's session to start (the SDK's own startup timeout covers only the app-server process). */
 const STARTUP_TIMEOUT_MS = 180_000;
+/** Longest wait for Check and unlock's read-only session to start (a conversation that does not open is reported as still busy). */
+const CHECK_STARTUP_MS = 60_000;
 /** Longest wait, after a turn was stopped, for the backend to report no active run (see {@link waitIdle}). */
 const IDLE_WAIT_MS = 30_000;
 /**
@@ -346,6 +348,21 @@ async function waitIdle(session: Pick<LettaCodeSession, 'getDeviceStatus'>, wait
     catch (error) { if (Date.now() >= until) throw error; }
     await new Promise(resolve => setTimeout(resolve, Math.min(2000, 250 * (attempt + 1))));
   }
+}
+/**
+ * After a stop the SDK did not report (it lands before the run has an ID:
+ * the harness ends the turn without one, which the installed SDK ignores):
+ * once the backend is idle, end the SDK's stuck turn as interrupted, so the
+ * stream reports it and the next turn starts clean. Uses the SDK's turn
+ * coordinator (capability-checked; without it, nothing happens and the stop
+ * stays unconfirmed, which fails closed).
+ * @throws while the backend still has an active run
+ */
+async function confirmStopped(session: LettaCodeSession): Promise<void> {
+  await waitIdle(session, 5_000);
+  const turns = (session as unknown as { turns?: { activeTurn?: { abortRequested?: boolean } | null; failTurn?(turn: unknown, detail: string, options: { errorCode: string }): void } }).turns;
+  const active = turns?.activeTurn;
+  if (active?.abortRequested === true && typeof turns?.failTurn === 'function') turns.failTurn(active, 'Interrupted', { errorCode: 'interrupted' });
 }
 /** Timeout of requests of the host's own client (creating the agent, listing models). */
 const SETUP_TIMEOUT_MS = 600_000;
@@ -655,7 +672,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           id: definition.id, tools: definition.tools, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
             turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
-            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
+            return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), confirmStopped: () => confirmStopped(live), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
           presentation: { conversationId, title: conversationTitle, initialMessages, status: startupStatus, memoryDirectory: memoryRoot, historyTruncated: history.truncated },
@@ -766,7 +783,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
       const inspector = lettaClient();
       const session = inspector.resumeSession(conversationId === 'default' ? identity.agentId : conversationId, { stateless: true, cwd, toolset: { base: 'none' }, allowedTools: [], tools: [], permissionMode: 'strict', skillSources: [] } as LettaCodeClientSessionOptions);
       try {
-        const ready = await within(session.ready(), STARTUP_TIMEOUT_MS, 'Timed out opening the conversation');
+        // A conversation whose run is still going (for example, of a process that died) may not open at once: still locked, check again later.
+        let ready: Awaited<ReturnType<typeof session.ready>>;
+        try { ready = await within(session.ready(), CHECK_STARTUP_MS, 'check_startup_timeout'); }
+        catch (error) { if (error instanceof Error && error.message === 'check_startup_timeout') return { unlocked: false, active: true, tools: { calls: 0, unfinished: 0 }, pending: !!pending }; throw error; }
         if (ready.agentId !== identity.agentId || ready.conversationId !== conversationId) throw new Error('Backend resumed a different identity/conversation');
         let active = false;
         try { assertIdle(await session.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS })); } catch { active = true; }

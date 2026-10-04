@@ -21,7 +21,7 @@ async function flush(rounds = 20) { for (let i = 0; i < rounds; i++) await new P
  * `abort` (as the harness does) ends the turn with an "interrupted" result
  * once the backend confirmed the run ended.
  */
-function scripted(options: { confirmAbort?: boolean } = {}) {
+function scripted(options: { confirmAbort?: boolean; idleAfterAbort?: boolean } = {}) {
   const queue: SDKMessage[] = [];
   let wake: (() => void) | undefined;
   let ended = false;
@@ -35,6 +35,8 @@ function scripted(options: { confirmAbort?: boolean } = {}) {
       if (options.confirmAbort !== false) { log.activeRuns = 0; push({ type: 'result', success: false, errorCode: 'interrupted', durationMs: 1, conversationId: 'c', uuid: 'r' } as SDKMessage); }
     },
     close() {},
+    // The backend reports idle after an unreported stop: the stuck turn is ended (as the runtime does through the SDK).
+    ...(options.idleAfterAbort ? { async confirmStopped() { if (!log.aborts) throw new Error('busy'); log.activeRuns = 0; push({ type: 'result', success: false, errorCode: 'interrupted', durationMs: 1, conversationId: 'c', uuid: 'confirmed' } as SDKMessage); } } : {}),
     async *stream() {
       while (!ended) {
         if (!queue.length) await new Promise<void>(resolve => { wake = resolve; });
@@ -229,6 +231,21 @@ test('uncertain: a stop Letta never confirms, a failed settle, or a transport fa
   third.catch(() => {});
   await flush(); t3.push(say('a', 'a')); await flush(); stop3.abort(); await flush();
   assert.deepEqual(await noSettle.lastTurn(), { end: 'failed' });
+});
+
+test('a stop the stream never reports (it landed before the run had an ID) is confirmed through the backend being idle', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const s = scripted({ confirmAbort: false, idleAfterAbort: true });
+  const agent = agentWith(s, { delivery: { begin() {}, complete() {}, async settle() { return { delivered: true }; } }, limits: { idleMs: 1000 } });
+  const running = agent.generate({ prompt: 'think silently' });
+  running.catch(() => {});
+  await flush();
+  assert.equal(s.log.sent.length, 1);
+  t.mock.timers.tick(1000); await flush();
+  assert.ok(s.log.aborts >= 1);
+  t.mock.timers.tick(3000); await flush();
+  await assert.rejects(running, (error: unknown) => error instanceof TurnLimitError && error.reason === 'idle_timeout');
+  assert.deepEqual(await agent.lastTurn(), { end: 'stopped', reason: 'idle_timeout', delivered: true });
 });
 
 test('a stop before anything was sent is known and usable without a settle', async () => {
