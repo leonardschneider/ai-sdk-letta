@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ListMessagesResult } from '@letta-ai/letta-agent-sdk';
 import {
   acquireIdentity, forgetIdentity, claimsOf, defineAgent, AdoptionStore, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity,
-  adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate, projectHistory, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
+  adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate, projectHistory, adoptedDefinition, checkAdoptedProject, withProjectDescriptions, sandboxTools, SandboxError, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
   type JiminyVerdict, type MemoryReviewer,
 } from '../src/index.js';
 
@@ -99,6 +99,55 @@ test('adoption records persist, refuse duplicates, and removing one keeps the ot
   assert.equal(store.remove('blog-2cc740f1'), true);
   assert.deepEqual(store.read().map(r => r.definitionId), ['general-1']);
   assert.equal(JSON.parse(readFileSync(store.file, 'utf8')).version, 1);
+});
+
+/* ---------------- project folder ---------------- */
+
+test('a project folder is checked: absolute, existing, not home, / or ~/.letta, no credentials; symlinks resolve for the mount only', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ai-sdk-letta-project-')));
+  try {
+    const home = join(root, 'home'); mkdirSync(join(home, '.letta', 'agents'), { recursive: true });
+    const blog = join(root, 'cloud', 'blog'); mkdirSync(blog, { recursive: true });
+    git(blog, 'init', '-q');
+    git(blog, 'remote', 'add', 'origin', 'git@github.com:someone/blog-source.git');
+    const link = join(home, 'blog'); symlinkSync(blog, link);
+    const refused = (path: string, code: string, pattern: RegExp) => assert.throws(() => checkAdoptedProject(path, home), (e: unknown) => e instanceof SandboxError && e.code === code && pattern.test(e.message), path);
+    // A symlink is accepted and mounted at its real path.
+    assert.equal(checkAdoptedProject(link, home), blog);
+    refused('blog', 'project_unsafe', /absolute/);
+    refused(join(root, 'missing'), 'project_unsafe', /does not exist/);
+    refused(home, 'project_unsafe', /home folder/);
+    refused('/', 'project_unsafe', /root/);
+    refused(join(home, '.letta'), 'project_unsafe', /\.letta/);
+    refused(join(home, '.letta', 'agents'), 'project_unsafe', /\.letta/);
+    refused(`${blog},dst=/etc`, 'project_unsafe', /commas/);
+    // Credentials in .git/config are refused, with the reason.
+    git(blog, 'remote', 'set-url', 'origin', 'https://user:token@github.com/someone/blog-source.git');
+    refused(link, 'project_has_credentials', /credentials/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an adopted agent\'s project folder is persisted and merged into its sandbox (mounted at /project); the shell tools and instructions say so', () => {
+  const store = new AdoptionStore(join(mkdtempSync(join(tmpdir(), 'ai-sdk-letta-adopt-')), 'adopted.json'));
+  const record = { definitionId: 'blog-2cc740f1', agentId: AGENT, name: 'blog', model: 'm/x', tools: ['files' as const, 'sandbox' as const], adoptedAt: new Date().toISOString() };
+  store.add(record);
+  store.update('blog-2cc740f1', r => ({ ...r, project: '/Users/me/iCloud/blog' }));
+  assert.equal(new AdoptionStore(store.file).get('blog-2cc740f1')?.project, '/Users/me/iCloud/blog');
+  const environment = { sandbox: { provider: 'docker' as const, project: '/srv/shared', git: { name: 'A', email: 'a@example.com' } } };
+  const withProject = adoptedDefinition({ ...record, project: '/Users/me/iCloud/blog' }, environment);
+  assert.deepEqual(withProject.sandbox?.project, { path: '/Users/me/iCloud/blog', readOnly: false });
+  assert.equal(adoptedDefinition(record, environment).sandbox?.project?.path, '/srv/shared', 'without its own, the host\'s stays');
+  assert.equal(adoptedDefinition({ ...record, project: '/x' }, {}).sandbox, undefined, 'no sandbox on the host: nothing to mount');
+  assert.equal(adoptedDefinition({ ...record, tools: ['files'], project: '/x' }, environment).sandbox, undefined, 'without the sandbox tool set: nothing mounted');
+  // The model learns where the project is from run_command's description.
+  const tools = withProjectDescriptions({ ...sandboxTools, other: { description: 'x' } }, '/Users/me/iCloud/blog');
+  assert.match(tools.run_command.description as string, /"blog" is at \/project .*\/workspace holds conversation files/);
+  assert.match(tools.run_command_online.description as string, /\/project/);
+  assert.equal((sandboxTools.run_command.description as string).includes('/project'), false, 'the shared tool is unchanged');
+  assert.equal((tools.other as { description: string }).description, 'x');
+  const section = adoptedInstructionsSection(['run_command'], 'Memory policy.', 'blog');
+  assert.match(section, /"blog" is at \/project/);
+  assert.equal(adoptedInstructionsSection(['run_command'], 'Memory policy.').includes('/project'), false);
 });
 
 /* ---------------- Letta Code activity ---------------- */

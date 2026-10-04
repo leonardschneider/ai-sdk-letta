@@ -1,9 +1,9 @@
 import express from 'express';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import {
-  ADOPTED_TOOL_SETS, AdoptionStore, adoptedDefinition, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
+  ADOPTED_TOOL_SETS, AdoptionStore, SandboxError, adoptedDefinition, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
   forgetIdentity, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
   withoutInstructionsSection, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
 } from 'ai-sdk-letta';
@@ -82,6 +82,7 @@ export interface AdoptionRegistryOptions {
 
 const REFUSALS: Record<string, string> = {
   agent_missing: 'This agent no longer exists.', agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'This agent has no MemFS memory; only agents with MemFS can be added.',
+  sandbox_unavailable: 'This server has no sandbox, so it cannot mount a project folder.',
   agent_claimed: 'This agent is already in the app.', letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', capacity_reached: 'The app holds as many agents as it can.',
 };
 
@@ -96,6 +97,7 @@ const REFUSALS: Record<string, string> = {
  * - `POST /api/adoption/agents` `{ agentId, tools? }`: adopt one;
  * - `DELETE /api/adoption/agents/<id>`: remove it from the app (the Letta agent is never deleted);
  * - `PUT /api/adoption/agents/<id>/tools` `{ tools }`: its tool sets;
+ * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
  * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
  */
@@ -112,7 +114,13 @@ export class AdoptionRegistry {
   /** Host every recorded adoption (at startup). Nothing is opened until a conversation is. */
   start() { for (const record of this.store.read()) { try { this.host(record); } catch (error) { this.options.log?.(`Adopted agent ${record.definitionId} not loaded: ${error instanceof Error ? error.message : String(error)}`); } } }
   private host(record: AdoptionRecord): Hosted {
-    const definition = adoptedDefinition(record, this.options.environment);
+    // A project folder that became unsafe or went away (moved, credentials added) is left out, so the agent still opens; the app keeps showing the path.
+    let usable = record;
+    if (record.project) {
+      try { checkAdoptedProject(record.project); }
+      catch (error) { const { project: _skipped, ...rest } = record; usable = rest; this.options.log?.(`Project folder of ${record.definitionId} not mounted: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    const definition = adoptedDefinition(usable, this.options.environment);
     const folder = join(statePaths(this.options.stateDirectory).server(definition.id), 'gui');
     const { runtime, board } = this.options.build(definition, folder);
     const router = runtimeRoutes(express(), runtime, this.options.owner);
@@ -126,7 +134,7 @@ export class AdoptionRegistry {
     return [...this.hosted.values()].map(({ record, definition }) => ({
       id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
       files: record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
-      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions },
+      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true } : {}) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -184,9 +192,38 @@ export class AdoptionRegistry {
     this.host(record);
     return record;
   }
-  /** The instructions section for an adopted agent: the tools it has here and the memory policy. */
+  /**
+   * Set or clear an adopted agent's project folder (`{ path }` or `{ path: null }`).
+   * The path is checked (`checkAdoptedProject`) and kept as given; its real
+   * path is mounted read-write at `/project`. Setting one turns on the
+   * sandbox tools. Its runtime restarts, so open conversations get the new
+   * sandbox on their next message. Refusals: `project_unsafe` and
+   * `project_has_credentials` (with the reason), `sandbox_unavailable`.
+   */
+  async setProject(definitionId: string, input: unknown) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const path = (input as { path?: unknown } | undefined)?.path;
+    if (path !== null && typeof path !== 'string') throw new RuntimeFault('invalid_input', 400);
+    if (path !== null) {
+      if (!this.options.environment?.sandbox) throw new RuntimeFault('sandbox_unavailable');
+      try { checkAdoptedProject(path); }
+      catch (error) { if (error instanceof SandboxError) throw new ProjectRefusal(error.code, error.message); throw error; }
+    }
+    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
+    const record = this.store.update(definitionId, r => {
+      const { project: _old, ...rest } = r;
+      return path === null ? rest : { ...rest, project: path, tools: r.tools.includes('sandbox') ? r.tools : [...r.tools, 'sandbox'] };
+    });
+    this.hosted.delete(definitionId); this.feed?.remove(definitionId);
+    await hosted.runtime.close();
+    this.host(record);
+    return { project: record.project ?? null, tools: record.tools };
+  }
+  /** The instructions section for an adopted agent: the tools it has here, its project folder, and the memory policy. */
   private section(hosted: Hosted) {
-    return adoptedInstructionsSection(Object.keys(hosted.definition.tools), memoryPolicyInstructions(hosted.definition.dreaming));
+    const project = hosted.definition.sandbox?.project && hosted.record.project ? basename(hosted.record.project) : undefined;
+    return adoptedInstructionsSection(Object.keys(hosted.definition.tools), memoryPolicyInstructions(hosted.definition.dreaming), project);
   }
   /** Preview the instructions update (nothing changes). */
   async instructions(definitionId: string) {
@@ -231,7 +268,11 @@ export class AdoptionRegistry {
     const refusal = (error: unknown) => error instanceof RuntimeFault ? { status: error.status, code: error.code } : { status: 503, code: 'adoption_unavailable' };
     const wrap = (handler: (req: express.Request) => Promise<unknown>) => async (req: express.Request, res: express.Response) => {
       try { res.json(await handler(req)); }
-      catch (error) { const { status, code } = refusal(error); res.status(status).json({ error: code, ...(REFUSALS[code] ? { message: REFUSALS[code] } : {}) }); }
+      catch (error) {
+        // A refused project folder: the reason is shown to the person who chose it (their own paths only).
+        if (error instanceof ProjectRefusal) return void res.status(409).json({ error: error.code, message: error.message });
+        const { status, code } = refusal(error); res.status(status).json({ error: code, ...(REFUSALS[code] ? { message: REFUSALS[code] } : {}) });
+      }
     };
     app.get('/adoption/agents', wrap(async () => {
       const adopted = this.store.read();
@@ -248,6 +289,7 @@ export class AdoptionRegistry {
     app.post('/adoption/agents', json, wrap(async req => this.adopt(req.body)));
     app.delete('/adoption/agents/:id', wrap(async req => this.remove(String(req.params.id))));
     app.put('/adoption/agents/:id/tools', json, wrap(async req => this.setTools(String(req.params.id), req.body)));
+    app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));
     app.post('/adoption/agents/:id/instructions', json, wrap(async req => this.applyInstructions(String(req.params.id))));
     app.delete('/adoption/agents/:id/instructions', wrap(async req => this.revertInstructions(String(req.params.id))));
@@ -270,6 +312,9 @@ export class AdoptionRegistry {
     await Promise.allSettled([...this.hosted.values()].map(hosted => hosted.runtime.close()));
   }
 }
+
+/** A refused project folder, with its human-readable reason. */
+class ProjectRefusal extends Error { constructor(readonly code: string, message: string) { super(message); } }
 
 /** Tool sets the host can offer. */
 export const availableTools = (environment: AdoptionEnvironment = {}): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => (set !== 'sandbox' || !!environment.sandbox) && (set !== 'web_search' || !!environment.webSearch));

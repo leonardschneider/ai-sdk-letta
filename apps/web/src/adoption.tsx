@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, ChevronDown, FileDiff, LoaderCircle, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { ApiError, serverApi, type AgentInfo } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
@@ -22,8 +22,11 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', agent_claimed: 'This agent is already in the app.', agent_missing: 'This agent no longer exists.',
       agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'Only agents with MemFS memory can be added.', runtime_busy: 'Wait until the agent finishes replying, then try again.',
       session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
+      sandbox_unavailable: 'This server has no sandbox, so it cannot mount a project folder.',
     };
-    throw new AdoptionError(error.code, messages[error.code] ?? 'That didn’t work. Nothing was changed.');
+    // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
+    const project = (error.code === 'project_unsafe' || error.code === 'project_has_credentials') && error.detail ? error.detail : undefined;
+    throw new AdoptionError(error.code, project ?? messages[error.code] ?? 'That didn’t work. Nothing was changed.');
   }
 }
 const when = (value?: string) => {
@@ -37,7 +40,7 @@ const when = (value?: string) => {
  * adopted agents: switch agents, add one, remove the current one, or update
  * its instructions.
  */
-export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void }) {
+export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void }) {
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
       <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`}>
@@ -55,6 +58,7 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
         </DropdownMenu.RadioGroup>
         <DropdownMenu.Separator className="menu-sep"/>
         <DropdownMenu.Item className="menu-item" onSelect={onAdd}><Plus size={15} aria-hidden="true"/>Add agent…</DropdownMenu.Item>
+        {current.adopted && onProject && <DropdownMenu.Item className="menu-item" onSelect={() => onProject(current)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>}
         {current.adopted && <DropdownMenu.Item className="menu-item" onSelect={() => onInstructions(current)}><FileDiff size={15} aria-hidden="true"/>Update instructions…</DropdownMenu.Item>}
         {current.adopted && <DropdownMenu.Item className="menu-item danger" onSelect={() => onRemove(current)}><Trash2 size={15} aria-hidden="true"/>Remove from app…</DropdownMenu.Item>}
       </DropdownMenu.Content>
@@ -181,5 +185,48 @@ export function InstructionsDialog({ agent, onClose }: { agent: AgentInfo; onClo
       <button type="button" className="btn ghost" onClick={onClose}>Close</button>
       {data?.changed && <button type="button" className="btn primary" disabled={saving} data-autofocus onClick={() => void run('POST')}>{saving ? 'Applying…' : 'Apply'}</button>}
     </div>
+  </Modal>;
+}
+
+/**
+ * Project folder: a folder on this computer the adopted agent works on,
+ * mounted read-write at `/project` in its sandbox. Shows the current one;
+ * set, change or clear it. The server refuses unsafe folders (home, `/`,
+ * `~/.letta`, credentials in `.git/config`) and says why.
+ */
+export function ProjectDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  const toast = useToast();
+  const current = agent.adopted?.project ?? '';
+  const [path, setPath] = useState(current);
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState('');
+  const sandbox = !!agent.adopted?.sandbox;
+  async function save(next: string | null) {
+    setSaving(true); setProblem('');
+    try {
+      await adoptionApi(`/agents/${encodeURIComponent(agent.id)}/project`, { path: next }, 'PUT');
+      toast(next ? `${agent.name} now works on ${next} (at /project in its sandbox).` : `${agent.name} no longer has a project folder.`);
+      onSaved();
+    } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
+  }
+  const trimmed = path.trim();
+  return <Modal label={`Project folder of ${agent.name}`} onClose={onClose} className="automations project">
+    <div className="members-head">
+      <div><h2 className="modal-title">Project folder</h2>
+        <p className="modal-text">A folder on this computer that {agent.name} works on, such as a website or a repository. Its sandbox sees it at <code>/project</code> and can change files there; conversation files stay in <code>/workspace</code>.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <form onSubmit={event => { event.preventDefault(); if (trimmed && trimmed !== current) void save(trimmed); }}>
+      <label className="automations-heading" htmlFor="project-path">Folder</label>
+      <input id="project-path" className="member-input mono" data-autofocus value={path} maxLength={1000} placeholder="/Users/you/blog" spellCheck={false} autoComplete="off" disabled={!sandbox || saving}
+        onChange={event => { setPath(event.target.value); setProblem(''); }} aria-invalid={!!problem || undefined} aria-describedby="project-help"/>
+      <p id="project-help" className="adopt-meta">{!sandbox ? 'This server has no sandbox, so it cannot mount a project folder.' : current ? `Current: ${current}.` : 'None yet. Paste the folder’s full path.'} Folders with credentials in <code>.git/config</code>, your home folder and <code>~/.letta</code> are refused. Changing it restarts {agent.name}’s sandbox.</p>
+      {problem && <p className="form-error" role="alert">{problem}</p>}
+      <div className="modal-actions">
+        {current && <button type="button" className="btn ghost" disabled={saving} onClick={() => void save(null)}>Clear</button>}
+        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="submit" className="btn primary" disabled={!sandbox || saving || !trimmed || trimmed === current}>{saving ? 'Saving…' : 'Save'}</button>
+      </div>
+    </form>
   </Modal>;
 }

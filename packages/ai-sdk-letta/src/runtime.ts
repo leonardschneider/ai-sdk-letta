@@ -15,7 +15,7 @@ import { DECISIONS_CONTEXT, decisionsEnabled, type DecisionDesk } from './decisi
 import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
-import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout } from './sandbox.js';
+import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout, withProjectDescriptions } from './sandbox.js';
 import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDevToolTimeouts, type WebDevServices, type WebDevServicesOptions } from './webdev.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
@@ -497,7 +497,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         // memory_provenance: who changed a memory file, and from what (the agent asks; the harness answers from git and the ledger).
-        const withProvenance = { ...definition.tools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
+        // With a project folder, the shell tools say where it is (/project) and what /workspace holds.
+        const appTools = sandbox?.hasProject && definition.sandbox?.project ? withProjectDescriptions(definition.tools as ToolSet, definition.sandbox.project.path) : definition.tools;
+        const withProvenance = { ...appTools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
         const exposed = listening ? { ...withProvenance, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : withProvenance;
         // Without a sandbox (or without web development), those tools are never exposed.
         const hidden = new Set<string>([...(sandbox ? [] : SANDBOX_TOOL_NAMES), ...(webDev ? [] : WEBDEV_TOOL_NAMES)]);
