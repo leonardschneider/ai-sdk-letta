@@ -279,6 +279,12 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/threads/:id/rewind', async (req, res) => res.json(await runtime.rewind(owner, req.params.id, req.body, author(req))));
   app.post('/v1/runs/:id/answer', (req, res) => { mayAct(req, req.params.id, true); runtime.answer(owner, req.params.id, req.body); res.json({ accepted: true }); });
   app.post('/v1/runs/:id/cancel', (req, res) => { mayAct(req, req.params.id); runtime.cancel(owner, req.params.id); res.json({ accepted: true }); });
+  // Check and unlock: read-only inspection of a conversation whose last turn is uncertain; unlocks it when Letta is idle. Never replays.
+  app.post('/v1/threads/:id/check', async (req, res) => {
+    const latest = runtime.latestRun(owner, req.params.id);
+    if (latest) mayAct(req, latest.id);
+    res.json(await runtime.check(owner, req.params.id));
+  });
   /* ---------------- memory: provenance and reviews ---------------- */
   /** Memory reviews (newest first) and the reviewer's model setting. */
   app.get('/v1/memory/reviews', async (req, res) => res.json(await runtime.memoryReviews(owner, Math.min(200, Math.max(1, Number(req.query.limit) || 50)))));
@@ -330,7 +336,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.get('/v1/runs/:id/events', (req, res) => {
     const snapshot = runtime.events(owner, req.params.id, Number(req.query.after ?? 0));
     res.set({ 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
-    const write = (event: RuntimeEvent) => { if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`); if (event.type === 'completed' || event.type === 'failed') res.end(); };
+    const write = (event: RuntimeEvent) => { if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`); if (event.type === 'completed' || event.type === 'failed' || event.type === 'stopped') res.end(); };
     for (const event of snapshot.events) write(event);
     // A queued turn streams too: from 'started' when it is sent, or 'failed' if it never is.
     if (snapshot.status !== 'running' && snapshot.status !== 'queued') { res.end(); return; }
@@ -376,7 +382,7 @@ export interface GuiAgentInfo {
   /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model, tool sets, project folder (as given), and whether the server has a sandbox. */
-  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean };
+  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
   /** The agent has MCP Apps (`mcpApps`): tool lines of app tools render their views. */

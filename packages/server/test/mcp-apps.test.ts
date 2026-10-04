@@ -30,12 +30,24 @@ async function fixture(policies: Record<string, 'allow' | 'ask' | 'deny'> = {}) 
       const conversationId = 'conversationId' in options ? options.conversationId : `conv-${randomUUID()}`;
       if (!conversations.has(conversationId)) conversations.set(conversationId, []);
       let input = '';
+      let aborted = false;
+      let wake: (() => void) | undefined;
       const agent = current = new LettaAgent({ id: 'fixture', tools, lettaAgentId: 'agent-1', interactions: new ToolInteractions(),
         beforeTurn: turn => { turns.push({ text: '', ...(turn.sources ? { sources: turn.sources } : {}) }); },
         open: () => ({
-          async send(text) { input = String(text); const last = turns.at(-1)!; last.text = input; const reminder = /<system-reminder>\n([\s\S]*?)\n<\/system-reminder>/.exec(input)?.[1]; if (reminder) last.reminder = reminder; },
-          async abort() {}, close() {},
-          async *stream() { yield { type: 'assistant', content: 'ok', uuid: '1' } as SDKMessage; yield { type: 'result', success: true, uuid: '2', durationMs: 1, conversationId } as SDKMessage; },
+          async send(text) { input = String(text); aborted = false; const last = turns.at(-1)!; last.text = input; const reminder = /<system-reminder>\n([\s\S]*?)\n<\/system-reminder>/.exec(input)?.[1]; if (reminder) last.reminder = reminder; },
+          // Stop: the fake harness confirms the run ended (as the real one does), so the turn is "stopped" and the conversation stays usable.
+          async abort() { aborted = true; wake?.(); }, close() {},
+          async *stream() {
+            if (input.endsWith('lost')) { yield { type: 'assistant', content: 'half', uuid: 'l' } as SDKMessage; throw new Error('transport lost'); }
+            if (input.endsWith('long')) {
+              yield { type: 'assistant', content: 'partial', uuid: 'p' } as SDKMessage;
+              while (!aborted) await new Promise<void>(resolve => { wake = resolve; });
+              yield { type: 'result', success: false, errorCode: 'interrupted', durationMs: 1, conversationId, uuid: 'int' } as SDKMessage;
+              return;
+            }
+            yield { type: 'assistant', content: 'ok', uuid: '1' } as SDKMessage; yield { type: 'result', success: true, uuid: '2', durationMs: 1, conversationId } as SDKMessage;
+          },
         }) });
       void input;
       return { agent, agentId: 'agent-1', conversationId, history: [] };
@@ -245,4 +257,51 @@ test('the browser learns an agent has apps (session flag), and team servers refu
     assert.equal(agentInfo(defineAgent({ id: 'plain', name: 'Plain', model: 'openai/x', instructions: 'x', tools: {} })).apps, undefined);
     await assert.rejects(startTeamServer([definition], dir, { owners: ['a@example.com'], origins: [], stateDirectory: dir, log: () => {} }), /single-user only/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ui/message follows the usable-run rule: sent after a stopped turn, refused behind an uncertain one, never sent if the turn it waited for fails', async () => {
+  const f = await fixture();
+  try {
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
+    const say = (text: string) => f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text }] });
+    const statusOf = (id: string) => f.runtime.events('owner', id, 0).status;
+    // A stopped turn (Stop, confirmed by the harness): the conversation stays usable, the app's message is sent after it.
+    const long = { id: randomUUID(), threadId: f.thread, text: 'long', parentRunId: null };
+    await f.runtime.start('owner', long);
+    await until(() => f.runtime.events('owner', long.id, 0).events.some(e => e.type === 'text'));
+    const queued = say('after the stop') as { pending: string };
+    const deciding = f.gate.decide('owner', queued.pending, { approved: true });
+    f.runtime.cancel('owner', long.id);
+    await until(() => statusOf(long.id) === 'stopped');
+    assert.equal((await deciding).status, 'done');
+    await until(() => f.turns.some(t => t.text.includes('after the stop')));
+    const sent = f.runtime.latestRun('owner', f.thread)!;
+    await until(() => statusOf(sent.id) === 'completed');
+    // An approved message waiting behind a turn that then fails (delivery uncertain) is never sent.
+    const lost = { id: randomUUID(), threadId: f.thread, text: 'lost', parentRunId: sent.id };
+    await f.runtime.start('owner', lost);
+    await until(() => statusOf(lost.id) === 'failed');
+    assert.equal(f.runtime.latestRun('owner', f.thread)!.usable, false);
+    // Behind the uncertain turn, nothing is even asked.
+    const refused = say('behind a failed turn');
+    assert.ok('error' in refused && /read-only/.test(refused.error.message));
+    assert.equal(f.gate.pending('owner', f.thread).length, 0);
+    assert.ok(!f.turns.some(t => t.text.includes('behind a failed turn')));
+  } finally { await f.cleanup(); }
+});
+
+test('an approved ui/message whose conversation became uncertain while it waited is reported as not sent', async () => {
+  const f = await fixture();
+  try {
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
+    const asked = f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'too late' }] }) as { pending: string };
+    const lost = { id: randomUUID(), threadId: f.thread, text: 'lost', parentRunId: null };
+    await f.runtime.start('owner', lost);
+    await until(() => f.runtime.events('owner', lost.id, 0).status === 'failed');
+    const decided = await f.gate.decide('owner', asked.pending, { approved: true });
+    assert.equal(decided.status, 'failed');
+    assert.match(decided.error ?? '', /read-only/);
+    assert.ok(!f.turns.some(t => t.text.includes('too late')));
+    assert.ok(f.gate.recent.some(e => e.event === 'app_message' && e.outcome === 'not_sent:delivery_uncertain'));
+  } finally { await f.cleanup(); }
 });

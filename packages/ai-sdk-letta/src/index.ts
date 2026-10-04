@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-export { LettaAgent, type TurnInfo, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
+export { LettaAgent, TurnLimitError, STOP_CONFIRM_MS, type TurnOutcome, type TurnInfo, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
 export {
   resolveReplyMode, mentionsAgent, mentionNames, turnNote, combinedText, speakerLabel, REPLY_MODES, REPLY_MODE_SETTINGS, REPLY_MODE_OVERRIDES, STAY_SILENT_TOOL, STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA,
   type ReplyMode, type ReplyModeSetting, type ReplyModeOverride, type TurnSpeaker, type TurnNoteOptions,
@@ -17,7 +17,7 @@ export {
   defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, DEFAULT_MEMORY, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
   type AgentDefinition, type WebSearchSettings, type MemorySettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { mcpAppsDirectory, openLettaAgent, createLettaAgent, openAgentHost, peekConversation, conversationGlance, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
+export { mcpAppsDirectory, openLettaAgent, createLettaAgent, openAgentHost, checkConversation, peekConversation, conversationGlance, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord, type ConversationCheck } from './runtime.js';
 export { MemoryJournal, AGENT_EMAIL, REVIEW_EMAIL, harnessCommit, type MemoryRewindPlan, type TurnCommits, type LineDrop } from './memory-journal.js';
 export {
   turnProvenance, trustEligible, withSource, sourceOfTool, appSource, adminClean, untrusted, provenanceTrailers, parseProvenanceTrailers, provenanceLabel, blameProvenance, sections, commitTrailers, PROVENANCE_TRAILERS, TRUSTED_TOOLS,
@@ -31,7 +31,8 @@ export {
 export { dreamHookSupported, dreamHookCommand, parseDreamRequest, reviewDreamRequest, DREAM_HOOK_CAPABILITY, type DreamRequest, type DreamResponse } from './dream-review.js';
 export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenAgentsOf, transcriptsDirectory, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
 export { planRevert, changedBy, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
-export { acquireIdentity, claimsOf, forgetIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease } from './identity.js';
+export { acquireIdentity, claimsOf, forgetIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease, type PendingTurn, type SettledTurn } from './identity.js';
+export { TurnClock, resolveTurnLimits, turnLimits, envTurnLimits, formatDuration, DEFAULT_TURN_IDLE_MS, DEFAULT_TURN_MAX_MS, SDK_TURN_TIMEOUT_MS, TURN_LIMIT_ENV, type TurnLimits, type TurnStopReason } from './turn-limits.js';
 export { HISTORY_LIMIT, FOREIGN_OUTPUT_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
 export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler, type ApprovalPreview } from './interactions.js';
@@ -86,7 +87,7 @@ export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUM
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
 export {
-  AdoptionStore, adoptedDefinition, checkAdoptedProject, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
+  AdoptionStore, adoptedDefinition, checkAdoptedProject, validCommandTimeout, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
   ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';

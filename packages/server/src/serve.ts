@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { McpApps, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { McpApps, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -184,6 +184,8 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
+    // Check and unlock (the runtime closed the session first): read-only, under the identity lock.
+    check: (conversationId, otid) => checkConversation(definition, conversationId, { stateDirectory, ...(otid ? { otid } : {}) }),
     // Adopted agents: their conversations are read without opening a session until someone sends.
     ...(definition.adopt ? { peek: adoptedPeek(definition.adopt.agentId, Object.keys(definition.tools)) } : {}),
   };
@@ -210,6 +212,7 @@ function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>,
       return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, close: () => conversation.close() };
     },
     close: async () => { const current = agent; agent = undefined; await (await current?.catch(() => undefined))?.close(); },
+    check: async (conversationId, otid) => (await opened()).check(conversationId, otid),
   };
 }
 

@@ -202,6 +202,8 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
     }
   }
   const failure = events.find(event => event.type === 'failed');
-  return parts.map(part => failure && part.type === 'tool-call' && part.result === undefined
-    ? { ...part, isError: true, result: `Turn ended: ${String(failure.data.code)}; execution not confirmed.` } : part);
+  // A stopped turn (Stop, or a turn limit): Letta confirmed the run ended, so an open call was interrupted.
+  const stopped = events.some(event => event.type === 'stopped');
+  return parts.map(part => (failure || stopped) && part.type === 'tool-call' && part.result === undefined
+    ? { ...part, isError: true, result: stopped ? 'Turn stopped; the tool was interrupted.' : `Turn ended: ${String(failure!.data.code)}; execution not confirmed.` } : part);
 }

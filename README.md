@@ -727,7 +727,8 @@ before they were sent do not count): in a group conversation, Edit is
 shown unavailable and says why, and the server refuses (`rewind_not_solo`).
 You also cannot rewind while a turn runs or messages wait to be sent
 (`runtime_busy`), past a turn an automation or scheduled task started
-(`rewind_automation`), past a turn that did not finish (`delivery_uncertain`),
+(`rewind_automation`), past a turn whose outcome is uncertain
+(`delivery_uncertain`; a turn that was stopped cleanly counts as finished),
 to a message sent before this version (`rewind_too_old`: what its turn
 changed is not recorded), or in an older conversation that uses the agent's
 default Letta conversation (`rewind_legacy_conversation`; see
@@ -952,10 +953,15 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
   Containers are labelled `ai-sdk-letta.sandbox`; containers left by a
   process that died (`kill -9`, a crash) are removed the next time a sandbox
   starts on that machine.
-- **Timeouts and Stop.** Each command has a timeout (`timeoutMs`, default 2
-  minutes, at most 4). On timeout, or when the user stops the turn, the
-  command and everything it started are killed inside the sandbox (the
-  container CLIs only kill their local client).
+- **Timeouts and Stop.** Each command has a timeout (`sandbox.timeoutMs`,
+  default 2 minutes, at most 4: the Letta harness ends any application tool
+  call after 5 minutes). Raise it per agent for long builds, such as a full
+  static site build (`sandbox: { provider, timeoutMs: 240_000 }`; for an
+  [added agent](#your-existing-letta-agents-add-agent), in its **Project
+  folder…** dialog). Work longer than that belongs in several commands. On
+  timeout, or when the user stops the turn, the command and everything it
+  started are killed inside the sandbox (the container CLIs only kill their
+  local client), and the agent gets the output so far.
 - **Output** is capped at about 14,000 characters: the start and end of
   stdout and stderr are kept, with a notice saying how much was omitted.
 - **Isolation.** Only the workspace (and the project, if set) is mounted: no
@@ -1160,7 +1166,10 @@ MCP_APPS=./clock-1.0.0.tgz npm run gui        # the example agent; `id=path args
   or Deny, once). `resources/read`: `ui://` resources of the same app.
   `ui/message` **always asks**; allowed, it becomes your message to the
   agent, marked with an **App** badge, and the agent is told it is the app's
-  content. `ui/update-model-context` asks on a view's first update; the
+  content. Like any message, it waits for a running turn (it is sent after
+  a completed or stopped one) and is never sent behind a turn whose outcome
+  is uncertain: then nothing is asked, or the approval reports it was not
+  sent. Tool calls a view makes run outside turns and are not affected. `ui/update-model-context` asks on a view's first update; the
   latest value per view then reaches the agent at your next message, as
   untrusted context. `ui/open-link` opens http(s) links in a new tab without
   an opener. Display modes: inline, full screen and picture-in-picture, only
@@ -1180,7 +1189,7 @@ What a definition controls, and when:
 | --- | --- |
 | `id`, `name` | Every start: the mapping and the Letta agent name must match, or startup fails. |
 | `model`, `instructions` | At creation only. To change them, create a new logical ID (or change the agent in Letta). |
-| `tools`, `permissions`, `toolTimeoutMs`, `sandbox`, `webDev`, `mcpApps` | Every start. |
+| `tools`, `permissions`, `toolTimeoutMs`, `turnLimits`, `sandbox`, `webDev`, `mcpApps` | Every start. |
 | `dreaming` | Every start, scoped to this project (see below), then verified. |
 
 ## TUI
@@ -1413,6 +1422,11 @@ server has them), then **Add**. The same menu switches between agents.
   `.gitignore` ignores hidden, a dot on files git sees as changed, and the
   usual previews and downloads. Links that point outside the folder are
   refused.
+  The same dialog sets its **command time limit** (seconds per sandbox
+  command, up to 240; the server's `sandbox.timeoutMs` otherwise): raise it
+  when a full build gets stopped. From code: `PUT
+  /api/adoption/agents/<id>/sandbox` with `{ "commandTimeoutMs": 240000 }`
+  or `{ "commandTimeoutMs": null }`.
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 
@@ -1666,12 +1680,17 @@ single-user agent before it is given up (`start_timeout`).
   answers are rejected. Without a connected renderer, prompts fail closed.
 - **No replay.** `LettaAgent` sends only the newest user message, and rejects
   history that does not extend exactly what it already sent. After a failure
-  or cancellation it refuses further turns.
+  whose outcome is uncertain it refuses further turns. A turn that was
+  stopped (Stop, or a [turn limit](#turn-limits-and-stop)) is not uncertain
+  once Letta confirmed its run ended: it is recorded as settled and the
+  conversation goes on.
 - **Uncertain delivery blocks.** A durable intent is written before each turn
-  and removed only after a confirmed finish. If the process dies in between,
-  that conversation stays blocked until you inspect it; nothing is resent.
-  Agent and conversation creation use the same pattern, so a crash cannot
-  create duplicates.
+  and removed only after a confirmed finish (or a confirmed stop). If the
+  process dies in between, or the connection fails mid-turn, that
+  conversation stays read-only until **Check and unlock** (or you) confirms
+  in Letta that nothing is still running; nothing is ever resent. Agent and
+  conversation creation use the same pattern, so a crash cannot create
+  duplicates.
 - **Memory is confined.** The harness gets only `Read`, `Write` and `Edit` on
   Markdown files inside the agent's own MemFS directory (no dot-files,
   traversal, symlinks or hard links) and one exact `git commit` command.
@@ -1854,6 +1873,57 @@ background after about 10 seconds, which would detach approvals and
 questions. `openLettaAgent` sets `auto_background: false` with a five-minute
 timeout for this agent's runtime (`foregroundExternalTools`, on by default).
 
+## Turn limits and Stop
+
+A turn may run for hours: an agent that builds a site, runs tests and fixes
+what fails keeps working as long as it makes progress. Two limits bound it,
+and time spent waiting for a person (an approval, a question) counts toward
+neither:
+
+- **Idle timeout** (default 10 minutes): stopped after this long without
+  progress. Progress is anything Letta streams (text, reasoning, a tool call
+  or its result); a tool call that is still running (a long sandbox command,
+  a build) is progress too.
+- **Hard cap** (default 6 hours of work): stopped when the turn has worked
+  this long, whatever it does. `0` disables it.
+
+Set them per agent, or for every agent of a process:
+
+```ts
+defineAgent({ /* ... */ turnLimits: { idleMs: 15 * 60_000, maxMs: 0 } });  // 15 minutes idle, no cap
+```
+
+```bash
+AI_SDK_LETTA_TURN_IDLE_MS=900000    # idle timeout
+AI_SDK_LETTA_TURN_MAX_MS=43200000   # hard cap (0: none); AI_SDK_LETTA_TURN_DEADLINE_MS is the older name
+```
+
+The definition wins over the environment, which wins over the defaults. A
+call can only tighten them (`agent.stream({ ..., limits: { maxMs } })`, and
+the server's `RuntimeOptions.turnLimits`).
+
+**A stop never locks the conversation when its outcome is known.** Stop in
+the app, `abortSignal` in code, and a limit all do the same: the harness
+cancels the backend run and closes open tool calls as interrupted, the
+runtime waits until Letta reports the conversation idle (no active run),
+records the turn as settled (`<state>/agents/<id>.<conversation>.turn.settled.json`)
+and removes its pending marker. The run's status is `stopped` (event
+`stopped`, `code` `cancelled`, `timed_out`, `idle_timeout` or
+`max_duration`); the partial reply stays, marked as stopped, and the next
+message is sent normally. `agent.lastTurn()` says how a turn ended
+(`{ end: 'completed' | 'stopped' | 'failed', reason?, delivered? }`);
+`generate` rejects with a `TurnLimitError` when a limit stopped it.
+
+**Uncertain turns still lock.** When the outcome cannot be known (the
+process died mid-turn, the connection failed, Letta never confirmed a stop),
+the conversation is read-only and nothing is ever resent. **Check and
+unlock** in the app (`POST /v1/threads/<id>/check`; `AgentHost.check()` or
+`checkConversation()` in code) asks Letta, read-only: is a run still active,
+and is the turn's message (its OTID, the run ID) in the history? When
+nothing runs it unlocks the conversation and shows what Letta has (your
+message received or not, its reply, interrupted tool calls). A message
+Letta never got is not resent.
+
 ## Limitations
 
 - **Existing agents (Add agent).** An adopted agent is one agent with one
@@ -1975,10 +2045,13 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   forgotten: their messages stay, without author or source badges).
 - **Model and instructions are fixed at creation.**
 - **Human waits are bounded** by the harness's five-minute external-tool
-  limit; the HTTP runtime closes prompts earlier (four minutes by default,
-  not counted against the three minutes of inference per turn). The Letta
-  SDK's own per-turn timeout is set to ten minutes (`TURN_TIMEOUT_MS`) so it
-  never ends a turn that is waiting for a person.
+  limit; the HTTP runtime closes prompts earlier (four minutes by default),
+  which stops the turn cleanly. Waiting for a person never counts toward the
+  [turn limits](#turn-limits-and-stop). The Letta SDK's own per-turn timer
+  (`appServer.requestTimeoutMs`, one wall-clock timer per turn that nothing
+  extends) is set beyond any turn (`TURN_TIMEOUT_MS`, about 24 days), so it
+  never ends a turn; setup and status requests keep explicit 60-second
+  timeouts.
 - **The sandbox is experimental.** It relies on the AI SDK's
   `Experimental_SandboxSession` and on two young provider packages, all
   marked experimental and pinned exactly (`@lgrammel/apple-container-sandbox`

@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import {
-  ADOPTED_TOOL_SETS, AdoptionStore, SandboxError, adoptedDefinition, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
+  ADOPTED_TOOL_SETS, AdoptionStore, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
   forgetIdentity, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
   withoutInstructionsSection, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
 } from 'ai-sdk-letta';
@@ -98,6 +98,7 @@ const REFUSALS: Record<string, string> = {
  * - `DELETE /api/adoption/agents/<id>`: remove it from the app (the Letta agent is never deleted);
  * - `PUT /api/adoption/agents/<id>/tools` `{ tools }`: its tool sets;
  * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
+ * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
  * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
  */
@@ -136,7 +137,7 @@ export class AdoptionRegistry {
       files: record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
-      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true } : {}) },
+      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -222,6 +223,24 @@ export class AdoptionRegistry {
     this.host(record);
     return { project: record.project ?? null, tools: record.tools };
   }
+  /**
+   * Set or clear an adopted agent's sandbox command timeout
+   * (`{ commandTimeoutMs }` in ms, 1000–240000, or `null` for the host's).
+   * Its runtime restarts, like a project change.
+   */
+  async setSandbox(definitionId: string, input: unknown) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const value = (input as { commandTimeoutMs?: unknown } | undefined)?.commandTimeoutMs;
+    if (value !== null && !validCommandTimeout(value)) throw new RuntimeFault('invalid_input', 400);
+    if (!this.options.environment?.sandbox) throw new RuntimeFault('sandbox_unavailable');
+    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
+    const record = this.store.update(definitionId, r => { const { commandTimeoutMs: _old, ...rest } = r; return value === null ? rest : { ...rest, commandTimeoutMs: value }; });
+    this.hosted.delete(definitionId); this.feed?.remove(definitionId);
+    await hosted.runtime.close();
+    this.host(record);
+    return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
+  }
   /** The instructions section for an adopted agent: the tools it has here, its project folder, and the memory policy. */
   private section(hosted: Hosted) {
     const project = hosted.definition.sandbox?.project && hosted.record.project ? basename(hosted.record.project) : undefined;
@@ -292,6 +311,7 @@ export class AdoptionRegistry {
     app.delete('/adoption/agents/:id', wrap(async req => this.remove(String(req.params.id))));
     app.put('/adoption/agents/:id/tools', json, wrap(async req => this.setTools(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
+    app.put('/adoption/agents/:id/sandbox', json, wrap(async req => this.setSandbox(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));
     app.post('/adoption/agents/:id/instructions', json, wrap(async req => this.applyInstructions(String(req.params.id))));
     app.delete('/adoption/agents/:id/instructions', wrap(async req => this.revertInstructions(String(req.params.id))));

@@ -6,6 +6,7 @@ import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type Sa
 import { includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, webDevEnabled, WEB_DEV_NOTE, type ResolvedWebDevConfig, type WebDevConfig } from './webdev.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 import { resolveMcpApps, type McpAppConfig, type ResolvedMcpAppConfig } from './mcp-apps.js';
+import { resolveTurnLimits, type TurnLimits } from './turn-limits.js';
 
 /**
  * How the agent's memory is protected and reviewed (see `MemoryGuard`).
@@ -127,6 +128,17 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   /** Per-call tool execution deadline in milliseconds (human waits excluded). @default 5000 */
   toolTimeoutMs?: number;
   /**
+   * How long one turn may run (see `TurnLimits`): `idleMs`, stopped after
+   * this long without progress (streamed text, reasoning, tool calls and
+   * results; a running tool is progress); `maxMs`, the hard cap on a turn's
+   * working time (`0`: none). Time waiting for a person never counts. A
+   * turn that reaches a limit is stopped like Stop: the conversation stays
+   * usable. Unset values come from `AI_SDK_LETTA_TURN_IDLE_MS` and
+   * `AI_SDK_LETTA_TURN_MAX_MS` (or the older `AI_SDK_LETTA_TURN_DEADLINE_MS`),
+   * then the defaults. @default { idleMs: 600000, maxMs: 21600000 } (10 minutes, 6 hours)
+   */
+  turnLimits?: Partial<TurnLimits>;
+  /**
    * Where `run_command` and `run_command_online` run commands. Without it,
    * those tools are never exposed. See `sandboxTools`.
    */
@@ -183,6 +195,8 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly permissions: Readonly<Record<string, ToolPermission>>;
   readonly dreaming: Readonly<DreamingSettings>;
   readonly toolTimeoutMs: number;
+  /** Turn limits the definition sets (the rest come from the environment and the defaults; see {@link AgentDefinitionInput.turnLimits}). */
+  readonly turnLimits: Readonly<Partial<TurnLimits>>;
   readonly sandbox?: ResolvedSandboxConfig;
   readonly ui: Readonly<AgentUiSettings>;
   readonly replyMode: ReplyModeSetting;
@@ -249,6 +263,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (!Number.isInteger(dreaming.stepCount) || dreaming.stepCount < 1 || dreaming.stepCount > 10_000) throw new Error('Dreaming stepCount must be a positive integer');
   const toolTimeoutMs = input.toolTimeoutMs ?? 5000;
   if (!Number.isInteger(toolTimeoutMs) || toolTimeoutMs < 1 || toolTimeoutMs > 300_000) throw new Error('toolTimeoutMs must be 1–300000');
+  const turnLimits = resolveDefinitionTurnLimits(input.turnLimits);
   const ui = resolveUi(input.ui);
   const replyMode = input.replyMode ?? 'auto';
   if (!REPLY_MODE_SETTINGS.includes(replyMode)) throw new Error(`replyMode must be one of: ${REPLY_MODE_SETTINGS.join(', ')}`);
@@ -267,8 +282,21 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   return Object.freeze({
     ...(adopt ? { adopt } : {}), ...(mcpApps.length ? { mcpApps } : {}),
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, turnLimits, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
   });
+}
+
+function resolveDefinitionTurnLimits(input: unknown): Readonly<Partial<TurnLimits>> {
+  if (input === undefined) return Object.freeze({});
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('turnLimits must be an object such as { idleMs: 600000, maxMs: 21600000 }');
+  const unknown = Object.keys(input).filter(key => key !== 'idleMs' && key !== 'maxMs');
+  if (unknown.length) throw new Error(`Unknown turnLimits setting(s): ${unknown.join(', ')}. Supported: idleMs, maxMs.`);
+  const { idleMs, maxMs } = input as Partial<TurnLimits>;
+  const given = { ...(idleMs !== undefined ? { idleMs } : {}), ...(maxMs !== undefined ? { maxMs } : {}) };
+  if (idleMs !== undefined && (!Number.isSafeInteger(idleMs) || idleMs < 1000)) throw new Error('turnLimits.idleMs must be at least 1000 ms');
+  if (maxMs !== undefined && (!Number.isSafeInteger(maxMs) || (maxMs !== 0 && maxMs < 1000))) throw new Error('turnLimits.maxMs must be 0 (no cap) or at least 1000 ms');
+  resolveTurnLimits(given);
+  return Object.freeze(given);
 }
 
 function resolveMemory(input: unknown): Readonly<MemorySettings> {

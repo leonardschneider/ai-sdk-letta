@@ -291,6 +291,11 @@ export class AppGate {
     if (params.role !== undefined && params.role !== 'user') return { error: { code: -32602, message: 'Only user messages are supported' } };
     const text = contentText(params.content, APP_GATE_LIMITS.maxMessageChars);
     if (!text) return { error: { code: -32602, message: 'Invalid message format (text content required)' } };
+    // Nothing is asked that could never be sent: behind an uncertain turn the conversation takes no new turns (usableRun).
+    if (!this.options.runtime.acceptsTurns(owner, instance.threadId)) {
+      this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_message', outcome: 'refused:conversation_blocked' }, author);
+      return { error: { code: -32000, message: 'This conversation is read-only (its last turn did not finish); the message was not sent.' } };
+    }
     const approval = this.ask(instance, 'message', { text });
     this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_message', outcome: 'asked', detail: approval.id }, author);
     return { pending: approval.id };
@@ -415,7 +420,12 @@ export class AppGate {
       // The message becomes the person's own turn, sent on their behalf from the app (queued behind a running turn).
       const app: RunApp = { id: approval.app, name: approval.appName, toolCallId: approval.toolCallId, approvedBy: who };
       try { await this.options.runtime.sendFromApp(owner, approval.threadId, approval.text ?? '', app, author); approval.status = 'done'; }
-      catch (error) { approval.status = 'failed'; approval.error = error instanceof RuntimeFault ? error.code : 'not_sent'; }
+      catch (error) {
+        approval.status = 'failed';
+        const code = error instanceof RuntimeFault ? error.code : 'not_sent';
+        approval.error = code === 'delivery_uncertain' ? 'This conversation is read-only (its last turn did not finish); the message was not sent.' : code === 'runtime_busy' ? 'The agent was busy for too long; the message was not sent.' : `The message was not sent (${code}).`;
+        this.audit({ app: approval.app, threadId: approval.threadId, toolCallId: approval.toolCallId, event: 'app_message', outcome: `not_sent:${code}`, detail: approval.id }, author);
+      }
     }
     this.options.runtime.appsChanged();
     this.wake();

@@ -41,7 +41,7 @@ export const SANDBOX_LIMITS = Object.freeze({
   captureBytes: 32 * 1024,
   /** Longest command. */
   maxCommandChars: 8_000,
-  /** Default and largest per-command timeout. */
+  /** Default and largest per-command timeout (the Letta harness ends an application tool call after 5 minutes; the rest is left to start the sandbox and report). Configurable per agent: `sandbox.timeoutMs`. */
   defaultTimeoutMs: 120_000,
   maxTimeoutMs: 240_000,
   /** Default idle time before the conversation's sandbox is stopped. */
@@ -136,7 +136,14 @@ export interface SandboxConfig {
   project?: string | { path: string; readOnly?: boolean };
   /** Image for the built-in providers. @default {@link SANDBOX_IMAGE}, built from {@link SANDBOX_DOCKERFILE} */
   image?: string;
-  /** Per-command timeout. @default 120000 (at most 240000) */
+  /**
+   * Per-command timeout: a command still running then is stopped (with what
+   * it started) and the agent gets its output so far. Raise it for long
+   * builds (a full static site build, a test suite). At most 240000: the
+   * Letta harness ends any application tool call after 5 minutes, and the
+   * sandbox may need time to start. Longer work belongs in several
+   * commands. @default 120000
+   */
   timeoutMs?: number;
   /** Stop the conversation's sandbox after this long without commands. @default 600000 */
   idleTimeoutMs?: number;

@@ -136,12 +136,14 @@ test('pre-aborted and malformed calls never deliver', async () => {
   assert.equal((await f.agent.generate({ prompt: 'ok' })).text, 'Hello world');
 });
 
-test('cancellation closes active resources and disables continuation', async () => {
+test('cancellation closes active resources; a confirmed end keeps the agent usable', async () => {
   const f = fixture();
   const control = new AbortController();
   const result = await f.agent.stream({ prompt: 'cancel', abortSignal: control.signal });
   for await (const part of result.fullStream) { if (part.type === 'text-delta') control.abort(); }
-  await assert.rejects(f.agent.generate({ prompt: 'again' }), /uncertain/);
+  // The fixture's stream reached its terminal result: Letta confirmed the turn ended, so nothing is uncertain.
+  assert.ok(['completed', 'stopped'].includes((await f.agent.lastTurn())!.end));
+  assert.equal((await f.agent.generate({ prompt: 'again' })).text, 'Hello world');
   assert.ok(f.counts().closed >= 1);
 });
 

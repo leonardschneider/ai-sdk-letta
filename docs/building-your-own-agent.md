@@ -315,13 +315,38 @@ try {
 }
 ```
 
-Answer promptly. Human waits are bounded (the Letta harness allows a client
-tool at most five minutes; the HTTP runtime closes prompts after four), and
-a prompt left unanswered fails the turn. Like any failed turn, that leaves
-the conversation blocked as an uncertain delivery (see
-[Troubleshooting](#12-troubleshooting)); continue in a new conversation. The
-handler receives an `AbortSignal` as second argument that fires when a prompt
-is withdrawn; stop showing the prompt then.
+Human waits are bounded (the Letta harness allows a client tool at most five
+minutes; the HTTP runtime closes prompts after four), and they never count
+toward the turn's limits. A prompt left unanswered stops the turn cleanly:
+the conversation stays usable (see [Turn limits](#turn-limits)). The handler
+receives an `AbortSignal` as second argument that fires when a prompt is
+withdrawn; stop showing the prompt then.
+
+### Turn limits
+
+A turn is stopped after 10 minutes without progress (streamed text,
+reasoning, tool calls and results; a running tool counts as progress) or
+after 6 hours of work; waiting for a person counts toward neither. A stop
+(yours, or a limit) cancels the backend run, waits until Letta is idle,
+and records the turn as settled, so the agent stays usable:
+
+```ts
+import { defineAgent, TurnLimitError } from 'ai-sdk-letta';
+
+export const patient = defineAgent({
+  id: 'patient-builder', name: 'Patient Builder', model: 'openai-codex/gpt-5.5',
+  instructions: 'Build and test the project; report what changed.', tools: {},
+  turnLimits: { idleMs: 15 * 60_000, maxMs: 0 },  // 15 minutes idle; no cap
+});
+
+export function describeStop(error: unknown): string {
+  return error instanceof TurnLimitError ? `${error.reason}: ${error.message}` : String(error);
+}
+```
+
+`AI_SDK_LETTA_TURN_IDLE_MS` and `AI_SDK_LETTA_TURN_MAX_MS` (or the older
+`AI_SDK_LETTA_TURN_DEADLINE_MS`) set them for agents that do not.
+`await agent.lastTurn()` says how the last turn ended.
 
 ## 6a. Decisions that can wait
 
@@ -1207,10 +1232,14 @@ and `rm -rf /tmp/starter-smoke`.
 | `Model "x" is not available on the local Letta backend; connect its provider first` | Raised when the agent is created. Check `letta --backend local model list` and connect the provider. |
 | `Agent identity is locked: <state>/agents/<id>.lock` | Another process has the agent open (one process per agent). After a crash, check that the PID in the file is not running, then remove the `.lock`. |
 | `Server already running or stale lock: .../service.lock` | Same, for the GUI or API server. |
-| `Uncertain prior delivery: ...turn.pending.json` | A turn was sent but its completion was never confirmed (crash, kill, or a failed turn such as an unanswered prompt). That conversation is blocked; nothing is resent. Inspect it (for example in Letta), then remove the file; or continue in another conversation. In the GUI, start a new chat. |
+| `Uncertain prior delivery: ...turn.pending.json` | A turn was sent but its outcome is unknown (crash, kill, a connection failure, or a stop Letta never confirmed). That conversation is read-only; nothing is resent. In the GUI, **Check and unlock** asks Letta whether a run is still active and whether your message arrived, and unlocks it when nothing runs. In code: `await host.check(conversationId)` (or `checkConversation(definition, conversationId)`), then open it again. |
+| `Conversation history has an unfinished or uncertain turn` | Letta's history ends with an unanswered message or an interrupted tool call that no stop or check recorded. Same fix: **Check and unlock**, or `host.check()`. A stopped turn (Stop, or a turn limit) never causes this. |
+| A long turn stops with "no progress for 10 min" (`idle_timeout`) | Nothing streamed and no tool ran for the idle timeout. The conversation stays usable; send the next message. If the model legitimately thinks that long, raise `turnLimits.idleMs` (or `AI_SDK_LETTA_TURN_IDLE_MS`). |
+| A long turn stops with "reached the 6 h limit" (`max_duration`) | The hard cap on working time (human waits excluded). Raise `turnLimits.maxMs` (or `AI_SDK_LETTA_TURN_MAX_MS`); `0` removes it. |
+| A sandbox command ends with `timed out after 120 s; the command was stopped` | The per-command timeout. Raise `sandbox.timeoutMs` (up to 240000; for an added agent, its **Project folder…** dialog), or split the work into several commands. |
 | `Unresolved agent creation intent: <id>.pending.json` | Agent creation was interrupted. Check in Letta whether an agent with that name was created; reconcile by hand before removing the file. |
 | `Invalid identity mapping or backend mismatch; refusing to recreate agent` | `name` changed, or `LETTA_LOCAL_BACKEND_DIR` differs from when the mapping was made. Restore them, or start fresh. |
-| `Session closed or delivery uncertain; inspect backend history before reopening` | A previous turn on this instance failed or was cancelled. Close it and open the agent again. |
+| `Session closed or delivery uncertain; inspect backend history before reopening` | A previous turn on this instance failed with an uncertain outcome (a clean stop does not do this). Close it, check it (see above), and open the agent again. |
 | `History edits, replay, and regeneration are not supported` | `messages` does not extend what was sent. Build on `agent.transcript`. |
 | `Conversation has unfinished work or is offline` | The conversation still has a run or prompt in progress on the backend. Wait, or inspect it; it is never repaired automatically. |
 | Tool result `{"error":"interaction_unavailable"}` | No interaction handler is connected (or it threw, or answered invalidly). Connect one; see [section 6](#6-human-in-the-loop). |

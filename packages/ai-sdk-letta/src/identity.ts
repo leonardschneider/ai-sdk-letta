@@ -59,6 +59,17 @@ export function forgetIdentity(directory: string, definitionId: string): boolean
   try { unlinkSync(`${base}.json`); return true; } catch { return false; }
 }
 
+/** A turn marker (see `IdentityLease.pendingTurn`): when it was written, and the OTID the turn was sent with. */
+export type PendingTurn = { createdAt: string; otid?: string };
+/**
+ * A turn whose outcome became known without it finishing (see
+ * `IdentityLease.settleTurn`): `stopped` by the application after delivery
+ * (the backend confirmed the run ended), or `reconciled` after an uncertain
+ * delivery was checked ("Check and unlock"). `delivered`: whether the
+ * message with `otid` is in the backend history (when the turn had one).
+ * `through`: the newest backend message ID when it was settled.
+ */
+export type SettledTurn = { outcome: 'stopped' | 'reconciled'; delivered?: boolean; otid?: string; through?: string; settledAt: string };
 /** Handle returned by {@link acquireIdentity}. Holds an exclusive lock until `release()`. */
 export type IdentityLease = Awaited<ReturnType<typeof acquireIdentity>>;
 
@@ -70,7 +81,8 @@ export type IdentityLease = Awaited<ReturnType<typeof acquireIdentity>>;
  * Files in `directory` (all 0600, directory 0700):
  * - `<id>.json` the mapping; `<id>.lock` the process lock;
  * - `<id>.pending.json` / `<id>.conversation.pending.json` uncertain creations;
- * - `<id>.<conversation>.turn.pending.json` a turn whose delivery is not yet confirmed.
+ * - `<id>.<conversation>.turn.pending.json` a turn whose delivery is not yet confirmed;
+ * - `<id>.<conversation>.turn.settled.json` the latest turn that was stopped or checked (see `settleTurn`).
  */
 export async function acquireIdentity(directory: string, definition: { id: string; name: string }, backend: string, api: IdentityBackend) {
   if (!/^[a-z0-9-]+$/.test(definition.id)) throw new Error('Invalid logical agent identity');
@@ -165,18 +177,48 @@ export async function acquireIdentity(directory: string, definition: { id: strin
       return `${base}.${id}.turn.pending.json`;
     };
     const assertNoPendingTurn = (id: string) => {
-      if (exists(turnPath(id))) throw new Error(`Uncertain prior delivery: ${turnPath(id)}. Inspect backend and reconcile manually; no automatic replay. Select another conversation to continue.`);
+      if (exists(turnPath(id))) throw new Error(`Uncertain prior delivery: ${turnPath(id)}. Inspect backend and reconcile manually (in the GUI: Check and unlock); no automatic replay. Select another conversation to continue.`);
     };
-    const beginTurn = (id: string) => {
+    /** The marker of a turn whose delivery is not confirmed, if any (its OTID when it recorded one). */
+    const pendingTurn = (id: string): PendingTurn | undefined => {
+      if (!exists(turnPath(id))) return undefined;
+      const stored = read(turnPath(id)) as Partial<PendingTurn>;
+      return { createdAt: typeof stored.createdAt === 'string' ? stored.createdAt : '', ...(typeof stored.otid === 'string' ? { otid: stored.otid } : {}) };
+    };
+    const beginTurn = (id: string, otid?: string) => {
       if (released) throw new Error('Identity lock already released');
       assertNoPendingTurn(id);
-      durableWrite(turnPath(id), { agentId: identity.agentId, conversationId: id, createdAt: new Date().toISOString(), state: 'delivery-uncertain' });
+      durableWrite(turnPath(id), { agentId: identity.agentId, conversationId: id, createdAt: new Date().toISOString(), state: 'delivery-uncertain', ...(otid ? { otid } : {}) });
     };
     const completeTurn = (id: string) => {
       if (released) throw new Error('Identity lock already released');
       unlinkSync(turnPath(id));
       syncDirectory();
     };
-    return { identity, release, selectConversation, createConversation, assertNoPendingTurn, beginTurn, completeTurn };
+    const settledPath = (id: string) => `${turnPath(id).slice(0, -'.turn.pending.json'.length)}.turn.settled.json`;
+    /**
+     * A turn whose outcome is now known although it did not finish: it was
+     * stopped (and the backend confirmed it ended), or an uncertain turn was
+     * checked and found ended. The record is written first, then the
+     * pending marker is removed; the history up to `through` (and the user
+     * message with `otid`) then counts as settled (see `assertHistorySettled`).
+     */
+    const settleTurn = (id: string, record: Omit<SettledTurn, 'settledAt'>) => {
+      if (released) throw new Error('Identity lock already released');
+      const path = settledPath(id);
+      if (exists(`${path}.new`)) unlinkSync(`${path}.new`);
+      durableWrite(`${path}.new`, { ...record, settledAt: new Date().toISOString() });
+      renameSync(`${path}.new`, path);
+      if (exists(turnPath(id))) unlinkSync(turnPath(id));
+      syncDirectory();
+    };
+    /** The latest settled turn of a conversation (see {@link settleTurn}). */
+    const settledTurn = (id: string): SettledTurn | undefined => {
+      if (!exists(settledPath(id))) return undefined;
+      const stored = read(settledPath(id)) as Partial<SettledTurn>;
+      return { outcome: stored.outcome === 'reconciled' ? 'reconciled' : 'stopped', ...(typeof stored.delivered === 'boolean' ? { delivered: stored.delivered } : {}), settledAt: typeof stored.settledAt === 'string' ? stored.settledAt : '',
+        ...(typeof stored.otid === 'string' ? { otid: stored.otid } : {}), ...(typeof stored.through === 'string' ? { through: stored.through } : {}) };
+    };
+    return { identity, release, selectConversation, createConversation, assertNoPendingTurn, pendingTurn, beginTurn, completeTurn, settleTurn, settledTurn };
   } catch (error) { release(); throw error; }
 }

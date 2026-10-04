@@ -174,9 +174,12 @@ test('legacy threads without timestamps stay valid; runs record activity and dis
     const run = await runtime.start('owner', { id: randomUUID(), threadId: id, text: 'Wait', parentRunId: null });
     const activity = Date.parse(runtime.list('owner')[0].lastActivityAt!);
     assert.ok(activity >= before && activity <= Date.now());
+    // Sent, then stopped without Letta confirming the end (this fake stream just closes): uncertain, shown from the run's observations.
+    for (let i = 0; i < 100 && f.counts().sends === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
     runtime.cancel('owner', run.id);
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let i = 0; i < 100 && runtime.events('owner', run.id, 0).status === 'running'; i++) await new Promise(resolve => setTimeout(resolve, 5));
     const view = await runtime.view('owner', id);
+    assert.equal(view.status, 'cancelled');
     assert.equal(view.messages[0]?.metadata && (view.messages[0].metadata as { createdAt: string }).createdAt, new Date(activity).toISOString());
     await runtime.close();
   } finally { await f.cleanup(); }

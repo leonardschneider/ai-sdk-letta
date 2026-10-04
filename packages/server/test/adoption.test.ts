@@ -200,6 +200,28 @@ test('project folder: set (as given, mounted at its real path), refused with a r
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(projects, { recursive: true, force: true }); }
 });
 
+test('sandbox command timeout: set per adopted agent (the runtime restarts with it), validated, cleared back to the host\'s', async () => {
+  const { dir, registry, built } = fixture(SANDBOX);
+  try {
+    await registry.adopt({ agentId: BLOG, tools: ['files', 'sandbox'] });
+    assert.equal((built.at(-1) as { sandbox?: { timeoutMs?: number } }).sandbox?.timeoutMs, 120_000, 'the host default');
+    assert.equal(registry.agents()[0]!.adopted?.commandTimeoutMs, 120_000);
+    const set = await registry.setSandbox('blog-2cc740f1', { commandTimeoutMs: 240_000 });
+    assert.deepEqual(set, { commandTimeoutMs: 240_000, effectiveMs: 240_000 });
+    assert.equal((built.at(-1) as { sandbox?: { timeoutMs?: number } }).sandbox?.timeoutMs, 240_000);
+    assert.equal(registry.agents()[0]!.adopted?.commandTimeoutMs, 240_000);
+    for (const bad of [500, 300_000, 1.5, '60000']) await assert.rejects(registry.setSandbox('blog-2cc740f1', { commandTimeoutMs: bad }), (e: { code?: string }) => e.code === 'invalid_input');
+    assert.deepEqual(await registry.setSandbox('blog-2cc740f1', { commandTimeoutMs: null }), { commandTimeoutMs: null, effectiveMs: 120_000 });
+    await registry.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const plain = fixture();
+  try {
+    await plain.registry.adopt({ agentId: BLOG });
+    await assert.rejects(plain.registry.setSandbox('blog-2cc740f1', { commandTimeoutMs: 60_000 }), (e: { code?: string }) => e.code === 'sandbox_unavailable');
+    await plain.registry.close();
+  } finally { rmSync(plain.dir, { recursive: true, force: true }); }
+});
+
 test('project folder: refused without a sandbox on the server', async () => {
   const { dir, registry } = fixture();
   try {

@@ -1098,3 +1098,10 @@ body[data-resizing] iframe { pointer-events: none; }
   .proj-dot[data-status="changed"] { box-shadow: inset 0 0 0 1.5px #f0b04a; }
   .proj-dot[data-status="untracked"], .proj-dot[data-status="added"] { background: #6fc493; }
 }
+/* A reply stopped by Stop or a turn limit (the conversation stays usable). */
+.stopped-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-3); padding: 0 2px 6px; }
+.stopped-line svg { flex-shrink: 0; opacity: .8; }
+.notice .check-note { font-style: normal; color: var(--text-2); }
+.command-timeout { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.command-timeout-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-2); }
+.command-timeout-row input { width: 90px; }

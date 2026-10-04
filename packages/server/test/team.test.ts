@@ -51,6 +51,7 @@ function parallelFixture(options: { queue?: boolean; parallel?: boolean } = { qu
               yield { type: 'tool_result', toolCallId: 'tool-1', content: JSON.stringify({ approved: response.approved }), uuid: '2' } as SDKMessage;
             }
             if (input.includes('hold')) await new Promise<void>(resolve => { gates.set(conversationId, resolve); signal.addEventListener('abort', () => resolve(), { once: true }); });
+            if (input.includes('lost')) throw new Error('transport lost');
             yield { type: 'assistant', content: 'Done', uuid: '3' } as SDKMessage;
             history.push({ id: randomUUID(), role: 'assistant', parts: [{ type: 'text', text: 'Done' }] });
             yield { type: 'result', success: true, uuid: '4', durationMs: 1, conversationId } as SDKMessage;
@@ -195,7 +196,7 @@ test('within one conversation turns queue visibly and run in order; across conve
   } finally { await f.cleanup(); }
 });
 
-test('queue limits, cancelling a queued turn, failure withdraws what waits, restart never sends queued turns', async () => {
+test('queue limits, cancelling a queued turn, a stop lets the queue go on, failure withdraws what waits, restart never sends queued turns', async () => {
   const f = parallelFixture();
   try {
     const id = randomUUID(); await f.runtime.create('team', id, 'Queue', alice);
@@ -211,15 +212,28 @@ test('queue limits, cancelling a queued turn, failure withdraws what waits, rest
     f.runtime.cancel('team', waiting[0]!.id);
     assert.equal(f.runtime.events('team', waiting[0]!.id, 0).status, 'cancelled');
     assert.equal(f.runtime.events('team', waiting[0]!.id, 0).events.at(-1)?.data.code, 'cancelled');
-    // The running turn is stopped: everything behind it is withdrawn ("not sent"), the conversation becomes read-only.
+    // The running turn is stopped and Letta confirms it ended: the outcome is known, so the queue goes on.
     f.runtime.cancel('team', head.id);
-    await until(() => waiting.slice(1).every(t => f.runtime.events('team', t.id, 0).status === 'cancelled'), 'withdrawn');
-    assert.deepEqual(new Set(waiting.slice(1).map(t => f.runtime.events('team', t.id, 0).events.at(-1)?.data.code)), new Set(['not_sent']));
-    assert.equal(f.sent.length, 1);
+    await until(() => f.runtime.events('team', head.id, 0).status === 'stopped', 'stopped');
+    assert.equal(f.runtime.events('team', head.id, 0).events.at(-1)?.data.code, 'cancelled');
+    await until(() => waiting.slice(1).every(t => f.runtime.events('team', t.id, 0).status === 'completed'), 'queue resumed');
+    assert.equal(f.sent.length, MAX_QUEUED);
+    // A turn whose delivery is uncertain (the transport failed): everything behind it is withdrawn ("not sent"), the conversation becomes read-only.
+    f.gates.clear();
+    const lost = turn(id, 'hold lost'); await f.runtime.start('team', lost, alice);
+    await until(() => f.gates.size === 1, 'holding');
+    const conversation = [...f.gates.keys()][0]!;
+    const behind = [turn(id, 'b1'), turn(id, 'b2')];
+    for (const t of behind) await f.runtime.start('team', t, bob);
+    f.release(conversation);
+    await until(() => behind.every(t => f.runtime.events('team', t.id, 0).status === 'cancelled'), 'withdrawn');
+    assert.deepEqual(new Set(behind.map(t => f.runtime.events('team', t.id, 0).events.at(-1)?.data.code)), new Set(['not_sent']));
+    assert.equal(f.runtime.events('team', lost.id, 0).status, 'failed');
+    assert.equal(f.sent.length, MAX_QUEUED + 1);
     await assert.rejects(f.runtime.start('team', turn(id, 'after failure'), alice), /delivery_uncertain/);
     // Withdrawn turns are not part of the conversation's view.
     const view = await f.runtime.view('team', id) as { status: string; lastRunId: string; queue: unknown[] };
-    assert.equal(view.status, 'cancelled'); assert.equal(view.lastRunId, head.id); assert.deepEqual(view.queue, []);
+    assert.equal(view.status, 'failed'); assert.equal(view.lastRunId, lost.id); assert.deepEqual(view.queue, []);
     // Restart: a run left queued in state is withdrawn, never sent.
     const other = randomUUID(); await f.runtime.create('team', other, 'Restart', alice);
     await f.runtime.close();
@@ -230,7 +244,7 @@ test('queue limits, cancelling a queued turn, failure withdraws what waits, rest
     const left = restored.list('team').find(t => t.id === other) as { queued?: number };
     assert.equal(left.queued, undefined);
     assert.equal(JSON.parse(readFileSync(f.filename, 'utf8')).runs.at(-1).status, 'cancelled');
-    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent.length, MAX_QUEUED + 1);
     await restored.close();
   } finally { await f.cleanup(); }
 });
