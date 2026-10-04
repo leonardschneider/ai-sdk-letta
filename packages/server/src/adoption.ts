@@ -131,9 +131,11 @@ export class AdoptionRegistry {
   }
   /** Agents for the session (the switcher). */
   agents(): GuiAgentInfo[] {
-    return [...this.hosted.values()].map(({ record, definition }) => ({
+    return [...this.hosted.values()].map(({ record, definition, runtime }) => ({
       id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
       files: record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
+      // A mounted project folder: the Resources panel shows it read-only.
+      ...(runtime.project ? { project: runtime.project.name } : {}),
       adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true } : {}) },
     }));
   }

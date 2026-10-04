@@ -99,3 +99,23 @@ test('Atlassian documents (.adf.json) preview with the Atlassian renderer; saved
   assert.equal(parseAtlassianDocument('not json'), undefined);
   assert.equal(resourceError('atlassian_not_connected'), 'Connect Atlassian to load its images.');
 });
+
+test('project section: collapsed when large unless the person opened it; pages append; statuses and refusals have words', async () => {
+  const { PROJECT_LARGE, appendPage, projectError, projectOpen, projectStatusLabel } = await import('../src/resources-model.js');
+  assert.equal(projectOpen(null, undefined), false, 'not listed yet');
+  assert.equal(projectOpen(null, { total: 5, more: false }), true, 'small: open');
+  assert.equal(projectOpen(null, { total: PROJECT_LARGE + 1, more: false }), false, 'large: collapsed');
+  assert.equal(projectOpen(null, { total: 3, more: true }), false);
+  assert.equal(projectOpen('true', { total: 9999, more: true }), true, 'the person’s choice wins');
+  assert.equal(projectOpen('false', { total: 1, more: false }), false);
+  const entry = (name: string) => ({ name, path: `d/${name}`, type: 'file' as const });
+  const first = { name: 'blog', git: true, path: 'd', entries: [entry('a'), entry('b')], offset: 0, total: 4, more: true };
+  const merged = appendPage(first, { ...first, entries: [entry('b'), entry('c'), entry('d')], offset: 2, more: false });
+  assert.deepEqual(merged.entries.map(e => e.name), ['a', 'b', 'c', 'd'], 'no duplicates');
+  assert.equal(merged.more, false);
+  assert.equal(appendPage(merged, first), first, 'a first page replaces');
+  assert.equal(projectStatusLabel('modified'), 'Modified (not committed)');
+  assert.equal(projectStatusLabel(undefined), '');
+  assert.match(projectError('project_outside'), /outside the project/);
+  assert.match(projectError('session_required'), /Refresh the page/);
+});

@@ -180,3 +180,44 @@ export function parseAtlassianDocument(text: string): SavedAtlassianDocument | {
   } catch { /* not JSON */ }
   return undefined;
 }
+
+/* ------------------------------------------------------------------ */
+/* Project folder (read-only)                                          */
+/* ------------------------------------------------------------------ */
+
+/** Git status of a project entry: a file's own; `changed` for a folder holding changes. */
+export type ProjectStatus = 'modified' | 'added' | 'deleted' | 'untracked' | 'changed';
+/** One entry of a project directory (`GET /v1/project/list`). `link: 'outside'`: a symlink leaving the project (never followed). */
+export type ProjectEntry = { name: string; path: string; type: 'file' | 'folder'; bytes?: number; modifiedAt?: string; link?: 'inside' | 'outside'; status?: ProjectStatus };
+/** One page of one project directory. */
+export type ProjectListing = { name: string; git: boolean; path: string; entries: ProjectEntry[]; offset: number; total: number; more: boolean; truncated?: boolean; changes?: number };
+
+/** A top level with more entries than this starts collapsed (unless the person opened it before). */
+export const PROJECT_LARGE = 12;
+/** Whether the project section is open: what the person chose last, else open only when its top level is small. */
+export const PROJECT_OPEN_KEY = 'ai-sdk-letta-project-open';
+export function projectOpen(saved: string | null, top: Pick<ProjectListing, 'total' | 'more'> | undefined): boolean {
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return !!top && !top.more && top.total <= PROJECT_LARGE;
+}
+/** Wording of a git status (tooltip and screen readers). */
+export function projectStatusLabel(status: ProjectStatus | undefined): string {
+  return status === 'modified' ? 'Modified (not committed)' : status === 'added' ? 'Added (not committed)' : status === 'deleted' ? 'Deleted (not committed)' : status === 'untracked' ? 'New (not committed)' : status === 'changed' ? 'Has uncommitted changes' : '';
+}
+/** A directory's next page appended to what was loaded. */
+export function appendPage(previous: ProjectListing | undefined, next: ProjectListing): ProjectListing {
+  if (!previous || next.offset === 0) return next;
+  const seen = new Set(previous.entries.map(e => e.path));
+  return { ...next, offset: 0, entries: [...previous.entries, ...next.entries.filter(e => !seen.has(e.path))] };
+}
+/** Human wording for a refused project request. */
+export function projectError(code: string): string {
+  return ({
+    project_outside: 'That link points outside the project, so it isn’t shown here.',
+    project_unavailable: 'The project folder can’t be reached. Check that it still exists.',
+    project_none: 'This agent has no project folder.',
+    file_not_found: 'That file is gone, or it is ignored by the project.',
+    file_too_large: 'That file is too large to show here (up to 25 MB).',
+  } as Record<string, string>)[code] ?? resourceError(code);
+}

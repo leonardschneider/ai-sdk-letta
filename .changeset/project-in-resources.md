@@ -1,0 +1,5 @@
+---
+"@ai-sdk-letta/server": minor
+---
+
+The Resources panel shows the agent's project folder (the one mounted at `/project` in its sandbox) as a second section, **Project · <name>**, below the resources. It is read-only: folders are listed one at a time when opened (a page of 200 entries with "Show more"), `.git`, `node_modules` and what the project's `.gitignore` ignores are hidden (asked of git; outside a repository a default list applies), files preview and download like resources (same size limits and sandboxed previews), and a dot marks files git sees as changed. It refreshes when a turn ends. Nothing writes to the folder: git runs only read-only commands without optional locks, and there is no rename, move, delete or upload there. New routes `GET /v1/project/list`, `/v1/project/file` and `/v1/project/preview` sit behind the same session, CSRF and team membership checks; every path is resolved inside the project's real path and anything that resolves outside it (a `..`, a symlink pointing elsewhere) is refused. The session's agent info gains `project` (the folder's name).

@@ -939,7 +939,9 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
   Files the agent creates appear in the Resources panel and are committed at
   the end of the turn, owned by your user. The resources' git history is
   not mounted. An optional project folder is mounted at `/project`
-  (`sandbox.project`, or `{ path, readOnly: true }`).
+  (`sandbox.project`, or `{ path, readOnly: true }`); the Resources panel
+  shows it read-only below the resources (`GET /v1/project/list`, `/file`,
+  `/preview`; nothing there writes to it).
 - **Python packages persist.** Commands use one virtual environment,
   `/workspace/.venv`, shared by all conversations (created on first start,
   hidden and not versioned); `pip install` puts packages there, so a later
@@ -1307,7 +1309,13 @@ server has them), then **Add**. The same menu switches between agents.
   description, and **Update instructions…** adds one line about it. From
   code: `PUT /api/adoption/agents/<id>/project` with `{ "path": "/Users/you/blog" }`
   or `{ "path": null }` (session cookie, `Origin` and CSRF token, like the
-  other adoption routes). It needs a server with a sandbox.
+  other adoption routes). It needs a server with a sandbox. The Resources
+  panel shows it too, as **Project · blog** below the resources: read-only
+  (no rename, move, delete or upload; the agent edits it with commands),
+  listed one folder at a time, with `.git`, `node_modules` and what its
+  `.gitignore` ignores hidden, a dot on files git sees as changed, and the
+  usual previews and downloads. Links that point outside the folder are
+  refused.
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 

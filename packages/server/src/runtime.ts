@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import type { DecisionBoard } from './decisions.js';
 import { externalEffects, forkPoint, rewindTurn, rewoundSpan, soloRefusal, type RewindSummary } from './rewind.js';
+import { ProjectFolder } from './project.js';
 import {
   REPLY_MODE_OVERRIDES, combinedText, mentionsAgent, resolveReplyMode, LISTENED_PART, type ReplyMode, type ReplyModeOverride, type ReplyModeSetting,
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel,
@@ -221,6 +222,12 @@ export interface RuntimeHost {
    * someone sends a message).
    */
   peek?(conversationId: string): Promise<UIMessage[]>;
+  /**
+   * The agent's project folder on this computer (mounted at `/project` in its
+   * sandbox), as given: the Resources panel shows it read-only (see
+   * {@link ThreadRuntime.projectList}).
+   */
+  project?: string;
 }
 /** Titles of conversations whose real title was not known yet. */
 const FALLBACK_TITLES = new Set(['Untitled conversation', 'Default conversation']);
@@ -343,6 +350,8 @@ export class ThreadRuntime {
   memory?: MemoryGuard;
   /** The reviewer's model setting, when the app may change it (see {@link setReviewerModel}). */
   reviewerModel?: { value(): string; set(model: string): void; available(): Promise<string[]> };
+  /** The agent's project folder, read-only (see {@link RuntimeHost.project}). */
+  readonly project?: ProjectFolder;
   constructor(host: RuntimeHost, filename: string, owner: string, deadlineMs?: number, humanWaitMs?: number);
   constructor(host: RuntimeHost, filename: string, owner: string, options: RuntimeOptions);
   constructor(private readonly host: RuntimeHost, private readonly filename: string, private readonly owner: string, deadlineOrOptions?: number | RuntimeOptions, humanWaitMs?: number) {
@@ -361,6 +370,7 @@ export class ThreadRuntime {
     this.typingMs = options.typingMs ?? 5000;
     this.rewindInternal = new Set(options.rewindInternalTools ?? []);
     if (host.attachmentsRoot) this.uploads = new UploadStaging(join(dirname(filename), 'uploads'));
+    if (host.project) this.project = new ProjectFolder(host.project);
     this.state = existsSync(filename) ? JSON.parse(readFileSync(filename, 'utf8')) as State : { version: 1, threads: [], runs: [] };
     if (this.state.version !== 1 || !Array.isArray(this.state.threads) || !Array.isArray(this.state.runs)) throw new Error('Invalid runtime state');
     for (const thread of this.state.threads) thread.archived ??= false;
@@ -1207,6 +1217,24 @@ export class ThreadRuntime {
       return { name: path.split('/').filter(Boolean).pop()!, kind, mediaType, bytes };
     });
   }
+  /* ---------------- project folder (read-only) ---------------- */
+
+  /**
+   * One directory of the agent's project folder, a page at a time (see
+   * {@link ProjectFolder.list}). `project_none` (404) when it has none.
+   */
+  async projectList(owner: string, path: unknown, offset?: unknown, limit?: unknown) {
+    this.authorize(owner);
+    if (!this.project) throw new RuntimeFault('project_none', 404);
+    return this.project.list(path ?? '', Number(offset) || 0, Number(limit) || undefined);
+  }
+  /** One file of the project folder, at most `limit` bytes (see {@link ProjectFolder.read}). */
+  async projectFile(owner: string, path: unknown, limit: number) {
+    this.authorize(owner);
+    if (!this.project) throw new RuntimeFault('project_none', 404);
+    return this.project.read(path, limit);
+  }
+
   /**
    * Validate an upload (type by content, size, PDF text) and stage it until a
    * run sends it. Not tied to a thread yet: a new chat uploads before it exists.

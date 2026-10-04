@@ -1,9 +1,9 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -161,9 +161,19 @@ function memoryWiring(definition: AgentDefinition, directory: string, members?: 
 }
 type MemoryWiring = ReturnType<typeof memoryWiring>;
 
+/** The agent's project folder (as given), when it runs commands with one mounted at `/project`: the Resources panel shows it read-only. */
+function projectOf(definition: AgentDefinition<ToolSet>): string | undefined {
+  const path = definition.sandbox?.project && sandboxEnabled(definition) ? definition.sandbox.project.path : undefined;
+  // The same checks as mounting it: a folder the sandbox would refuse (a home folder, credentials) is not shown either.
+  if (path) { try { checkProjectFolder(path); } catch { return undefined; } }
+  return path;
+}
+
 function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
+  const project = projectOf(definition as AgentDefinition<ToolSet>);
   return {
+    ...(project ? { project } : {}),
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
@@ -186,9 +196,11 @@ function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>,
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
+  const project = projectOf(definition as AgentDefinition<ToolSet>);
   const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
+    ...(project ? { project } : {}),
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       const host = await opened();
@@ -353,7 +365,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.

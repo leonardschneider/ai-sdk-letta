@@ -179,6 +179,31 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
       'Referrer-Policy': 'no-referrer', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(file.bytes);
   });
+  /* ---------------- project folder (read-only) ---------------- */
+  /**
+   * The agent's project folder, one directory at a time (`?path=` from its
+   * top, `offset`, `limit`): `{ name, git, path, entries, total, more }`.
+   * `.git`, `node_modules` and what its `.gitignore` ignores are hidden.
+   * Nothing here writes to the folder. `project_none` (404) without one.
+   */
+  app.get('/v1/project/list', async (req, res) => res.json(await runtime.projectList(owner, req.query.path ?? '', req.query.offset, req.query.limit)));
+  /** Download one project file (`?path=`), always as an attachment; a path that resolves outside the project is refused (403). */
+  app.get('/v1/project/file', async (req, res) => {
+    const file = await runtime.projectFile(owner, req.query.path, FILE_LIMITS.maxFileBytes);
+    res.set({ 'Content-Type': downloadType(file), 'Content-Disposition': contentDisposition(file.name), 'Content-Length': String(file.bytes.byteLength),
+      'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store' });
+    res.end(file.bytes);
+  });
+  /** Show one project file (`?path=`) in a frame of the app, under the same policies as resource previews. */
+  app.get('/v1/project/preview', async (req, res) => {
+    const file = await runtime.projectFile(owner, req.query.path, PREVIEW_LIMIT_BYTES);
+    const type = previewType(file);
+    if (!type) throw new RuntimeFault('preview_unavailable', 415);
+    res.set({ 'Content-Type': type, 'Content-Disposition': contentDisposition(file.name).replace(/^attachment/, 'inline'), 'Content-Length': String(file.bytes.byteLength),
+      'Content-Security-Policy': file.kind === 'pdf' ? PDF_PREVIEW_CSP : PREVIEW_CSP, 'Cross-Origin-Resource-Policy': 'same-origin', 'X-Frame-Options': 'SAMEORIGIN',
+      'Referrer-Policy': 'no-referrer', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.end(file.bytes);
+  });
   app.get('/v1/threads', (_req, res) => res.json(runtime.list(owner)));
   app.post('/v1/threads', async (req, res) => res.status(201).json(await runtime.create(owner, req.body?.id, req.body?.title, author(req))));
   /** Shared runtimes: you are typing in this conversation (`{ typing: true }`, a heartbeat) or stopped (`{ typing: false }`). Nothing else is accepted, never text. */
@@ -311,6 +336,8 @@ export interface GuiAgentInfo {
   adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
+  /** The name of the agent's project folder (mounted at `/project`), shown read-only in the Resources panel (`/v1/project/...`). */
+  project?: string;
 }
 
 /**
@@ -428,7 +455,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}) }, versions,
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: true })), adoption: true } : {}) });
   });
@@ -536,7 +563,7 @@ export function teamApp(options: TeamAppOptions) {
     next();
   });
   const ids = [...agents.keys()];
-  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}), ...(info.trustJiminy ? { trustJiminy: true } : {}) }; };
+  const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}), ...(info.trustJiminy ? { trustJiminy: true } : {}), ...(info.project ? { project: info.project } : {}) }; };
   // Pending decisions of every agent you belong to (the notification bell).
   const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */

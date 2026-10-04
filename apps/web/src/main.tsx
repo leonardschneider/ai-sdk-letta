@@ -109,7 +109,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const filesEnabled = !!agent.files;
   // The Resources panel: files, or documents saved by integrations (Atlassian) without attachments.
-  const resourcesEnabled = filesEnabled || !!agent.resources;
+  // An agent with a project folder (mounted at /project) shows it there too, read-only.
+  const resourcesEnabled = filesEnabled || !!agent.resources || !!agent.project;
   const atlassianEnabled = !!agent.integrations?.includes('atlassian');
   const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
@@ -867,7 +868,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         </aside>}
         {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
           {!narrow && <Resizer label="Resize resources" min={RESOURCES_WIDTH.min} max={RESOURCES_WIDTH.max} width={layout.resourcesWidth} clamp={clampWidth} reset={320} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
-          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
+          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
             onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
