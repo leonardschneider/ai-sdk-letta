@@ -3,9 +3,11 @@ import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { newConversationTitle, sanitizeText, titleText, type ConversationChoice, type Identity } from 'ai-sdk-letta';
 
 /** Parsed terminal command-line options. */
-export type TerminalArgs = { list?: boolean; resume?: boolean; newTitle?: string; conversationId?: string; stateDirectory?: string };
+export type TerminalArgs = { list?: boolean; resume?: boolean; newTitle?: string; conversationId?: string; stateDirectory?: string;
+  /** An adopted agent (added in the browser app) to open instead of the definition, by its definition ID (for example `blog-2cc740f1`). */
+  agent?: string };
 
-/** Parse `--list | --resume | --new [title] | --conversation ID` plus `--state-dir PATH`. */
+/** Parse `--list | --resume | --new [title] | --conversation ID` plus `--state-dir PATH` and `--agent ID`. */
 export function parseTerminalArgs(args: string[]): TerminalArgs {
   const result: TerminalArgs = {};
   for (let index = 0; index < args.length; index++) {
@@ -20,9 +22,13 @@ export function parseTerminalArgs(args: string[]): TerminalArgs {
       const dir = args[++index];
       if (!dir || dir.startsWith('--')) throw new Error('--state-dir requires a path');
       result.stateDirectory = dir;
+    } else if (arg === '--agent') {
+      const id = args[++index];
+      if (!id || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id)) throw new Error('--agent requires the ID of an agent added in the browser app (for example blog-2cc740f1)');
+      result.agent = id;
     } else if (arg === '--new') {
       result.newTitle = args[index + 1] && !args[index + 1]!.startsWith('--') ? args[++index] : `Conversation ${new Date().toISOString()}`;
-    } else throw new Error(`Unknown option: ${arg}. Use --list, --new [title], --conversation ID, --resume, or --state-dir PATH.`);
+    } else throw new Error(`Unknown option: ${arg}. Use --list, --new [title], --conversation ID, --resume, --agent ID, or --state-dir PATH.`);
   }
   if ([result.list, result.resume, result.newTitle !== undefined, result.conversationId !== undefined].filter(Boolean).length > 1) throw new Error('Choose only one of --list, --resume, --new or --conversation');
   return result;
@@ -34,7 +40,7 @@ export function parseTerminalArgs(args: string[]): TerminalArgs {
  * versions (new agents only ever have named conversations).
  */
 export function conversationRows(identity: Identity, conversations: LettaConversation[]) {
-  const legacy = identity.namedOnly ? [] : [{ id: 'default', agent_id: identity.agentId, summary: 'Default conversation', last_message_at: null }];
+  const legacy = identity.namedOnly && !identity.adopted ? [] : [{ id: 'default', agent_id: identity.agentId, summary: 'Default conversation', last_message_at: null }];
   return [...legacy, ...conversations.filter(c => c.id !== 'default' && !c.archived)]
     .map(c => ({ id: c.id, title: titleText(sanitizeText(c.summary ?? '')) || 'Untitled conversation', activity: c.last_message_at ?? (c as LettaConversation).updated_at ?? (c as LettaConversation).created_at ?? 'unavailable (default backend thread)' }));
 }

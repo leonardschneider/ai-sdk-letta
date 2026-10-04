@@ -1,6 +1,6 @@
 import { runAgentTUI } from '@ai-sdk/tui';
 import type { ToolSet } from 'ai';
-import { filesEnabled, openLettaAgent, parseAttachmentNote, titleText, type AgentDefinition, type LettaRuntime, type ToolInteractions } from 'ai-sdk-letta';
+import { AdoptionStore, adoptedDefinition, adoptionFile, filesEnabled, openLettaAgent, parseAttachmentNote, resolveStateDirectory, titleText, type AgentDefinition, type LettaRuntime, type ToolInteractions } from 'ai-sdk-letta';
 import type { UIMessage } from 'ai';
 import { localCommandMatches, navigate, NavigationScreen } from './navigation.js';
 import { parseTerminalArgs, pickConversation, printConversations, type TerminalArgs } from './cli.js';
@@ -61,6 +61,12 @@ export async function runTerminal<TOOLS extends ToolSet>(definition: AgentDefini
     if (!options.list && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error('The terminal UI requires an interactive terminal (TTY); --list also works without one.');
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
+    // --agent: an agent adopted in the browser app (same state directory), opened with its recorded tools.
+    if (options.agent) {
+      const record = new AdoptionStore(adoptionFile(resolveStateDirectory(options.stateDirectory))).get(options.agent);
+      if (!record) throw new Error(`No agent "${options.agent}" was added in the browser app (Add agent). Added agents are listed in ${adoptionFile(resolveStateDirectory(options.stateDirectory))}.`);
+      definition = adoptedDefinition(record) as unknown as AgentDefinition<TOOLS>;
+    }
     const open = (conversation: Parameters<typeof openLettaAgent>[1]) => openLettaAgent(definition, { stateDirectory: options.stateDirectory, ...conversation });
     runtime = await open({
       conversationId: options.conversationId, newTitle: options.newTitle,
