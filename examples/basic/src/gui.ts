@@ -34,5 +34,6 @@ if (automationPort !== undefined) {
 // Team mode (several people, through `tailscale serve`): --tailscale --owner you@example.com --origin https://machine.tailnet.ts.net
 const server = args.includes('--tailscale')
   ? await startTeamServer([agent], assets, { port, stateDirectory, owners: list('--owner'), origins: list('--origin'), ...(automation ? { automation } : {}) })
-  : await startGuiServer(agent, assets, { port, stateDirectory, ...(automation ? { automation } : {}) });
+  // Add agent (in the app) opens your existing local Letta agents in place; they get the same sandbox, if any.
+  : await startGuiServer(agent, assets, { port, stateDirectory, ...(automation ? { automation } : {}), adoption: { ...(agent.sandbox ? { sandbox: agent.sandbox } : {}) } });
 closeOnSignals(server);

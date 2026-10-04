@@ -808,6 +808,27 @@ function watchDreamRequests(session: LettaCodeSession, agentId: string, decide: 
   });
 }
 
+
+type RawTransport = { request(type: string, body: unknown, response: string): Promise<{ success?: boolean; messages?: unknown; has_more?: unknown; next_before?: unknown; error?: unknown }> };
+/**
+ * One page of a conversation's backend history through the management
+ * connection (read-only; no session). The SDK's `listMessages` drops
+ * `agent_id`, which the backend needs for `default`: its management
+ * transport (created by the first call, here `agents.retrieve`) forwards the
+ * agent-scoped query.
+ */
+async function managementHistory(client: LettaAgentClient, agentId: string): Promise<(conversationId: string, query: ListMessagesOptions) => Promise<ListMessagesResult>> {
+  const agent = await client.agents.retrieve(agentId);
+  if (agent.id !== agentId) throw new Error('agent_missing');
+  const transport = (client as unknown as { managementTransport?: RawTransport | null }).managementTransport;
+  if (!transport || typeof transport.request !== 'function') throw new Error('history_unavailable');
+  return async (conversationId, query) => {
+    const response = await transport.request('conversation_messages_list', { conversation_id: conversationId, query: { ...query, agent_id: agentId } }, 'conversation_messages_list_response');
+    if (response.success !== true || !Array.isArray(response.messages)) throw new Error('history_unavailable');
+    return { messages: response.messages as ListMessagesResult['messages'], ...(typeof response.has_more === 'boolean' ? { hasMore: response.has_more } : {}), ...(typeof response.next_before === 'string' || response.next_before === null ? { nextBefore: response.next_before as string | null } : {}) };
+  };
+}
+
 /**
  * Read a conversation's display history without opening a session: nothing
  * is sent, configured or locked (adopted agents' conversations are only
@@ -819,21 +840,13 @@ export async function peekConversation(agentId: string, conversationId: string, 
   if (!validConversationId(conversationId)) throw new Error('Invalid conversation ID');
   const client = managementClient(REQUEST_TIMEOUT_MS);
   try {
-    // The SDK's listMessages drops agent_id for `default`; its management transport forwards the backend's agent-scoped query.
-    const transport = (client as unknown as { managementTransport?: { request?(type: string, body: unknown, response: string): Promise<{ success?: boolean; messages?: unknown; has_more?: unknown; next_before?: unknown; error?: unknown }> } });
+    const page = await managementHistory(client, agentId);
     if (conversationId !== 'default') {
       const conversation = await client.conversations.retrieve(conversationId);
       if (conversation.agent_id !== agentId) throw new Error('Conversation belongs to another agent');
-    } else await client.agents.retrieve(agentId);
-    const page = async (query: ListMessagesOptions): Promise<ListMessagesResult> => {
-      const request = transport.managementTransport?.request?.bind(transport.managementTransport);
-      if (!request) throw new Error('history_unavailable');
-      const response = await request('conversation_messages_list', { conversation_id: conversationId, query: { ...query, agent_id: agentId } }, 'conversation_messages_list_response');
-      if (response.success !== true || !Array.isArray(response.messages)) throw new Error('history_unavailable');
-      return { messages: response.messages as ListMessagesResult['messages'], ...(typeof response.has_more === 'boolean' ? { hasMore: response.has_more } : {}), ...(typeof response.next_before === 'string' || response.next_before === null ? { nextBefore: response.next_before as string | null } : {}) };
-    };
-    const history = await loadHistory(page, limit);
-    if (history.messages.some(m => (m as unknown as { agent_id?: unknown }).agent_id !== undefined && (m as unknown as { agent_id?: unknown }).agent_id !== agentId)) throw new Error('History of another agent');
+    }
+    const history = await loadHistory(query => page(conversationId, query), limit);
+    if (history.messages.some(m => { const owner = (m as unknown as { agent_id?: unknown }).agent_id; return owner !== undefined && owner !== agentId; })) throw new Error('History of another agent');
     return { messages: projectHistory(history.messages, appTools, undefined, { foreignTools: true }), truncated: history.truncated };
   } finally { await client.close(); }
 }
@@ -847,12 +860,8 @@ export async function conversationGlance(agentId: string, conversationId: string
   if (!validConversationId(conversationId)) return {};
   const client = managementClient(REQUEST_TIMEOUT_MS);
   try {
-    const transport = (client as unknown as { managementTransport?: { request?(type: string, body: unknown, response: string): Promise<{ success?: boolean; messages?: unknown }> } }).managementTransport;
-    if (conversationId === 'default') await client.agents.retrieve(agentId);
-    const read = async (order: 'asc' | 'desc', limit: number) => {
-      const response = await transport?.request?.('conversation_messages_list', { conversation_id: conversationId, query: { order, limit, agent_id: agentId } }, 'conversation_messages_list_response');
-      return response?.success && Array.isArray(response.messages) ? response.messages as ListMessagesResult['messages'] : [];
-    };
+    const page = await managementHistory(client, agentId);
+    const read = (order: 'asc' | 'desc', limit: number) => page(conversationId, { order, limit }).then(r => r.messages, () => [] as ListMessagesResult['messages']);
     const [first, last] = await Promise.all([read('asc', 30), read('desc', 1)]);
     const text = projectHistory(first, [], 0).find(m => m.role === 'user')?.parts.find(p => p.type === 'text') as { text?: string } | undefined;
     const line = text?.text?.replace(/\s+/g, ' ').trim();

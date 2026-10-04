@@ -222,6 +222,8 @@ export interface RuntimeHost {
    */
   peek?(conversationId: string): Promise<UIMessage[]>;
 }
+/** Titles of conversations whose real title was not known yet. */
+const FALLBACK_TITLES = new Set(['Untitled conversation', 'Default conversation']);
 /** A Letta conversation to list as a thread without opening it (see {@link ThreadRuntime.importConversations}). */
 export type ImportedConversation = { conversationId: string; title: string; createdAt?: string; lastActivityAt?: string };
 /** A client-visible failure with a fixed code and HTTP status. */
@@ -917,6 +919,8 @@ export class ThreadRuntime {
       const existing = known.get(row.conversationId);
       if (existing) {
         if (row.lastActivityAt && (!existing.lastActivityAt || row.lastActivityAt > existing.lastActivityAt)) { existing.lastActivityAt = row.lastActivityAt; touched = true; }
+        // A fallback title gets a real one once it is known (a conversation renamed in the app keeps its name).
+        if (existing.conversationId === row.conversationId && FALLBACK_TITLES.has(existing.title) && !FALLBACK_TITLES.has(title)) { existing.title = title; touched = true; }
         continue;
       }
       if (this.state.threads.length >= 200) break;
