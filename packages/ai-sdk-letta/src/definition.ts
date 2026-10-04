@@ -5,6 +5,7 @@ import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, webDevEnabled, WEB_DEV_NOTE, type ResolvedWebDevConfig, type WebDevConfig } from './webdev.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
+import { resolveMcpApps, type McpAppConfig, type ResolvedMcpAppConfig } from './mcp-apps.js';
 import { resolveTurnLimits, type TurnLimits } from './turn-limits.js';
 
 /**
@@ -174,6 +175,14 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
    * Its own Letta Code commits are reviewed but never reverted.
    */
   adopt?: { agentId: string };
+  /**
+   * MCP Apps (run mode): MCP servers with interactive views, installed from
+   * local packages or folders (never URLs), each run in its own container
+   * with no network. Needs `sandbox` with the built-in `docker` or
+   * `apple-container` provider (it names the container CLI; the app tools
+   * do not need `sandboxTools`). See `McpAppConfig` and the README, "MCP Apps".
+   */
+  mcpApps?: readonly McpAppConfig[];
 }
 
 /** A validated, immutable agent definition. */
@@ -197,6 +206,8 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly webDev: ResolvedWebDevConfig;
   /** An existing Letta agent this definition adopts in place (see {@link AgentDefinitionInput.adopt}). */
   readonly adopt?: Readonly<{ agentId: string }>;
+  /** MCP Apps (see {@link AgentDefinitionInput.mcpApps}); empty without any. */
+  readonly mcpApps?: readonly ResolvedMcpAppConfig[];
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -261,8 +272,15 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const memory = resolveMemory(input.memory);
   if (input.adopt !== undefined && (input.adopt === null || typeof input.adopt !== 'object' || typeof input.adopt.agentId !== 'string' || !/^agent-local-[a-zA-Z0-9-]{1,100}$/.test(input.adopt.agentId))) throw new Error('adopt.agentId must be a local Letta agent ID (agent-local-...)');
   const adopt = input.adopt ? Object.freeze({ agentId: input.adopt.agentId }) : undefined;
+  const mcpApps = resolveMcpApps(input.mcpApps);
+  if (mcpApps.length && (!sandbox || (sandbox.provider !== 'docker' && sandbox.provider !== 'apple-container'))) throw new Error('mcpApps need sandbox with the built-in "docker" or "apple-container" provider: each app server runs in its own container');
+  // App tools are named <app id>__<tool>: an application tool must not look like one.
+  const clash = names.find(name => mcpApps.some(app => name.startsWith(`${app.id}__`)));
+  if (clash) throw new Error(`Tool name "${clash}" is reserved for the MCP App "${clash.split('__')[0]}"`);
+  const trustedApp = memory.trustedTools.find(name => mcpApps.some(app => name.startsWith(`${app.id}__`)));
+  if (trustedApp) throw new Error(`memory.trustedTools cannot include ${trustedApp}: MCP App results are the app's content, always untrusted`);
   return Object.freeze({
-    ...(adopt ? { adopt } : {}),
+    ...(adopt ? { adopt } : {}), ...(mcpApps.length ? { mcpApps } : {}),
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
     permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, turnLimits, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
   });

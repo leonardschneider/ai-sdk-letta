@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { McpApps, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -13,6 +13,7 @@ import { AutomationService, AutomationStore, createToken, listenAutomation, revo
 import { AdoptionRegistry, adoptedPeek } from './adoption.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
 import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer } from './preview.js';
+import { AppGate } from './mcp-apps.js';
 
 /** Default GUI port (the token API uses the next one). */
 export const DEFAULT_PORT = 4400;
@@ -169,7 +170,7 @@ function projectOf(definition: AgentDefinition<ToolSet>): string | undefined {
   return path;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   const project = projectOf(definition as AgentDefinition<ToolSet>);
   return {
@@ -177,7 +178,7 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
@@ -232,7 +233,7 @@ async function listen(server: Server, port: number) {
   return address.port || port;
 }
 
-function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string, extra?: { server?: Server; service?: AutomationService; webDev?: { registry: WebDevRegistry; preview: PreviewServer } }) {
+function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string, extra?: { server?: Server; service?: AutomationService; webDev?: { registry?: WebDevRegistry; preview: PreviewServer }; apps?: McpApps }) {
   let closing: Promise<void> | undefined;
   return () => closing ??= (async () => {
     // SDK shutdown can await unref'ed resources; keep Node alive until locks release.
@@ -240,7 +241,8 @@ function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, l
     server.close(); server.closeAllConnections?.();
     extra?.service?.close(); extra?.server?.close(); extra?.server?.closeAllConnections?.(); extra?.webDev?.preview.close();
     // Web development containers stop with the server (each also stops when idle).
-    try { await runtime.close(); await extra?.webDev?.registry.close(); unlock(); log(`${label} stopped cleanly.`); }
+    // MCP App servers are killed and their containers removed.
+    try { await runtime.close(); await extra?.webDev?.registry?.close(); await extra?.apps?.close(); unlock(); log(`${label} stopped cleanly.`); }
     catch (error) { log(`${label} shutdown incomplete; inspect the recorded locks before restarting.`); throw error; }
     finally { clearInterval(keepAlive); }
   })();
@@ -261,14 +263,20 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
   try {
     const port = options.port ?? DEFAULT_PORT;
     const owner = 'local-gui';
+    // Known once the listeners are bound (the app gate builds origins and CSPs from them).
+    const appPortRef = { port }; const previewRef = { port: 0 };
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition, true);
     const memory = memoryWiring(definition, directory);
     // Web app development: each conversation's services (kept across sessions), and the preview listener.
     let notify: (() => void) | undefined;
     const webDev = webDevEnabled(definition) ? new WebDevRegistry({ directory: join(statePaths(stateDirectory).root, 'webdev'), onChange: () => notify?.() }) : undefined;
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, webDev), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    // MCP Apps: started now (in the background), kept across sessions, stopped with the server.
+    const apps = definition.mcpApps?.length ? new McpApps(definition.mcpApps, { directory: mcpAppsDirectory(statePaths(stateDirectory).root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), onChange: () => notify?.(), log }) : undefined;
+    void apps?.ready();
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, webDev, apps), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     notify = () => runtime.webDevChanged();
+    if (apps) runtime.apps = new AppGate({ apps, runtime, owner, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, sandboxPort: () => previewRef.port, auditFile: join(directory, 'app-audit.ndjson'), person: () => ({ id: LOCAL_USER_ID, name: 'You' }) });
     const board = decisions.bind(runtime, directory, owner);
     memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
@@ -300,29 +308,32 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     let preview: PreviewServer | undefined;
     try {
       let appPort = port;
-      if (webDev) {
+      if (webDev || apps) {
         const tokens = new PreviewTokens();
+        // Web app previews (p-<token>) and MCP App views (s-<token>, one origin per view) share one loopback listener.
         preview = await startPreviewServer({ port: options.previewPort ?? 0, frameAncestors: () => [`http://127.0.0.1:${appPort}`],
           resolve: token => {
             const threadId = tokens.threadOf(token);
-            if (!threadId) return undefined;
+            if (!threadId || !webDev) return undefined;
             const services = () => { const identity = runtime.conversationIdentity(threadId); return identity ? webDev.get(identity.agentId, identity.conversationId) : undefined; };
             return { connect: () => services()?.connectPreview(), get origins() { return services()?.origins ?? []; } };
-          } });
+          },
+          ...(runtime.apps ? { sandbox: (token: string) => runtime.apps!.sandboxPage(token) } : {}) });
         const previewPort = preview.port;
-        runtime.webDev = { registry: webDev, previewUrl: threadId => `${previewOrigin(tokens.tokenOf(threadId), previewPort)}/` };
+        previewRef.port = previewPort;
+        if (webDev) runtime.webDev = { registry: webDev, previewUrl: threadId => `${previewOrigin(tokens.tokenOf(threadId), previewPort)}/` };
       }
       const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui()).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
-      appPort = bound;
+      appPort = bound; appPortRef.port = bound;
       const url = `http://127.0.0.1:${bound}`;
       // Rewinds a stop interrupted are finished first, then outcomes decided before a restart and not sent yet are sent (once).
       await runtime.resumeRewinds(owner).catch(() => {});
       board?.resumeAll();
-      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
-      const stop = lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(webDev && preview ? { webDev: { registry: webDev, preview } } : {}) });
+      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview && webDev ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}${preview && apps ? `\nMCP App views: http://s-<view token>.localhost:${preview.port}/ (loopback, one origin per view) · apps: ${definition.mcpApps!.map(a => a.id).join(', ')}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+      const stop = lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(preview ? { webDev: { ...(webDev ? { registry: webDev } : {}), preview } } : {}), ...(apps ? { apps } : {}) });
       return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: async () => { await adoption?.close(); await stop(); } };
-    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); await adoption?.close(); throw error; }
+    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); await apps?.close(); await adoption?.close(); throw error; }
   } catch (error) { unlock(); throw error; }
 }
 
@@ -368,7 +379,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, ...(definition.mcpApps?.length ? { apps: true } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.
@@ -387,6 +398,9 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
   if (!definitions.length) throw new Error('At least one agent definition is required');
   if (new Set(definitions.map(d => d.id)).size !== definitions.length) throw new Error('Agent definition IDs must be unique');
   if (!options.owners.length) throw new Error('At least one owner (a Tailscale login) is required');
+  // MCP App views need one *.localhost origin per view, which `tailscale serve` cannot publish: single-user only for now.
+  const withApps = definitions.filter(d => d.mcpApps?.length);
+  if (withApps.length) throw new Error(`MCP Apps are single-user only for now (their views need per-view *.localhost origins, which tailscale serve cannot publish): remove mcpApps from ${withApps.map(d => d.id).join(', ')} or use startGuiServer`);
   const stateDirectory = resolveStateDirectory(options.stateDirectory);
   if (!existsSync(join(assets, 'index.html'))) throw new Error(`Web assets not found in ${assets}; build @ai-sdk-letta/web first`);
   const teamDirectory = join(stateDirectory, 'team');

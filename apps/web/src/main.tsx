@@ -39,6 +39,8 @@ import { AtlassianDialog, AtlassianRow, useAtlassianStatus } from './integration
 import { LAYOUT_KEY, RESOURCES_WIDTH, clampWidth, readLayout, type Layout } from './resources-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
+import { AppApprovalCards, AppOverlay, AppPanel, AppsContext, AppsDialog, AppsRow, useAppApprovals, useViewTools, type AppsState } from './apps.js';
+import { APP_PANEL_KEY, APP_PANEL_WIDTH, clampAppPanelWidth } from './apps-model.js';
 import './style.css';
 import './markdown.css';
 
@@ -130,7 +132,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Memory review (Jiminy): the Memory view, toasts when a change is reverted, and held changes as decisions.
   const memoryEnabled = !!agent.memory;
   const [memoryOpen, setMemoryOpen] = useState(false);
-  const follow = !!team || !!agent.automations || !!agent.decisions || memoryEnabled;
+  const follow = !!team || !!agent.automations || !!agent.decisions || memoryEnabled || !!agent.apps;
   const mayManageAutomations = !!agent.automations && (!team || agent.role === 'admin');
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(!unreachable);
@@ -187,6 +189,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewStatus]);
   const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
+  // MCP Apps: tool lines of app tools show their views; one can open in the right panel, or full screen / picture-in-picture.
+  const appsEnabled = !!agent.apps;
+  const [appsOpen, setAppsOpen] = useState(false);
+  const [appPanel, setAppPanel] = useState<string>();
+  const [appOverlay, setAppOverlay] = useState<AppsState['overlay']>();
+  const [appPanelWidth, setAppPanelWidthState] = useState(() => clampAppPanelWidth(Number(localStorage.getItem(APP_PANEL_KEY) ?? APP_PANEL_WIDTH.initial)));
+  const setAppPanelWidth = useCallback((width: number) => { setAppPanelWidthState(width); localStorage.setItem(APP_PANEL_KEY, String(width)); }, []);
+  const [appsVersion, setAppsVersion] = useState(0);
+  const viewTools = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
+  const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
+  useEffect(() => { setAppPanel(undefined); setAppOverlay(undefined); }, [current.id]);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
@@ -721,6 +734,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         if (drawer) { setDrawer(false); return; }
         if (narrow && resourcesDrawer) { setResourcesDrawer(false); return; }
         if (narrow && previewDrawer) { setPreviewDrawer(false); return; }
+        if (appOverlay) return;
+        if (narrow && appPanel) { setAppPanel(undefined); return; }
         const target = event.target as HTMLElement | null;
         if (!running || !mayAct || target?.closest('.dock, input, .composer')) return;
         event.preventDefault(); void cancel();
@@ -800,7 +815,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   };
   // Team mode: someone else's approval or question is shown, but only they (or an admin) can answer it.
   const waitingFor = team && !mayAct ? liveAuthor?.name ?? 'the person who sent it' : undefined;
-  return <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer, ...(waitingFor ? { waitingFor } : {}) }}>
+  const appsState: AppsState = {
+    enabled: appsEnabled, ...(current.draft ? {} : { threadId: current.id }), viewTools, ...(appPanel ? { panel: appPanel } : {}), ...(appOverlay ? { overlay: appOverlay } : {}),
+    openPanel: id => { setAppOverlay(undefined); setAppPanel(id); if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); } },
+    closePanel: () => setAppPanel(undefined),
+    setOverlay: value => { if (value && appPanel === value.toolCallId) setAppPanel(undefined); setAppOverlay(value); },
+    refreshApprovals: refreshAppApprovals,
+    // A message the view sent (allowed) starts a turn here: the long poll follows it (a refresh here could hold the runtime while you send).
+    onSent: () => {},
+  };
+  return <AppsContext.Provider value={appsState}>
+  <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer, ...(waitingFor ? { waitingFor } : {}) }}>
     <AuthorContext.Provider value={team?.user.id}>
     <DecisionsContext.Provider value={decisionsState}>
     <FileLinkContext.Provider value={fileLink}>
@@ -808,12 +833,12 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     <RewindContext.Provider value={rewindState}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && (resourcesDrawer || previewDrawer)) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
-        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--resources-width': `${layout.resourcesWidth}px`, '--preview-width': `${previewLayout.width}px` } as React.CSSProperties}>
+        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} data-app-panel={(appPanel && !current.draft) || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px`, '--preview-width': `${previewLayout.width}px`, '--app-panel-width': `${appPanelWidth}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf}/> } : {})}
-            footer={<>{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
+            footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); }}/>
         <main className="main">
@@ -842,6 +867,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                       {!readOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
+                <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals}/>
                 {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">
@@ -898,6 +924,11 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
         </main>
+        {appsEnabled && appPanel && !current.draft && <aside id="app-panel" className="app-pane" aria-label="App">
+          {!narrow && <Resizer label="Resize app panel" min={APP_PANEL_WIDTH.min} max={APP_PANEL_WIDTH.max} width={appPanelWidth} clamp={clampAppPanelWidth} reset={APP_PANEL_WIDTH.initial} onWidth={setAppPanelWidth}/>}
+          <AppPanel toolCallId={appPanel} onClose={() => setAppPanel(undefined)}/>
+        </aside>}
+        {appsEnabled && !current.draft && <AppOverlay/>}
         {webDevEnabled && !current.draft && <aside id="preview" className="webprev-pane" aria-label="Preview" hidden={!previewOpen}>
           {!narrow && <Resizer label="Resize preview" min={PREVIEW_WIDTH.min} max={PREVIEW_WIDTH.max} width={previewLayout.width} clamp={clampPreviewWidth} reset={PREVIEW_WIDTH.initial} onWidth={width => setPreviewLayout(l => ({ ...l, width }))}/>}
           {previewOpen && <PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
@@ -915,6 +946,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
         {projectOf && local && <ProjectDialog agent={projectOf} onClose={() => setProjectOf(undefined)} onSaved={() => { setProjectOf(undefined); local.reload(projectOf.id); }}/>}
         {memoryOpen && <MemoryDialog agentName={agent.name} admin={!team || isAdmin} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
+        {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
@@ -925,7 +957,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     </FileLinkContext.Provider>
     </DecisionsContext.Provider>
     </AuthorContext.Provider>
-  </InteractionContext.Provider>;
+  </InteractionContext.Provider>
+  </AppsContext.Provider>;
 }
 
 /** Drag handle on a right panel's left edge (Resources, Preview); arrow keys resize too. The width is kept between visits. */

@@ -7,7 +7,8 @@ import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
-import type { Listened, MessageAuthor as Author, MessageSource } from './messages.js';
+import type { Listened, MessageApp, MessageAuthor as Author, MessageSource } from './messages.js';
+import { AppToolLine } from './apps.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
@@ -44,13 +45,16 @@ function formatTime(value: string) {
 function MessageAuthor({ role }: { role: string }) {
   const author = useAuiState(s => (s.message.metadata.custom as { author?: Author } | undefined)?.author);
   const source = useAuiState(s => (s.message.metadata.custom as { source?: MessageSource } | undefined)?.source);
+  const app = useAuiState(s => (s.message.metadata.custom as { app?: MessageApp } | undefined)?.app);
   const me = useContext(AuthorContext);
-  if (role !== 'user' || (!author && !source)) return null;
+  if (role !== 'user' || (!author && !source && !app)) return null;
   const mine = !!author && author.id === me;
   // A turn an automation started: a small "via n8n" badge (named after the automation), next to the person it acts for.
   const badge = source ? <span className="via-badge" title={source.kind === 'schedule' ? 'A task the agent scheduled, run by the orchestrator' : `Started by the automation “${source.name}”`}>{sourceLabel(source)}</span> : null;
+  // A message an MCP App's view sent: an "App" badge naming the app and who allowed it.
+  const appBadge = app ? <span className="app-badge via-app" title={`Sent by the app “${app.name}” from its view; ${app.approvedBy.name === 'You' ? 'you' : app.approvedBy.name} allowed it. The agent was told it is the app’s content.`}>App · {app.name}</span> : null;
   return <div className="msg-author" data-mine={mine || undefined} title={author?.login}>
-    {badge}{author && <><span className="msg-author-name">{mine ? 'You' : author.name}</span><Avatar person={author} size={20}/></>}
+    {appBadge}{badge}{author && <><span className="msg-author-name">{mine ? 'You' : author.name}</span><Avatar person={author} size={20}/></>}
   </div>;
 }
 
@@ -111,7 +115,9 @@ function UserBubble() {
 }
 
 /** Questions stay ungrouped so they read as part of the conversation. */
-const groupTools = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [], 'tool-call:web_search': [] });
+const byType = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [], 'tool-call:web_search': [] });
+/** MCP App tools (`<app>__<tool>`) stay ungrouped too: their views show in the conversation. */
+const groupTools: typeof byType = (part, context) => part.type === 'tool-call' && /^[a-z][a-z0-9-]{0,23}__/.test(part.toolName) ? [] : byType(part, context);
 
 function AssistantParts() {
   return <><MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
@@ -182,6 +188,8 @@ function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'ask_user') return <QuestionLine {...props}/>;
   if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
   if (props.toolName === 'web_search') return <WebSearchPart {...props}/>;
+  // MCP App tools with a view: the view under the line (the line itself keeps its details).
+  if (/^[a-z][a-z0-9-]{0,23}__/.test(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props} detailsLabel="What the agent got"/>}/>;
   return <ToolLine {...props}/>;
 }
 
@@ -251,7 +259,7 @@ function CommandDetail({ toolName, args, result, phase }: { toolName: string; ar
   </div>;
 }
 
-function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartProps) {
+function ToolLine({ toolCallId, toolName, argsText, result, isError, detailsLabel }: ToolPartProps & { detailsLabel?: string }) {
   const active = useContext(InteractionContext);
   const pendingApproval = active.request?.kind === 'approval' && active.request.toolCallId === toolCallId && result === undefined;
   // Atlassian tools report refusals as text ("Error (code): …"); restored history may not flag them as errors.
@@ -261,7 +269,7 @@ function ToolLine({ toolCallId, toolName, argsText, result, isError }: ToolPartP
   const decided = pendingApproval && active.sent?.id === active.request?.id ? active.sent : undefined;
   const label = pendingApproval
     ? decided ? (decided.approved ? `Allowed: ${friendlyName(toolName)} · running…` : `Denied: ${friendlyName(toolName)}`) : active.waitingFor ? `Waiting for ${active.waitingFor} to allow: ${friendlyName(toolName)}` : `Waiting for your permission: ${friendlyName(toolName)}`
-    : toolLabel(toolName, phase, result, args);
+    : detailsLabel && phase !== 'error' ? detailsLabel : toolLabel(toolName, phase, result, args);
   const shell = COMMAND_TOOLS.has(toolName) && typeof args.command === 'string';
   const summary = phase === 'done' && !shell ? toolSummary(toolName, result, args) : { fields: [] };
   const approval = active.approvalTools.has(toolName) || pendingApproval;

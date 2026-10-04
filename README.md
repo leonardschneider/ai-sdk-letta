@@ -1092,13 +1092,104 @@ WEBDEV=1 npm run gui                          # the example agent with web devel
 - **Team servers** do not serve previews yet: the tools work, but the
   Preview pane is single-user only (see [Limitations](#limitations)).
 
+### MCP Apps (run mode)
+
+Install [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps)
+(spec 2026-01-26): MCP servers whose tools come with an **interactive
+view**. When the agent calls such a tool, its view renders **inline in the
+tool line**, and you can open it in a **right panel**, **full screen** or
+**picture-in-picture**. Apps are installed from **local package tarballs or
+folders only, never from a URL**:
+
+```ts
+defineAgent({ ...,
+  sandbox: { provider: 'apple-container' },   // or 'docker': it runs each app's container
+  mcpApps: [
+    { id: 'clock', package: './clock-1.0.0.tgz', version: '1.0.0',    // `npm pack` output, or a package folder
+      args: ['--stdio'],                                            // added to the package's bin (or main)
+      tools: { 'get-time': 'allow', 'set-alarm': 'ask' },           // default: 'ask'
+      origins: ['https://api.example.org'] },                       // default: none
+    { id: 'notes', path: './notes-app', command: ['python3', 'server.py'] },
+  ],
+});
+```
+
+```sh
+npm install --save-exact @ai-sdk/mcp@2.0.60   # the MCP client (optional peer dependency)
+MCP_APPS=./clock-1.0.0.tgz npm run gui        # the example agent; `id=path args`, comma-separated, or the JSON of mcpApps
+```
+
+- **Where apps run.** Each app's server runs in **its own container with no
+  network** (`MCP_APPS_IMAGE`: Node 22 and Python 3.12, pinned by digest,
+  nothing else; about 90 MB, like the sandbox image, built once in seconds
+  from `MCP_APPS_DOCKERFILE`), your UID, no capabilities, a read-only root and
+  the app's files read-only at `/app`. Tarballs are unpacked under the
+  state folder (entries outside `package/` and links out of it are refused)
+  and must be self-contained: nothing is installed. The server is reached
+  over the stdio of `docker exec -i` / `container exec -i` with
+  `@ai-sdk/mcp`, advertising the `io.modelcontextprotocol/ui` extension.
+  Apps start with the server (about 2 s each) and stop with it; the `exec`
+  process is killed explicitly and the container removed. An app that fails
+  to start is reported in **Apps**; the others work.
+- **Outside sites.** `origins` are the only HTTPS origins an app may reach:
+  from its **server**, through a proxy in this process (the same checks as
+  web development's browser; `HTTPS_PROXY` is set in the container), and
+  from its **view**, as the intersection with what the view declares in
+  `_meta.ui.csp`.
+- **The agent's tools.** Tools visible to the model (`_meta.ui.visibility`
+  includes `"model"`; the default is `["model", "app"]`) join the agent's
+  tools as `<app id>__<tool>`, with their policy; `'deny'` tools are not
+  offered. The agent sees a result's `content` only, within the usual output
+  limit; `structuredContent` goes to the view. App results are **untrusted
+  content** for [memory provenance](#memory-provenance-and-review-jiminy)
+  (an `app` source); `memory.trustedTools` cannot include app tools.
+  `@ai-sdk/mcp` 2.0.60's `splitMCPAppTools` treats a missing visibility as
+  model-only and `client.tools()` does not filter: this package uses its
+  own predicate (`toolVisibility`).
+- **Views.** Each view renders in a sandbox proxy frame on **its own
+  origin**, `http://s-<128-bit token>.localhost:<port>/`, a new one for every
+  view (two views of the same app cannot reach each other), served by the
+  preview listener **once** (a second request gets 410), with a
+  `Content-Security-Policy` computed on the server: the spec's restrictive
+  default plus the declared domains you approved; never `unsafe-eval`;
+  `object-src 'none'`; `frame-src 'none'` unless granted; framed only by the
+  app. The browser holds **no MCP client**: the page relays what a view asks
+  for to this server, which decides. Views get the host context (light or
+  dark, locale, time zone, display mode, size), the tool input and result
+  (or the cancellation), follow your theme and resize with `size-changed`.
+  They render again after a reload, from the call **records** kept under the
+  state folder (input, full result, view fingerprint).
+- **What views may do.** `tools/call` only for tools whose visibility
+  includes `"app"` (others are refused, as the spec requires), then by
+  policy: `allow` runs, `deny` refuses, **`ask` shows a card** under the
+  conversation (you clicked something in the view, outside any turn: Allow
+  or Deny, once). `resources/read`: `ui://` resources of the same app.
+  `ui/message` **always asks**; allowed, it becomes your message to the
+  agent, marked with an **App** badge, and the agent is told it is the app's
+  content. Like any message, it waits for a running turn (it is sent after
+  a completed or stopped one) and is never sent behind a turn whose outcome
+  is uncertain: then nothing is asked, or the approval reports it was not
+  sent. Tool calls a view makes run outside turns and are not affected. `ui/update-model-context` asks on a view's first update; the
+  latest value per view then reaches the agent at your next message, as
+  untrusted context. `ui/open-link` opens http(s) links in a new tab without
+  an opener. Display modes: inline, full screen and picture-in-picture, only
+  those the view declares. Every decision is written to
+  `app-audit.ndjson` (who, `via app:<id>`, the tool call whose view asked).
+- **Apps** (sidebar) lists each app: status, tools with their visibility and
+  policy, the views' declared and granted CSP domains, and Disable / Enable
+  (a disabled app's tools refuse calls and its views do not render).
+  Policies and origins are set in the definition.
+- **Single-user only.** Views need a `*.localhost` origin per view, which
+  `tailscale serve` cannot publish: `startTeamServer` refuses definitions
+  with `mcpApps` (see [Limitations](#limitations)).
+
 What a definition controls, and when:
 
 | Field | Applied |
 | --- | --- |
 | `id`, `name` | Every start: the mapping and the Letta agent name must match, or startup fails. |
 | `model`, `instructions` | At creation only. To change them, create a new logical ID (or change the agent in Letta). |
-| `tools`, `permissions`, `toolTimeoutMs`, `turnLimits`, `sandbox`, `webDev` | Every start. |
+| `tools`, `permissions`, `toolTimeoutMs`, `turnLimits`, `sandbox`, `webDev`, `mcpApps` | Every start. |
 | `dreaming` | Every start, scoped to this project (see below), then verified. |
 
 ## TUI
@@ -1213,6 +1304,15 @@ folder it runs in and the outside origins approved in this conversation
 (**Revoke**). It opens by itself when a dev server starts during a turn, can
 be resized by dragging its edge, and is a drawer on a phone. A dot on the
 button says a dev server is running.
+
+**Apps.** With [MCP Apps](#mcp-apps-run-mode), the tool line of an app
+tool shows the app's **view** under it (an **App** badge marks it), with
+buttons to open it in a **right panel** (resizable; full screen on a phone)
+or **full screen**, and picture-in-picture when the view supports it
+(**Esc** returns it inline). What a view asks to do on your behalf appears
+as a **Permission needed** card under the conversation; a message it sends
+shows with an **App · <name>** badge. **Apps** in the sidebar lists the
+installed apps (Disable / Enable).
 
 **Resources.** The panel shows the agent's [resources](#resources): one
 folder per conversation (the current one is marked "this chat" and opened)
@@ -1599,6 +1699,14 @@ single-user agent before it is given up (`start_timeout`).
   in an admin's own turn with no untrusted content; everything else is
   reviewed by a separate reviewer that can only tighten the harness's
   decision (see [Memory provenance and review](#memory-provenance-and-review-jiminy)).
+- **MCP Apps are contained twice.** Their servers run in containers with no
+  network (approved origins only, through a checking proxy), from local
+  packages only. Their views run on a fresh `*.localhost` origin per view,
+  served once with a server-computed CSP (no `unsafe-eval`, no plugins, no
+  frames or connections unless declared and approved), and hold no MCP
+  client and no session: everything they ask for goes through the server's
+  gate (visibility, policy, a person's approval, audit). Their content is
+  untrusted for memory, and messages they send are marked as theirs.
 - **The GUI is loopback-only.** It binds to 127.0.0.1 and checks the Host
   header, the Origin, and fetch metadata. A random HttpOnly, SameSite=Strict
   cookie authenticates the browser, and every mutation also needs an
@@ -1953,6 +2061,19 @@ Letta never got is not resent.
   Apple silicon. On Linux with rootful Docker, files are owned by your UID
   as on macOS; with user-namespace remapping they may not be. Each network
   command starts a fresh sandbox (about 1 to 2 seconds).
+- **MCP Apps (run mode).** Single-user GUI only: team servers refuse
+  `mcpApps` (each view needs its own `*.localhost` origin, which `tailscale
+  serve` cannot publish), and the TUI shows app tools as plain tool lines.
+  Local packages and folders only; a package must be self-contained (bundled
+  or with its `node_modules`), and servers run over stdio. Policies and
+  origins come from the definition (the Apps list shows them and can
+  disable an app). A view's own storage (cookies, `localStorage`) lives on a
+  fresh origin per view, so it does not persist. Not yet: sampling
+  (`sampling/createMessage`), `ui/download-file`, partial tool input
+  (`tool-input-partial`), app-declared permissions (camera, microphone,
+  geolocation and clipboard are never granted), and the `domain` key
+  (views always get a random origin). Developing and publishing apps come
+  later.
 - **Web app development.** One dev server per conversation, on port 5173
   (other ports are not previewed). Team servers run the tools but do not
   serve previews yet (a second `tailscale serve` port is planned). The

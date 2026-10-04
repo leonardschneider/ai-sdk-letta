@@ -81,8 +81,20 @@ ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1 CHROME_DEVTOOLS_MCP_NO_UPDATE_CHEC
 `;
 /** Tag of the web development image (changes when {@link WEBDEV_DOCKERFILE} changes). */
 export const WEBDEV_IMAGE = `ai-sdk-letta-webdev:${createHash('sha256').update(WEBDEV_DOCKERFILE).digest('hex').slice(0, 12)}`;
+/**
+ * The slim runtime of MCP App servers (see `mcpApps`): Python 3.12 and Node
+ * 22 (both pinned by digest), nothing else (no Chromium, no compilers). Built
+ * from the same base images as the sandbox, without a package manager step.
+ */
+export const MCP_APPS_DOCKERFILE = `FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
+FROM docker.io/library/python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+ENV NODE_ENV=production PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+`;
+/** Tag of the MCP App runtime image (changes when {@link MCP_APPS_DOCKERFILE} changes). */
+export const MCP_APPS_IMAGE = `ai-sdk-letta-mcp-apps:${createHash('sha256').update(MCP_APPS_DOCKERFILE).digest('hex').slice(0, 12)}`;
 /** Images this package builds itself (instead of pulling), by tag. */
-const BUILT_IMAGES: Readonly<Record<string, string>> = { [SANDBOX_IMAGE]: SANDBOX_DOCKERFILE, [WEBDEV_IMAGE]: WEBDEV_DOCKERFILE };
+const BUILT_IMAGES: Readonly<Record<string, string>> = { [SANDBOX_IMAGE]: SANDBOX_DOCKERFILE, [WEBDEV_IMAGE]: WEBDEV_DOCKERFILE, [MCP_APPS_IMAGE]: MCP_APPS_DOCKERFILE };
 /** Label on every container this package creates; stale ones are removed at startup. */
 export const SANDBOX_LABEL = 'ai-sdk-letta.sandbox';
 
@@ -556,7 +568,7 @@ export async function ensureImage(cli: Cli, image: string, log?: (line: string) 
         if (pulled.code !== 0) throw new SandboxError('sandbox_unavailable', `Could not pull ${image}: ${pulled.stderr.trim().slice(-300)}`);
         return;
       }
-      log?.(`Building sandbox image ${image} (first run only; usually 1–3 minutes${image === WEBDEV_IMAGE ? ', a little more for the web development image' : ''})…`);
+      log?.(image === MCP_APPS_IMAGE ? `Building the MCP App runtime image ${image} (first run only; usually under a minute)…` : `Building sandbox image ${image} (first run only; usually 1–3 minutes${image === WEBDEV_IMAGE ? ', a little more for the web development image' : ''})…`);
       const context = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-image-'));
       try {
         writeFileSync(join(context, 'Dockerfile'), dockerfile);

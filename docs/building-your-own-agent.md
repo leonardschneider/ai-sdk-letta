@@ -15,7 +15,7 @@ rename the ID, edit the tools.
 - [5. Define the agent](#5-define-the-agent)
 - [6. Human in the loop](#6-human-in-the-loop)
 - [6a. Decisions that can wait](#6a-decisions-that-can-wait)
-- [7. Optional built-ins: files, shell, images, Atlassian, web search](#7-optional-built-ins-files-shell-images-atlassian-web-search)
+- [7. Optional built-ins: files, shell, web apps, MCP Apps, images, Atlassian, web search](#7-optional-built-ins-files-shell-web-apps-mcp-apps-images-atlassian-web-search)
 - [8. Memory and dreaming](#8-memory-and-dreaming)
 - [9. Run it](#9-run-it)
 - [9a. Run it from n8n or Conductor](#9a-run-it-from-n8n-or-conductor)
@@ -426,7 +426,7 @@ test('after request_decision, the rest of the turn is paused', async () => {
 });
 ```
 
-## 7. Optional built-ins: files, shell, web apps, images, Atlassian, web search
+## 7. Optional built-ins: files, shell, web apps, MCP Apps, images, Atlassian, web search
 
 All built-ins are opt-in, like every tool.
 
@@ -500,6 +500,56 @@ The browser tools also need `npm install --save-exact @ai-sdk/mcp@2.0.60`.
 Serve it with `startGuiServer` as usual: the server adds the preview
 listener (its own origin, `http://p-<token>.localhost:<port>`). Details,
 the isolation model and limits: [Web app development](../README.md#web-app-development-preview-and-browser).
+
+**MCP Apps** (run mode) add interactive views: MCP servers whose tools
+come with a `ui://` HTML view, installed from a **local** package tarball or
+folder (never a URL). Each app's server runs in its own container without
+network (`MCP_APPS_IMAGE`: Node and Python only); its model-visible tools
+join the agent as `<app id>__<tool>` with the policy you give them (default
+`'ask'`), and their views render in the browser app's tool lines on a
+sandboxed origin of their own. Calls a view makes are checked by the server
+(visibility, then policy), and `'ask'` shows a card outside any turn.
+
+```ts
+// src/apps-agent.ts
+import { defineAgent } from 'ai-sdk-letta';
+
+export const withApps = (clockTarball: string) => defineAgent({
+  id: 'app-host',
+  name: 'App Host',
+  model: 'openai-codex/gpt-5.5',
+  instructions: 'Some tools come from apps that show the user an interactive view.',
+  tools: {},
+  sandbox: { provider: 'docker' },  // names the container CLI that runs each app
+  mcpApps: [{ id: 'clock', package: clockTarball, args: ['--stdio'], tools: { 'get-time': 'allow' }, origins: [] }],
+});
+```
+
+What the host decides, offline: who may see a tool (a missing
+`_meta.ui.visibility` means both the model and the app, unlike
+`@ai-sdk/mcp` 2.0.60's `splitMCPAppTools`), and a view's
+`Content-Security-Policy` (declared domains you approved, nothing else):
+
+```ts
+// src/apps.test.ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { grantedCsp, mcpAppCsp, toolVisibility } from 'ai-sdk-letta';
+
+test('visibility defaults to model and app; a view gets only approved, declared origins', () => {
+  assert.deepEqual(toolVisibility({ _meta: { ui: { resourceUri: 'ui://clock/view.html' } } }), ['model', 'app']);
+  assert.deepEqual(toolVisibility({ _meta: { ui: { visibility: ['app'] } } }), ['app']);
+  const granted = grantedCsp({ connectDomains: ['https://api.example.org', 'https://evil.example.net'] }, ['https://api.example.org']);
+  assert.deepEqual(granted.connectDomains, ['https://api.example.org']);
+  const csp = mcpAppCsp(granted, 'http://127.0.0.1:4400');
+  assert.match(csp, /connect-src https:\/\/api\.example\.org;/);
+  assert.doesNotMatch(csp, /unsafe-eval/);
+});
+```
+
+They also need `npm install --save-exact @ai-sdk/mcp@2.0.60`, and are
+single-user only (`startGuiServer`). Details, the sandbox and the gate:
+[MCP Apps](../README.md#mcp-apps-run-mode).
 
 **Images** need no tool: a user turn may carry up to 4 PNG, JPEG, GIF or
 WebP images (5 MB each), if the model accepts images. From code, pass the
