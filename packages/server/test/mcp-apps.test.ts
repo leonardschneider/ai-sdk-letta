@@ -7,8 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
 import type { SDKMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
-import { LettaAgent, McpApps, ToolInteractions, resolveMcpApps, type ContentSource } from 'ai-sdk-letta';
-import { AppGate, ThreadRuntime, sandboxProxyHtml, startPreviewServer, type RuntimeHost } from '../src/index.js';
+import { LettaAgent, McpApps, ToolInteractions, defineAgent, resolveMcpApps, type ContentSource } from 'ai-sdk-letta';
+import { AppGate, ThreadRuntime, agentInfo, sandboxProxyHtml, startPreviewServer, startTeamServer, type RuntimeHost } from '../src/index.js';
 import { tools } from './fixtures.js';
 
 const SERVER = join(import.meta.dirname, '..', '..', 'ai-sdk-letta', 'test', 'fixtures', 'mcp-app-server.mjs');
@@ -235,4 +235,14 @@ test('sandbox proxy page: talks to the app origin only, forwards nothing but JSO
   assert.match(html, /startsWith\('ui\/notifications\/sandbox-'\)\) return;/);
   assert.doesNotMatch(html, /postMessage\([^)]*'\*'\)/, 'never to any origin');
   assert.throws(() => sandboxProxyHtml('javascript:alert(1)'), /invalid_host_origin/);
+});
+
+test('the browser learns an agent has apps (session flag), and team servers refuse them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-apps-info-'));
+  try {
+    const definition = defineAgent({ id: 'apps-info', name: 'Apps', model: 'openai/x', instructions: 'x', tools: {}, sandbox: { provider: 'docker' }, mcpApps: [{ id: 'clock', command: ['node', 'server.js'] }] });
+    assert.equal(agentInfo(definition).apps, true);
+    assert.equal(agentInfo(defineAgent({ id: 'plain', name: 'Plain', model: 'openai/x', instructions: 'x', tools: {} })).apps, undefined);
+    await assert.rejects(startTeamServer([definition], dir, { owners: ['a@example.com'], origins: [], stateDirectory: dir, log: () => {} }), /single-user only/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
