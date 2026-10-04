@@ -46,11 +46,17 @@ export {
 } from './resources.js';
 export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT, READ_LIMITS, filesEnabled, listFiles, readFile, searchFiles, parseRange, type FileToolName, type FileToolOutput } from './file-tools.js';
 export {
-  sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT,
+  sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT, WEBDEV_DOCKERFILE, WEBDEV_IMAGE,
   SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
   commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
+export {
+  webDevTools, WEBDEV_TOOL_PERMISSIONS, WEBDEV_TOOL_NAMES, BROWSER_TOOL_NAMES, BROWSER_TOOL_BASE_NAMES, BROWSER_TOOL_SPECS, CHROME_DEVTOOLS_MCP_VERSION, WEBDEV_CONTEXT, WEBDEV_PORT, WEBDEV_PROXY_PORT, WEBDEV_LIMITS, WEBDEV_UNTRUSTED_TOOLS, WEB_DEV_GUIDE, WEB_DEV_NOTE, DEV_KILL_SCRIPT, BROWSER_KILL_SCRIPT,
+  WebDevServices, WebDevRegistry, readOrigins, writeOrigins, webDevEnabled, includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, normalizeWebOrigin, browserFlags, browserModelOutput, servicesRunArgs, cliServicesDriver, mcpBrowserConnector, webDevToolTimeouts, readyScript,
+  FrameMux, TUNNEL_SCRIPT, handleEgress, connectOrigin,
+  type WebDevConfig, type ResolvedWebDevConfig, type WebDevStatus, type WebDevServicesOptions, type WebDevRegistryOptions, type ServicesDriver, type ServicesContainer, type ServicesRequest, type CommandLine, type BrowserClient, type BrowserConnector, type BrowserResult, type BrowserToolSpec, type BrowserToolBaseName, type BrowserToolName, type WebDevToolName, type TunnelStream, type EgressOptions,
+} from './webdev.js';
 export { extractPdfText, pdfPageImages, encodePng, PDF_LIMITS, PdfError, type PdfPageImage } from './pdf.js';
 export { createToolBridge, askUserTool, fileTraceWriter, withPreparation, ASK_USER_TOOL, TOOL_OUTPUT_LIMIT, TOOL_IMAGE_LIMITS, PREPARE_CALL, PREPARED_CONTEXT, REVIEWED_CONTEXT, UNATTENDED_CODES, type AskUserResult, type ToolActivity, type ToolBridge, type ToolBridgeOptions, type PrepareCall, type PreparedCall, type UnattendedPolicy, type UnattendedCode } from './tools.js';
 export { scheduleTaskTool, schedulingTools, schedulingEnabled, resolveWhen, SCHEDULE_TASK_TOOL, SCHEDULING_TOOL_PERMISSIONS, SCHEDULER_CONTEXT, SCHEDULE_LIMITS, type TaskScheduler, type ScheduleTaskInput, type ScheduleTaskOutput, type ScheduleRequest, type ScheduledTask, type SchedulerContext } from './scheduling.js';

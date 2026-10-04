@@ -460,6 +460,8 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
   useClaimFocus(card);
   const args = parseArgs(request.details);
   const atlassian = request.preview?.kind === 'atlassian-edit' || request.preview?.kind === 'atlassian-request' ? request.preview : undefined;
+  // Web app development: the app wants to load from an outside origin (this conversation only).
+  const webOrigin = request.preview?.kind === 'web-origin' ? request.preview.data as { origin?: string; reason?: string } | undefined : undefined;
   const shell = COMMAND_TOOLS.has(request.tool) && typeof args.command === 'string';
   const cwd = shell && typeof args.cwd === 'string' && args.cwd.trim() && args.cwd.trim() !== '.' ? args.cwd.trim() : undefined;
   const extra = Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'command' && key !== 'cwd'));
@@ -471,14 +473,19 @@ function ApprovalCard({ request, outcome, answer, onDismiss }: CardProps) {
       else if (event.key === 'Enter' && event.target === card.current) { event.preventDefault(); void send({ approved: true }); }
     }}>
     <header className="card-head"><ShieldAlert size={16} aria-hidden="true"/><span>Permission needed</span></header>
-    <h2 className="card-title">{atlassian ? atlassianTitle(atlassian) : shell ? (request.tool === 'run_command_online' ? 'Wants to run a command with internet access' : 'Wants to run a command') : <>Wants to run {friendlyName(request.tool)}</>}</h2>
+    <h2 className="card-title">{webOrigin ? 'Let the app load from an outside site?' : atlassian ? atlassianTitle(atlassian) : shell ? (request.tool === 'run_command_online' ? 'Wants to run a command with internet access' : 'Wants to run a command') : <>Wants to run {friendlyName(request.tool)}</>}</h2>
     {atlassian && <AtlassianApproval preview={atlassian}/>}
+    {webOrigin && <>
+      <pre className="command-line approval-command" aria-label="Origin">{webOrigin.origin}</pre>
+      {webOrigin.reason && <p className="command-meta approval-reason">{webOrigin.reason}</p>}
+      <p className="card-details">Only in this conversation: the agent’s test browser and your Preview pane may then load from this site. Everything else stays offline. You can revoke it in the Preview pane.</p>
+    </>}
     {shell && <>
       <pre className="command-line approval-command" aria-label="Command"><span className="prompt" aria-hidden="true">$ </span>{String(args.command)}</pre>
       {cwd && <p className="command-meta approval-cwd">in {cwd.startsWith('/') ? cwd : `/workspace/${cwd}`}</p>}
       {request.tool === 'run_command_online' && <p className="card-details">It runs in a separate sandbox that can reach the internet and change this conversation’s files. Everything else stays isolated.</p>}
     </>}
-    {!atlassian && !!rows.length && <dl className="approval-args">{rows.map((row, i) => <div key={i}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}
+    {!atlassian && !webOrigin && !!rows.length && <dl className="approval-args">{rows.map((row, i) => <div key={i}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}
     {atlassian && <details className="approval-raw"><summary>Exact request</summary><pre>{atlassian.text}</pre></details>}
     <div className="card-actions">
       <span className="hint" aria-hidden="true"><kbd>Enter</kbd> allow · <kbd>Esc</kbd> deny</span>

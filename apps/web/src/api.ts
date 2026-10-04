@@ -84,6 +84,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   memory?: boolean;
   /** The agent trusts Jiminy with protected memory by default (each conversation can override it). */
   trustJiminy?: boolean;
+  /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
+  webDev?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

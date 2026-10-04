@@ -60,6 +60,28 @@ RUN apt-get update \\
 `;
 /** Tag of the default image (changes when {@link SANDBOX_DOCKERFILE} changes). */
 export const SANDBOX_IMAGE = `ai-sdk-letta-sandbox:${createHash('sha256').update(SANDBOX_DOCKERFILE).digest('hex').slice(0, 12)}`;
+/**
+ * The opt-in web development image: {@link SANDBOX_DOCKERFILE} plus Node 22
+ * (pinned by digest), Debian's Chromium, fonts and chrome-devtools-mcp
+ * (pinned), with its usage statistics and update checks off. About 400 MB.
+ * Agents with the web development tools use it by default (see `webDevTools`).
+ */
+export const WEBDEV_DOCKERFILE = `FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
+FROM docker.io/library/python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends git ripgrep jq poppler-utils curl ca-certificates procps \\
+    chromium fonts-liberation fonts-noto-color-emoji \\
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \\
+ && npm install -g --no-fund --no-audit --no-update-notifier chrome-devtools-mcp@1.10.1 && npm cache clean --force
+ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1 CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 NPM_CONFIG_UPDATE_NOTIFIER=false
+`;
+/** Tag of the web development image (changes when {@link WEBDEV_DOCKERFILE} changes). */
+export const WEBDEV_IMAGE = `ai-sdk-letta-webdev:${createHash('sha256').update(WEBDEV_DOCKERFILE).digest('hex').slice(0, 12)}`;
+/** Images this package builds itself (instead of pulling), by tag. */
+const BUILT_IMAGES: Readonly<Record<string, string>> = { [SANDBOX_IMAGE]: SANDBOX_DOCKERFILE, [WEBDEV_IMAGE]: WEBDEV_DOCKERFILE };
 /** Label on every container this package creates; stale ones are removed at startup. */
 export const SANDBOX_LABEL = 'ai-sdk-letta.sandbox';
 
@@ -490,13 +512,14 @@ export async function runSandboxCommand(session: Experimental_SandboxSession, op
 /* Container CLIs                                                      */
 /* ------------------------------------------------------------------ */
 
-type Cli = { kind: SandboxProviderName; binary: string };
-function cliOf(config: Pick<ResolvedSandboxConfig, 'provider' | 'binary'>): Cli | undefined {
+/** A container CLI (internal, shared with the web development services). */
+export type Cli = { kind: SandboxProviderName; binary: string };
+export function cliOf(config: Pick<ResolvedSandboxConfig, 'provider' | 'binary'>): Cli | undefined {
   if (config.provider === 'docker') return { kind: 'docker', binary: config.binary ?? 'docker' };
   if (config.provider === 'apple-container') return { kind: 'apple-container', binary: config.binary ?? 'container' };
   return undefined;
 }
-function exec(binary: string, args: string[], timeoutMs = 30_000): Promise<{ code: number; stdout: string; stderr: string }> {
+export function exec(binary: string, args: string[], timeoutMs = 30_000): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(done => {
     execFile(binary, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env } }, (error, stdout, stderr) => {
       const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1) : 0;
@@ -508,25 +531,27 @@ function exec(binary: string, args: string[], timeoutMs = 30_000): Promise<{ cod
 const images = new Map<string, Promise<void>>();
 /**
  * Make sure the image exists, building the default one from
- * {@link SANDBOX_DOCKERFILE} (once per machine; a few minutes the first
- * time, depending on the network) or pulling a custom one.
+ * {@link SANDBOX_DOCKERFILE} (or the web development one from
+ * {@link WEBDEV_DOCKERFILE}; once per machine, a few minutes the first time,
+ * depending on the network) or pulling a custom one.
  */
-async function ensureImage(cli: Cli, image: string, log?: (line: string) => void): Promise<void> {
+export async function ensureImage(cli: Cli, image: string, log?: (line: string) => void): Promise<void> {
   const key = `${cli.kind}:${cli.binary}:${image}`;
   let pending = images.get(key);
   if (!pending) {
     pending = (async () => {
       if ((await exec(cli.binary, ['image', 'inspect', image])).code === 0) return;
-      if (image !== SANDBOX_IMAGE) {
+      const dockerfile = BUILT_IMAGES[image];
+      if (!dockerfile) {
         log?.(`Pulling sandbox image ${image}…`);
         const pulled = cli.kind === 'docker' ? await exec(cli.binary, ['pull', image], 600_000) : await exec(cli.binary, ['image', 'pull', image], 600_000);
         if (pulled.code !== 0) throw new SandboxError('sandbox_unavailable', `Could not pull ${image}: ${pulled.stderr.trim().slice(-300)}`);
         return;
       }
-      log?.(`Building sandbox image ${image} (first run only; usually 1–3 minutes)…`);
+      log?.(`Building sandbox image ${image} (first run only; usually 1–3 minutes${image === WEBDEV_IMAGE ? ', a little more for the web development image' : ''})…`);
       const context = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-image-'));
       try {
-        writeFileSync(join(context, 'Dockerfile'), SANDBOX_DOCKERFILE);
+        writeFileSync(join(context, 'Dockerfile'), dockerfile);
         const builderWasRunning = cli.kind === 'apple-container' && /running/.test((await exec(cli.binary, ['builder', 'status'])).stdout);
         const built = await exec(cli.binary, ['build', '-t', image, ...(cli.kind === 'docker' ? ['--label', `${SANDBOX_LABEL}.image=1`] : []), context], 900_000);
         if (cli.kind === 'apple-container' && !builderWasRunning) await exec(cli.binary, ['builder', 'stop'], 60_000);
@@ -542,7 +567,7 @@ async function ensureImage(cli: Cli, image: string, log?: (line: string) => void
 /** Containers this process created and has not removed yet; removed on exit. */
 const live = new Map<string, Cli>();
 let exitHook = false;
-function track(cli: Cli, name: string) {
+export function track(cli: Cli, name: string) {
   live.set(name, cli);
   if (!exitHook) {
     exitHook = true;
@@ -551,7 +576,7 @@ function track(cli: Cli, name: string) {
     });
   }
 }
-async function remove(cli: Cli, name: string) {
+export async function remove(cli: Cli, name: string) {
   await exec(cli.binary, cli.kind === 'docker' ? ['rm', '-f', name] : ['delete', '--force', name], 60_000);
   live.delete(name);
 }
@@ -717,6 +742,8 @@ export class SandboxManager {
     return next;
   }
 
+  /** Labels of this conversation's containers (owner, process, host). */
+  get containerLabels(): Readonly<Record<string, string>> { return this.labels; }
   /** Is the conversation's sandbox running (or starting)? */
   get running(): boolean { return this.current !== undefined; }
   /** Does `/project` exist in this sandbox? */
@@ -729,7 +756,8 @@ export class SandboxManager {
   /** The exact environment of commands. */
   get environment(): Record<string, string> { return sandboxEnvironment(this.config); }
 
-  private mounts(): SandboxMount[] {
+  /** What the sandbox mounts: the workspace, and the project (with its `.git` and read-only hooks) when set. */
+  mounts(): SandboxMount[] {
     const workspace = this.workspace();
     if (MOUNT_UNSAFE.test(workspace)) throw new SandboxError('sandbox_unavailable', 'The workspace path contains characters that cannot be mounted');
     // Only the work tree is mounted: the resources' git history and metadata live next to it, out of reach.

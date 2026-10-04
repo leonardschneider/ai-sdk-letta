@@ -191,6 +191,11 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary);
   });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
+  /* ---------------- web app development: the preview ---------------- */
+  /** The conversation's dev server, approved origins and preview URL (`{ enabled: false }` without web development). */
+  app.get('/v1/threads/:id/preview', (req, res) => res.json(runtime.webDevStatus(owner, req.params.id)));
+  /** Revoke an origin approved in the conversation: `{ origin }`. Only ever makes it stricter. */
+  app.post('/v1/threads/:id/preview/revoke', async (req, res) => res.json(await runtime.revokeWebOrigin(owner, req.params.id, req.body)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
   /* ---------------- rewind ---------------- */
@@ -302,6 +307,8 @@ export interface GuiAgentInfo {
   memory?: boolean;
   /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
   trustJiminy?: boolean;
+  /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
+  webDev?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -364,6 +371,11 @@ export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Req
   };
 }
 
+/** The app's Content-Security-Policy; `frameSrc` adds the preview listener (`http://*.localhost:<port>`) to `frame-src`. */
+export function appCsp(options: { frameSrc?: string } = {}): string {
+  return `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'${options.frameSrc ? ` ${options.frameSrc}` : ''}; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`;
+}
+
 /**
  * Loopback-only, same-origin browser transport. No bearer token enters the
  * browser: a random HttpOnly SameSite=Strict session cookie authenticates
@@ -375,7 +387,9 @@ export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Req
  * `@ai-sdk-letta/server` and Letta SDK versions, read once here from their
  * `package.json` ({@link runtimeVersions}).
  */
-export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation) {
+export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation,
+  /** Web app previews: their listener's origin pattern, for `frame-src` (see `startPreviewServer`). */
+  preview?: { frameSrc: string }) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
@@ -386,13 +400,14 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
       // Previews load in frames of this origin (their own responses set a stricter policy); nothing else may frame the app.
       // Fonts (KaTeX's, for maths) are files of the app itself: 'self' only, never data: or a CDN.
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+      // Web app previews come from their own listener and origin (never this one): only frame-src names it.
+      'Content-Security-Policy': appCsp(preview ? { frameSrc: preview.frameSrc } : {}) });
     if (req.headers.host !== host || (req.headers.origin && req.headers.origin !== `http://${host}`) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
     next();
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}) }, versions });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;

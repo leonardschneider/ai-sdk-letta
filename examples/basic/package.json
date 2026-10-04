@@ -16,6 +16,7 @@
     "@ai-sdk-letta/tui": "*",
     "@ai-sdk-letta/web": "*",
     "@ai-sdk/harness": "1.0.128",
+    "@ai-sdk/mcp": "2.0.60",
     "@lgrammel/apple-container-sandbox": "1.1.0",
     "ai": "7.0.118",
     "ai-sdk-letta": "*",

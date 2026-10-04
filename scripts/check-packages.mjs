@@ -34,8 +34,8 @@ const forbidden = [
 // ships src, dist and source maps (just over 1 MB since the title parser,
 // about 1.5 MB since the Atlassian tools, their ADF conversion and the
 // vendored ADF JSON schema, about 1.8 MB since web search, about 2 MB since
-// rewind, about 2.3 MB since memory provenance and review, about 2.5 MB since trust mode, line drops and claim confirmation).
-const maxUnpacked = 2_650_000;
+// rewind, about 2.3 MB since memory provenance and review, about 2.5 MB since trust mode, line drops and claim confirmation, about 2.8 MB since web app development).
+const maxUnpacked = 2_950_000;
 const failures = [];
 const fail = (name, message) => failures.push(`${name}: ${message}`);
 
