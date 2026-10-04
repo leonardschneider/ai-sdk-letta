@@ -14,7 +14,8 @@ const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell co
 export const adoptionMessage = (error: unknown) => (error instanceof AdoptionError ? error.message : undefined) ?? 'That didn’t work. Nothing was changed.';
 class AdoptionError extends Error { constructor(readonly code: string, message: string) { super(message); } }
 async function adoptionApi<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
-  try { return await serverApi<T>(`/adoption${path}`, body, method); }
+  // A DELETE carries an empty body, so the method is sent (serverApi sends a body-less call as GET).
+  try { return await serverApi<T>(`/adoption${path}`, method === 'DELETE' && body === undefined ? {} : body, method); }
   catch (error) {
     if (!(error instanceof ApiError)) throw new AdoptionError('network', 'Couldn’t reach the local server. Check that it is running.');
     const messages: Record<string, string> = {
