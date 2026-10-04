@@ -1,5 +1,11 @@
 # ai-sdk-letta
 
+## 0.15.0
+
+### Minor Changes
+
+- f632dd9: Web app development with a live preview: `webDevTools` lets an agent run a dev server in its sandbox (`dev_server_start`/`stop`/`logs`, which name the folder they resolved), test the app with 23 `browser_*` tools from chrome-devtools-mcp 1.10.1 (including WebMCP; no file paths, uploads or heap snapshots), and read `web_dev_guide`. Each conversation gets a services container next to its sandbox (the new `WEBDEV_IMAGE`: Node 22, Chromium, chrome-devtools-mcp; no network, `--init`, idle timeout), reached only over `exec -i` stdio. The browser app shows the dev server in a Preview pane served from its own origin (`p-<token>.localhost`, a second loopback listener of the server, with credentials stripped and a strict preview CSP), with an address bar, reload, open in a new tab and a 390 px toggle. Outside origins are approved per conversation (`allow_web_origin`, always asks), pass a host-side proxy with web search's SSRF checks, and can be revoked from the pane. Browser and dev server output counts as untrusted (`browser` provenance source with the page URL) and can never be a trusted tool. Team servers do not serve previews yet.
+
 ## 0.14.0
 
 ### Minor Changes
