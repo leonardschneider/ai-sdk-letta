@@ -6,6 +6,13 @@ import type { LettaAgent as LettaAgentState, LettaConversation } from '@letta-ai
 import { JIMINY_NAME } from './jiminy.js';
 import { WEB_SUMMARIZER_NAME } from './web-summarizer.js';
 import { validLocalAgentId } from './temporary-agents.js';
+import type { ToolSet } from 'ai';
+import { defineAgent, type AgentDefinition, type DreamingSettings, type ToolPermission } from './definition.js';
+import { fileTools, FILE_TOOL_PERMISSIONS } from './file-tools.js';
+import { sandboxTools, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
+import { decisionTools, DECISION_TOOL_PERMISSIONS } from './decisions.js';
+import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from './web-search.js';
+import { askUserTool, ASK_USER_TOOL } from './tools.js';
 
 /**
  * Adopting existing local Letta agents in place: an agent made elsewhere
@@ -249,4 +256,46 @@ export function instructionsUpdate(system: string, section: string): { next: str
   const added = after.slice(prefix, after.length - suffix).map(line => `+ ${line}`);
   const context = before.slice(Math.max(0, prefix - 2), prefix).map(line => `  ${line}`);
   return { next, diff: [`@@ line ${prefix + 1} @@`, ...context, ...removed, ...added].join('\n'), changed: next !== system };
+}
+
+/* ------------------------------------------------------------------ */
+/* The definition of an adopted agent                                  */
+/* ------------------------------------------------------------------ */
+
+/** Where adoption records live in a state root. */
+export const adoptionFile = (stateDirectory: string) => join(stateDirectory, 'adopted.json');
+
+/** What the host offers adopted agents: a sandbox (for `sandbox`), whether web search is set up (for `web_search`), and dreaming in the app (default off). */
+export type AdoptionEnvironment = { sandbox?: SandboxConfig; webSearch?: boolean; dreaming?: Partial<DreamingSettings> };
+
+/** Tool sets an adopted agent gets by default: files, decisions and `ask_user`, plus the sandbox and web search when the host has them. */
+export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): AdoptedToolSet[] {
+  return ['files', ...(environment.sandbox ? ['sandbox' as const] : []), 'decisions', ...(environment.webSearch ? ['web_search' as const] : []), 'ask_user'];
+}
+
+/**
+ * The definition an adopted agent runs with: the agent itself (by ID, with
+ * its name and model), the app's tools for the record's tool sets (each
+ * with its fail-closed permission), and the default memory protection.
+ * Its system prompt is never applied (see {@link instructionsUpdate}).
+ */
+export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionEnvironment = {}): AgentDefinition {
+  const sets = new Set(record.tools);
+  const tools: ToolSet = {
+    ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
+    ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
+  };
+  const permissions: Record<string, ToolPermission> = {
+    ...(sets.has('files') ? FILE_TOOL_PERMISSIONS : {}), ...(sets.has('sandbox') && environment.sandbox ? SANDBOX_TOOL_PERMISSIONS : {}),
+    ...(sets.has('decisions') ? DECISION_TOOL_PERMISSIONS : {}), ...(sets.has('web_search') && environment.webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: 'allow' as const } : {}),
+  };
+  return defineAgent({
+    id: record.definitionId, name: record.name.slice(0, 120) || record.agentId, model: record.model.includes('/') ? record.model : 'unknown/unknown',
+    // Never applied: an adopted agent keeps its own system prompt.
+    instructions: 'Adopted agent: its own system prompt is kept.',
+    tools, permissions, adopt: { agentId: record.agentId },
+    ...(sets.has('sandbox') && environment.sandbox ? { sandbox: environment.sandbox } : {}),
+    // Dreaming stays off unless the host turns it on: an adopted agent keeps its own Letta Code reflection settings, and the app never starts a dream of it by surprise.
+    dreaming: environment.dreaming ?? { trigger: 'off' },
+  });
 }

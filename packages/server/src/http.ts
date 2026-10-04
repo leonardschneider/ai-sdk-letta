@@ -302,6 +302,20 @@ export interface GuiAgentInfo {
   memory?: boolean;
   /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
   trustJiminy?: boolean;
+  /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets. */
+  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean };
+}
+
+/**
+ * Adopted agents of the single-user app (see `startGuiServer`): their routes
+ * (`/api/adoption/...` and `/api/agents/<id>/...`), the agents to list in the
+ * session, and the decision feed entries they add.
+ */
+export interface GuiAdoption {
+  routes: express.Express;
+  agents(): GuiAgentInfo[];
+  /** Called once with the app's decision feed (created if the app has none), so adopted agents' decisions join the bell. */
+  bindFeed(feed: DecisionFeed): void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -320,12 +334,19 @@ export type FeedDecision = PublicDecision & { agent: { id: string; name: string 
 export class DecisionFeed {
   private changes = 0;
   private waiting = new Set<() => void>();
-  constructor(readonly agents: readonly FeedAgent[]) {
+  private readonly unobserve = new Map<FeedAgent, () => void>();
+  readonly agents: FeedAgent[];
+  constructor(agents: readonly FeedAgent[]) {
     // Any change of a runtime (a decision, a conversation renamed or archived) may change what the bell lists:
     // the version moves only when the list does.
-    for (const entry of agents) entry.runtime.observe(() => this.check());
+    this.agents = [...agents];
+    for (const entry of this.agents) this.unobserve.set(entry, entry.runtime.observe(() => this.check()));
     this.key = this.signature();
   }
+  /** An agent joined the app (an adopted agent): its decisions are listed too. */
+  add(entry: FeedAgent) { this.agents.push(entry); this.unobserve.set(entry, entry.runtime.observe(() => this.check())); this.check(); }
+  /** An agent left the app: its decisions are no longer listed. */
+  remove(agentId: string) { for (const entry of this.agents.filter(e => e.agent.id === agentId)) { this.unobserve.get(entry)?.(); this.unobserve.delete(entry); this.agents.splice(this.agents.indexOf(entry), 1); } this.check(); }
   private key: string;
   private signature() { return JSON.stringify(this.agents.map(entry => this.pending(id => id === entry.agent.id).map(d => [d.id, d.status, d.thread.title]))); }
   private check() { const key = this.signature(); if (key !== this.key) { this.key = key; this.changed(); } }
@@ -375,7 +396,7 @@ export function decisionFeedRoute(feed: DecisionFeed, visible: (req: express.Req
  * `@ai-sdk-letta/server` and Letta SDK versions, read once here from their
  * `package.json` ({@link runtimeVersions}).
  */
-export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation) {
+export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation, adoption?: GuiAdoption) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
@@ -392,11 +413,14 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}) }, versions });
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}) }, versions,
+      // Adopted agents (the agent switcher): the app's own agent first.
+      ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: true })), adoption: true } : {}) });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
-  const feed = runtime.decisions ? new DecisionFeed([{ agent: { id: agent.id, name: agent.name }, board: runtime.decisions, runtime, owner }]) : undefined;
+  const feed = runtime.decisions || adoption ? new DecisionFeed(runtime.decisions ? [{ agent: { id: agent.id, name: agent.name }, board: runtime.decisions, runtime, owner }] : []) : undefined;
+  if (feed && adoption) adoption.bindFeed(feed);
   const integrations = credentials ? { store: credentials, userOf: local, ...(integrationOptions ? { options: integrationOptions } : {}) } : undefined;
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
@@ -408,6 +432,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   ...(automation ? [express.Router().use('/automations', automationAdminRoutes(automation.service, () => agent.id, { actor: () => ({ id: LOCAL_USER_ID, name: 'You' }), isAdmin: () => true }, automation.endpoint))] : []),
   // Pending decisions (the notification bell): `?since=<version>` waits until they change.
   ...(feed ? [express.Router().get('/decisions', decisionFeedRoute(feed, () => () => true))] : []),
+  // Adopted agents: the picker and each agent's API (`/api/agents/<id>/v1/...`).
+  ...(adoption ? [adoption.routes] : []),
   runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;

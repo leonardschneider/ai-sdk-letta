@@ -17,7 +17,7 @@ export {
   defineAgent, creationOptions, dreamingCommand, memoryPolicyInstructions, DEFAULT_DREAMING, DEFAULT_UI, DEFAULT_WEB_SEARCH, DEFAULT_MEMORY, WEB_SEARCH_REVIEW_LIMITS, INTERNAL_MEMORY_TOOLS,
   type AgentDefinition, type WebSearchSettings, type MemorySettings, type AgentDefinitionInput, type AgentUiSettings, type DreamingSettings, type DreamingTrigger, type ToolPermission,
 } from './definition.js';
-export { openLettaAgent, createLettaAgent, openAgentHost, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
+export { openLettaAgent, createLettaAgent, openAgentHost, peekConversation, conversationGlance, newConversationTitle, openResources, staySilentTool, TURN_TIMEOUT_MS, assertIdle, sessionOptions, foregroundToolsCommand, localBackendDirectory, memoryProvenanceTool, memoryReminder, MEMORY_PROVENANCE_TOOL, type OpenAgentOptions, type LettaRuntime, type ConversationChoice, type AgentHost, type AgentHostOptions, type ConversationSession, type ConversationTarget, type ConversationRewind, type HistoryRecord } from './runtime.js';
 export { MemoryJournal, AGENT_EMAIL, REVIEW_EMAIL, harnessCommit, type MemoryRewindPlan, type TurnCommits, type LineDrop } from './memory-journal.js';
 export {
   turnProvenance, trustEligible, withSource, sourceOfTool, adminClean, untrusted, provenanceTrailers, parseProvenanceTrailers, provenanceLabel, blameProvenance, sections, commitTrailers, PROVENANCE_TRAILERS, TRUSTED_TOOLS,
@@ -80,7 +80,7 @@ export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUM
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
 export {
-  AdoptionStore, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
+  AdoptionStore, adoptedDefinition, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
   ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
-  type AdoptionRecord, type AdoptedToolSet, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
+  type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';

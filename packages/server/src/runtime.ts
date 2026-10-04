@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
@@ -213,7 +214,16 @@ export interface RuntimeHost {
    * migrate files of earlier versions (`titles` names the folders, by conversation ID).
    */
   resources?(agentId: string, titles: Record<string, string>): Promise<ResourceStore>;
+  /**
+   * Read a conversation's display history without opening a session (nothing
+   * is sent or configured). When present, viewing a conversation that is not
+   * running uses it (adopted agents: their conversations are only read until
+   * someone sends a message).
+   */
+  peek?(conversationId: string): Promise<UIMessage[]>;
 }
+/** A Letta conversation to list as a thread without opening it (see {@link ThreadRuntime.importConversations}). */
+export type ImportedConversation = { conversationId: string; title: string; createdAt?: string; lastActivityAt?: string };
 /** A client-visible failure with a fixed code and HTTP status. */
 export class RuntimeFault extends Error {
   constructor(readonly code: string, readonly status = 409) { super(code); }
@@ -470,6 +480,10 @@ export class ThreadRuntime {
     const run = this.lane(threadId).active?.run;
     return run && run.threadId === threadId ? structuredClone(run) : undefined;
   }
+  /** Letta agents this runtime's threads use. */
+  agentIds(): string[] { return [...new Set(this.state.threads.map(t => t.agentId).filter((id): id is string => !!id))]; }
+  /** Whether a turn runs or waits, or a session is being opened (an adopted agent is not removed meanwhile). */
+  get busy(): boolean { return [...this.lanes.values()].some(lane => lane.locked || !!lane.active) || this.state.runs.some(r => r.status === 'running' || r.status === 'queued'); }
   list(owner: string) {
     this.authorize(owner);
     return this.state.threads.filter(t => t.owner === owner).map(t => this.summary(t));
@@ -887,6 +901,32 @@ export class ThreadRuntime {
       return { id, title };
     });
   }
+  /**
+   * List existing Letta conversations of the agent as threads (adopted
+   * agents), without opening them. Conversations already listed (also under
+   * an earlier rewind) are skipped; their activity time is refreshed.
+   * @returns how many were added
+   */
+  importConversations(owner: string, agentId: string, conversations: readonly ImportedConversation[]): number {
+    this.authorize(owner);
+    const known = new Map<string, Thread>();
+    for (const thread of this.state.threads) { if (thread.conversationId) known.set(thread.conversationId, thread); for (const previous of thread.previousConversations ?? []) known.set(previous, thread); }
+    let added = 0; let touched = false;
+    for (const row of conversations) {
+      const title = row.title.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').trim().slice(0, 120) || 'Untitled conversation';
+      const existing = known.get(row.conversationId);
+      if (existing) {
+        if (row.lastActivityAt && (!existing.lastActivityAt || row.lastActivityAt > existing.lastActivityAt)) { existing.lastActivityAt = row.lastActivityAt; touched = true; }
+        continue;
+      }
+      if (this.state.threads.length >= 200) break;
+      const now = new Date().toISOString();
+      const thread: Thread = { id: randomUUID(), owner, title, archived: false, state: 'ready', agentId, conversationId: row.conversationId, createdAt: row.createdAt ?? now, lastActivityAt: row.lastActivityAt ?? row.createdAt ?? now };
+      this.state.threads.push(thread); known.set(row.conversationId, thread); added++;
+    }
+    if (added || touched) { this.save(); this.changed(); }
+    return added;
+  }
   /** Turns that reached (or may have reached) the agent: not waiting, not withdrawn before sending. */
   private delivered(threadId: string) { return this.state.runs.filter(r => r.threadId === threadId && r.status !== 'queued' && !r.notSent && !r.rewound); }
   /**
@@ -957,6 +997,11 @@ export class ThreadRuntime {
     const lane = this.lane(id);
     // Several readers may open the same idle conversation at once (people, a reloaded page, an automation): wait briefly for another reader rather than refusing.
     for (let i = 0; lane.locked && !lane.active && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 100));
+    // Hosts that can read history without a session (adopted agents): conversations are only read until someone sends.
+    if (this.host.peek && thread.conversationId && !this.parallel && !lane.active && !(lane.current && lane.current.conversationId === thread.conversationId)) {
+      const messages = await this.host.peek(thread.conversationId);
+      return { messages: this.annotate(id, messages), lastRunId: this.delivered(id).at(-1)?.id ?? null };
+    }
     return this.exclusive(lane, async () => {
       let session: RuntimeSession;
       const current = lane.current;
