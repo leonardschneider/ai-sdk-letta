@@ -500,7 +500,7 @@ function TextPreview({ path, kind, name, source }: { path: string; kind: 'table'
   const shown = cut ? text.slice(0, MAX_TEXT) : text;
   if (kind === 'atlassian') return <AtlassianPreview path={path} text={text}/>;
   if (kind === 'table') return <TablePreview text={shown} tab={/\.tsv$/i.test(name)} cut={cut}/>;
-  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown latex={false}/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
+  if (kind === 'markdown') return <div className="preview-markdown"><TextMessagePartProvider text={shown}><Markdown document/></TextMessagePartProvider>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</div>;
   return <><pre className="preview-text">{shown}</pre>{cut && <p className="preview-note">Showing the first {MAX_TEXT.toLocaleString()} characters.</p>}</>;
 }
 
