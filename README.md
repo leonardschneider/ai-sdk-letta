@@ -1054,8 +1054,9 @@ WEBDEV=1 npm run gui                          # the example agent with web devel
 - **The image.** With `webDevTools`, the sandbox uses `WEBDEV_IMAGE` (built
   once from `WEBDEV_DOCKERFILE`): the usual sandbox image plus Node 22
   (pinned by digest), Debian's Chromium, fonts and chrome-devtools-mcp, with
-  its usage statistics and update checks off. About 400 MB more than the
-  plain sandbox; the first build takes a few minutes.
+  its usage statistics and update checks off. About 400 MB compressed (1.5
+  GB on disk), against about 90 MB (380 MB) for the plain sandbox; the first
+  build takes a few minutes.
 - **Its own origin.** Each conversation's preview is served by a second
   loopback listener at `http://p-<128-bit token>.localhost:<port>/`, never
   by the app's origin (`--preview-port`, or `previewPort` in
@@ -1810,8 +1811,8 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   Chromium runs without its own sandbox (`--no-sandbox`): the container,
   with no network and no capabilities, is the boundary; Apple Container
   keeps Chromium's sandbox. WebMCP is experimental in Chromium (enabled with
-  a flag); `@mcp-b/global` covers it in the page. The image is about 400 MB
-  larger than the plain sandbox.
+  a flag); `@mcp-b/global` covers it in the page. The image is about 1.5 GB
+  on disk (400 MB compressed).
 - **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22,
   `unpdf` at 1.8.1 and `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
   this repository tests 7.0.118). Some workarounds depend on SDK behaviour at

@@ -63,7 +63,8 @@ export const SANDBOX_IMAGE = `ai-sdk-letta-sandbox:${createHash('sha256').update
 /**
  * The opt-in web development image: {@link SANDBOX_DOCKERFILE} plus Node 22
  * (pinned by digest), Debian's Chromium, fonts and chrome-devtools-mcp
- * (pinned), with its usage statistics and update checks off. About 400 MB.
+ * (pinned), with its usage statistics and update checks off. About 400 MB
+ * compressed, 1.5 GB on disk.
  * Agents with the web development tools use it by default (see `webDevTools`).
  */
 export const WEBDEV_DOCKERFILE = `FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
