@@ -15,7 +15,8 @@ export const apiPath = (path: string) => `${base}${path}`;
 /** JSON call to a server path outside the agent (`/api/session`, members). */
 export async function serverApi<T>(path: string, body?: unknown, method = 'POST'): Promise<T> { return request<T>(`/api${path}`, body, method); }
 export class ApiError extends Error {
-  constructor(readonly code: string, readonly status: number) { super(code); }
+  /** `detail`: the server's human-readable reason, when it sends one (`message`). */
+  constructor(readonly code: string, readonly status: number, readonly detail?: string) { super(code); }
 }
 export async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   // '/session' is the server's, not the agent's.
@@ -23,9 +24,9 @@ export async function api<T>(path: string, body?: unknown, method = 'POST'): Pro
 }
 async function request<T>(url: string, body?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', ...(body !== undefined ? { method, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) } : {}) });
-  let data: { error?: string } | undefined;
+  let data: { error?: string; message?: unknown } | undefined;
   try { data = await response.json(); } catch { data = undefined; }
-  if (!response.ok) throw new ApiError(data?.error ?? `http_${response.status}`, response.status);
+  if (!response.ok) throw new ApiError(data?.error ?? `http_${response.status}`, response.status, typeof data?.message === 'string' ? data.message.slice(0, 500) : undefined);
   return data as T;
 }
 export const errorCode = (error: unknown) => error instanceof ApiError ? error.code : error instanceof Error ? error.message : String(error);
@@ -85,7 +86,7 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   /** The agent trusts Jiminy with protected memory by default (each conversation can override it). */
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
-  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean };
+  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean; project?: string; sandbox?: boolean };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { UIMessage } from 'ai';
@@ -27,12 +29,14 @@ function fakeBackend() {
 }
 
 /** A registry whose agents never open a session: history is read with `peek`, sending fails. */
-function fixture() {
+function fixture(environment?: { sandbox?: { provider: 'docker'; git: { name: string; email: string } } }) {
   const dir = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-adoption-'));
   const fake = fakeBackend();
   const peeked: string[] = [];
   let opened = 0;
-  const build = (definition: { id: string }, folder: string) => {
+  const built: { id: string; sandbox?: { project?: { path: string } } }[] = [];
+  const build = (definition: { id: string; sandbox?: { project?: { path: string } } }, folder: string) => {
+    built.push(definition);
     mkdirSync(folder, { recursive: true });
     const runtime = new ThreadRuntime({
       open: async () => { opened++; throw new Error('no session in tests'); }, close: async () => {},
@@ -40,9 +44,9 @@ function fixture() {
     }, join(folder, 'state.json'), 'local-gui');
     return { runtime };
   };
-  const options = { stateDirectory: dir, owner: 'local-gui', reserved: { definitionIds: ['example-assistant'], agentIds: () => [] as string[] }, backend: fake.backend, build };
-  const registry = new AdoptionRegistry(options);
-  return { dir, fake, registry, options, peeked, opened: () => opened };
+  const options = { stateDirectory: dir, owner: 'local-gui', reserved: { definitionIds: ['example-assistant'], agentIds: () => [] as string[] }, backend: fake.backend, build, ...(environment ? { environment } : {}) };
+  const registry = new AdoptionRegistry(options as never);
+  return { dir, fake, registry, options, peeked, built, opened: () => opened };
 }
 
 test('adopting lists existing conversations (default included) read-only, persists across restarts, and removing never deletes the agent', async () => {
@@ -152,4 +156,90 @@ test('the single-user session lists adopted agents next to the app\'s own one, b
     assert.match((await again.json() as { message: string }).message, /already in the app/);
     assert.equal((await fetch(`${base}/api/agents/general-d366ac0b/v1/threads`, { headers: { cookie } })).status, 200);
   } finally { server.closeAllConnections(); server.close(); await registry.close(); await runtime.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+const SANDBOX = { sandbox: { provider: 'docker' as const, git: { name: 'Test', email: 'test@example.com' } } };
+const gitIn = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+
+test('project folder: set (as given, mounted at its real path), refused with a reason, cleared; persisted; the runtime restarts', async () => {
+  const { dir, registry, options, built } = fixture(SANDBOX);
+  const projects = realpathSync(mkdtempSync(join(tmpdir(), 'ai-sdk-letta-project-')));
+  try {
+    const blog = join(projects, 'blog'); mkdirSync(join(blog, 'content'), { recursive: true }); gitIn(blog, 'init', '-q');
+    const link = join(projects, 'iCloud-blog'); symlinkSync(blog, link);
+    await registry.adopt({ agentId: BLOG, tools: ['files'] });
+    const before = built.length;
+    const set = await registry.setProject('blog-2cc740f1', { path: link });
+    assert.deepEqual(set, { project: link, tools: ['files', 'sandbox'] }, 'kept as given; the sandbox tools are turned on');
+    assert.equal(built.length, before + 1, 'the runtime restarted with the new definition');
+    assert.equal(built.at(-1)!.sandbox?.project?.path, link);
+    assert.equal(registry.agents()[0]!.adopted?.project, link);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'adopted.json'), 'utf8')).agents[0].project, link);
+    // Refusals carry their reason and change nothing.
+    const refuses = async (path: unknown, code: string, pattern?: RegExp) => assert.rejects(registry.setProject('blog-2cc740f1', { path }), (e: { code?: string; message?: string }) => e.code === code && (!pattern || pattern.test(e.message ?? '')));
+    await refuses(join(projects, 'missing'), 'project_unsafe', /does not exist/);
+    await refuses(homedir(), 'project_unsafe', /home folder/);
+    await refuses(join(homedir(), '.letta'), 'project_unsafe');
+    await refuses('/', 'project_unsafe', /root/);
+    await refuses('relative/blog', 'project_unsafe', /absolute/);
+    await refuses(42, 'invalid_input');
+    gitIn(blog, 'remote', 'add', 'origin', 'https://me:ghp_secret@github.com/me/blog.git');
+    const other = join(projects, 'other'); mkdirSync(other); gitIn(other, 'init', '-q'); gitIn(other, 'config', 'credential.helper', 'store');
+    await refuses(other, 'project_has_credentials', /credential/);
+    assert.equal(registry.store.get('blog-2cc740f1')?.project, link, 'unchanged after refusals');
+    // A folder that became unsafe is not mounted on restart, but the agent still opens and the path stays.
+    await registry.close();
+    const again = new AdoptionRegistry(options as never);
+    again.start();
+    assert.equal(built.at(-1)!.sandbox?.project, undefined);
+    assert.equal(again.agents()[0]!.adopted?.project, link);
+    const cleared = await again.setProject('blog-2cc740f1', { path: null });
+    assert.deepEqual(cleared, { project: null, tools: ['files', 'sandbox'] });
+    assert.equal(again.store.get('blog-2cc740f1')?.project, undefined);
+    await again.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(projects, { recursive: true, force: true }); }
+});
+
+test('project folder: refused without a sandbox on the server', async () => {
+  const { dir, registry } = fixture();
+  try {
+    await registry.adopt({ agentId: BLOG });
+    await assert.rejects(registry.setProject('blog-2cc740f1', { path: tmpdir() }), (e: { code?: string }) => e.code === 'sandbox_unavailable');
+    await assert.rejects(registry.setProject('nobody', { path: null }), (e: { code?: string }) => e.code === 'not_found');
+    await registry.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('PUT /api/adoption/agents/<id>/project needs the session and CSRF token, and returns the refusal reason', async () => {
+  const { dir, registry } = fixture(SANDBOX);
+  const projects = realpathSync(mkdtempSync(join(tmpdir(), 'ai-sdk-letta-project-')));
+  const assets = join(dir, 'assets'); mkdirSync(assets); writeFileSync(join(assets, 'index.html'), '<!doctype html>');
+  const runtime = new ThreadRuntime({ open: async () => { throw new Error('not opened'); }, close: async () => {} }, join(dir, 'own.json'), 'local-gui');
+  await registry.adopt({ agentId: BLOG });
+  const server = guiApp(runtime, 'local-gui', 0, assets, { id: 'example-assistant', name: 'Example Assistant' }, undefined, undefined, undefined, undefined, registry.gui()).listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const url = `${base}/api/adoption/agents/blog-2cc740f1/project`;
+  try {
+    const blog = join(projects, 'blog'); mkdirSync(blog);
+    const body = JSON.stringify({ path: blog });
+    assert.equal((await fetch(url, { method: 'PUT', headers: { 'content-type': 'application/json' }, body })).status, 401);
+    const session = await fetch(`${base}/api/session`);
+    const cookie = session.headers.get('set-cookie')!.split(';')[0]!;
+    const { csrf } = await session.json() as { csrf: string };
+    assert.equal((await fetch(url, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body })).status, 403, 'no CSRF token');
+    assert.equal((await fetch(url, { method: 'PUT', headers: { cookie, origin: 'http://evil.example', 'x-csrf-token': csrf, 'content-type': 'application/json' }, body })).status, 403, 'wrong origin');
+    const headers = { cookie, origin: base, 'x-csrf-token': csrf, 'content-type': 'application/json' };
+    const ok = await fetch(url, { method: 'PUT', headers, body });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { project: blog, tools: ['files', 'sandbox', 'decisions', 'ask_user'] });
+    const listed = await (await fetch(`${base}/api/session`, { headers: { cookie } })).json() as { agents: { adopted?: { project?: string; sandbox?: boolean } }[] };
+    assert.deepEqual(listed.agents[0]!.adopted && { project: listed.agents[0]!.adopted.project, sandbox: listed.agents[0]!.adopted.sandbox }, { project: blog, sandbox: true });
+    const refused = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ path: homedir() }) });
+    assert.equal(refused.status, 409);
+    const reason = await refused.json() as { error: string; message: string };
+    assert.equal(reason.error, 'project_unsafe'); assert.match(reason.message, /home folder/);
+    const cleared = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ path: null }) });
+    assert.deepEqual(await cleared.json(), { project: null, tools: ['files', 'sandbox', 'decisions', 'ask_user'] });
+  } finally { server.closeAllConnections(); server.close(); await registry.close(); await runtime.close(); rmSync(dir, { recursive: true, force: true }); rmSync(projects, { recursive: true, force: true }); }
 });

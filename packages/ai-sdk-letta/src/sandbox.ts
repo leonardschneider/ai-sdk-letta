@@ -957,6 +957,27 @@ export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>;
   }),
 };
 
+/** One short line about a mounted project folder; `name` is its folder name on the host (for context). */
+export function projectNote(name: string): string {
+  const clean = name.replace(/[\p{Cc}\p{Cf}<>"]/gu, '').trim().slice(0, 80) || 'project';
+  return `The user's project folder "${clean}" is at ${SANDBOX_PATHS.project} (read-write; use run_command there, e.g. ls, rg, git). ${SANDBOX_PATHS.workspace} holds conversation files.`;
+}
+
+/**
+ * The sandbox tools of a session whose sandbox mounts a project: the same
+ * tools, with {@link projectNote} appended to their descriptions (so the
+ * model knows where the project is without a per-turn note).
+ */
+export function withProjectDescriptions<T extends Record<string, unknown>>(tools: T, projectPath: string): T {
+  const name = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? 'project';
+  const out: Record<string, unknown> = { ...tools };
+  for (const key of SANDBOX_TOOL_NAMES) {
+    const original = out[key] as { description?: unknown } | undefined;
+    if (original && original === (sandboxTools as Record<string, unknown>)[key] && typeof original.description === 'string') out[key] = { ...original, description: `${original.description} ${key === 'run_command' ? projectNote(name) : `The project folder is at ${SANDBOX_PATHS.project}.`}` };
+  }
+  return out as T;
+}
+
 /**
  * Default policy for the sandbox tools: commands without network run
  * without asking (they are isolated); network commands always ask.

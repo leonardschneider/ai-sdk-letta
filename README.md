@@ -1295,6 +1295,19 @@ server has them), then **Add**. The same menu switches between agents.
   Letta Code": Jiminy may review them and flag one, but never reverts or
   holds them. At the end of a turn, the app commits only the memory files
   the turn changed, never edits that were already uncommitted.
+- **Project folder…** gives it a folder on this computer to work on (a
+  website, a repository), mounted read-write at `/project` in its sandbox;
+  conversation files stay in `/workspace`. Paste the folder's full path
+  (a symlink is fine: the app shows the path you gave and mounts its real
+  folder). Like `SandboxConfig.project`, it is refused when its
+  `.git/config` holds credentials, and so are your home folder, `/` and
+  `~/.letta`; the dialog says why. Setting it turns on the agent's
+  shell commands and restarts its sandbox (no server restart); **Clear**
+  removes it. The agent learns where it is from `run_command`'s
+  description, and **Update instructions…** adds one line about it. From
+  code: `PUT /api/adoption/agents/<id>/project` with `{ "path": "/Users/you/blog" }`
+  or `{ "path": null }` (session cookie, `Origin` and CSRF token, like the
+  other adoption routes). It needs a server with a sandbox.
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 
@@ -1736,6 +1749,8 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   editing, subagents) are not available in the app, and their earlier calls
   show only as collapsed "Used <tool>" lines. Its `default` conversation
   cannot be rewound. The app does not start dreams of an adopted agent.
+  Its project folder is reached through `run_command` only: `list_files`,
+  `read_file` and `search_files` stay on its resources.
 - **Web search.** It needs your own SearXNG (Letta Code's `web_search` and
   `fetch_webpage` are Letta server tools, not available on the local
   backend). Results are as good as SearXNG's engines (some rate-limit or
