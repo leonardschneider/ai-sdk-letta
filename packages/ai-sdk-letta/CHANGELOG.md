@@ -1,5 +1,11 @@
 # ai-sdk-letta
 
+## 0.16.0
+
+### Minor Changes
+
+- e86206a: Open your existing local Letta agents in place. **Add agent…** in the single-user GUI (the agent name at the top of the sidebar) lists your local Letta agents (name, model, last activity, conversations; hidden, subagent, reflection and temporary agents excluded) and adds one by ID: the same agent, memory and conversations, nothing copied, never a new agent. Added agents are recorded in `<state>/adopted.json`, come back after a restart, and are switched with the same menu; **Remove from app…** forgets one without touching the Letta agent. Each gets the app's tools (files, decisions and questions by default; sandbox and web search when the server has them) with fail-closed permissions. Its conversations, `default` included, are listed with their summary or first message as title and read without opening a session; Letta Code's tool calls render as collapsed "Used <tool>" lines (`projectHistory` option `foreignTools`). Adding or sending is refused while a Letta Code session of the agent runs (`letta_code_active`, with a retry). Its system prompt, model and tags are not changed; **Update instructions…** shows a diff of the section it would append (tools here and the memory policy), applies it only on approval, and can revert it. Memory governance from adoption on: the older layout is protected (`system/**`), earlier history shows as "Before adoption", and commits of the agent's own Letta Code sessions show as "From Letta Code" and are never reverted (Jiminy only flags). The end-of-turn memory commit now commits only the files the turn changed, never edits that were already uncommitted (all agents). Core: `defineAgent({ adopt: { agentId } })`, `AdoptionStore`, `listAdoptableAgents`, `lettaCodeActivity`, `adoptedDefinition`, `peekConversation`, `forgetIdentity`. TUI: `--agent <id>` opens an agent added in the GUI.
+
 ## 0.15.0
 
 ### Minor Changes
