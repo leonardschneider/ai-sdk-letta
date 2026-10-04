@@ -997,13 +997,100 @@ npm install --save-exact ai-sdk-sandbox-docker@0.1.2 @ai-sdk/harness@1.0.128
   example picks Apple Container if it runs, else Docker, else disables the
   tools with a startup message (`SANDBOX_PROVIDER=apple-container|docker|off`).
 
+### Web app development (preview and browser)
+
+Let the agent build web apps in its sandbox: it runs a dev server, you watch
+the app **live in a Preview pane** next to the chat, and the agent tests the
+same app with a **headless Chrome**. Add `webDevTools` to an agent with a
+built-in sandbox:
+
+```ts
+import { defineAgent, sandboxTools, SANDBOX_TOOL_PERMISSIONS, webDevTools, WEBDEV_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  tools: { ...sandboxTools, ...webDevTools },
+  permissions: { ...SANDBOX_TOOL_PERMISSIONS, ...WEBDEV_TOOL_PERMISSIONS }, // all 'allow'; allow_web_origin: 'ask'
+  sandbox: { provider: 'apple-container' },                                // or 'docker'; uses WEBDEV_IMAGE
+  webDev: { memory: '3G' },                                                // optional
+});
+```
+
+```sh
+npm install --save-exact @ai-sdk/mcp@2.0.60   # the browser tools' MCP client (optional peer dependency)
+WEBDEV=1 npm run gui                          # the example agent with web development
+```
+
+- **Tools.** `dev_server_start(command, cwd?)` starts (or restarts) the
+  conversation's dev server, detached, waits until it answers on
+  `127.0.0.1:5173`, and names the exact folder it resolved (`cwd` works like
+  `run_command`'s: relative to the conversation's folder). `dev_server_logs`
+  and `dev_server_stop` do what they say. 23 `browser_*` tools come from
+  [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+  1.10.1: navigate, snapshot (the accessibility tree), screenshot, click,
+  fill, type, console and network messages, `evaluate_script`, emulation
+  (light, dark, phone sizes), CSS, Lighthouse, and **WebMCP**
+  (`browser_list_webmcp_tools`, `browser_execute_webmcp_tool`). File paths
+  are removed from every schema (screenshots come back as images), and file
+  uploads, heap snapshots, traces and new pages are not offered.
+  `web_dev_guide` returns the full guide; a short note in the instructions
+  tells the agent to read it. It strongly recommends that apps register
+  [WebMCP](https://github.com/webmachinelearning/webmcp) tools (with
+  `@mcp-b/global`) for their main actions and test hooks, calling them
+  rather than clicking, checking console and network after every change, and
+  screenshots in light, dark and at 390 px before saying it is done.
+- **The Preview pane** (the window button at the top right; it opens by
+  itself when a dev server starts) shows the conversation's app in a frame,
+  with an address bar, reload, open in a new tab, and a desktop / 390 px
+  toggle. HMR updates it in place. On a phone it is a drawer.
+- **One services container per conversation**, next to the sandbox: the
+  same image and `/workspace` mount, **no network**, `--init`, no
+  capabilities, your UID, 3 GB of memory by default. It runs the dev server
+  (file watching by polling, because edits come from the sandbox), Chromium
+  and chrome-devtools-mcp. It starts on the first web tool call and stops
+  after 30 minutes without tool calls or preview requests
+  (`webDev.idleTimeoutMs`), and when the server stops. Nothing is published
+  on the host: the MCP connection and the preview go over the stdio of
+  `docker exec -i` / `container exec -i`.
+- **The image.** With `webDevTools`, the sandbox uses `WEBDEV_IMAGE` (built
+  once from `WEBDEV_DOCKERFILE`): the usual sandbox image plus Node 22
+  (pinned by digest), Debian's Chromium, fonts and chrome-devtools-mcp, with
+  its usage statistics and update checks off. About 400 MB compressed (1.5
+  GB on disk), against about 90 MB (380 MB) for the plain sandbox; the first
+  build takes a few minutes.
+- **Its own origin.** Each conversation's preview is served by a second
+  loopback listener at `http://p-<128-bit token>.localhost:<port>/`, never
+  by the app's origin (`--preview-port`, or `previewPort` in
+  `startGuiServer`; default a free port). Requests reach the dev server
+  without `Cookie` or `Authorization`; responses get a CSP that allows only
+  the preview itself, its HMR WebSocket and origins approved in that
+  conversation, may be framed only by the app, and post forms only to
+  itself. The frame is sandboxed without top navigation or pop-ups. A page
+  in the preview therefore cannot call the app's API with your session or
+  reach another conversation's preview.
+- **Outside origins ask.** The containers have no internet. When an app
+  needs a CDN or a public API, the agent calls `allow_web_origin` with the
+  exact `https://` origin and why; you approve it **for that conversation**.
+  The browser's traffic then goes through a proxy in this process that
+  allows only approved origins, resolves them here and refuses private,
+  loopback and reserved addresses (web search's checks), connecting to the
+  address it checked. Approved origins are listed at the foot of the Preview
+  pane, where **Revoke** removes them (open connections close, the browser
+  restarts). Installing packages still goes through `run_command_online`.
+- **Untrusted content.** Everything the browser tools and the dev server
+  return (page text, console, network bodies, WebMCP descriptions and
+  results) counts as untrusted for [memory provenance](#memory-provenance-and-review-jiminy),
+  recorded as a `browser` source with the page URL; `memory.trustedTools`
+  cannot include them.
+- **Team servers** do not serve previews yet: the tools work, but the
+  Preview pane is single-user only (see [Limitations](#limitations)).
+
 What a definition controls, and when:
 
 | Field | Applied |
 | --- | --- |
 | `id`, `name` | Every start: the mapping and the Letta agent name must match, or startup fails. |
 | `model`, `instructions` | At creation only. To change them, create a new logical ID (or change the agent in Letta). |
-| `tools`, `permissions`, `toolTimeoutMs`, `sandbox` | Every start. |
+| `tools`, `permissions`, `toolTimeoutMs`, `sandbox`, `webDev` | Every start. |
 | `dreaming` | Every start, scoped to this project (see below), then verified. |
 
 ## TUI
@@ -1108,6 +1195,15 @@ monospace, with "show more" for long output. Approval cards for
 agent's name or **⌘B** (Ctrl+B); the **Resources** panel opens with the
 folder button at the top right or **⌘⇧E** (Ctrl+Shift+E), and can be resized
 by dragging its edge. Both are remembered. On a phone, both are drawers.
+
+**Preview.** With the [web development tools](#web-app-development-preview-and-browser),
+a window button next to the Resources button opens the **Preview** pane: the
+conversation's dev server in a frame of its own origin, with an address bar,
+reload, open in a new tab, a desktop / 390 px toggle and, at its foot, the
+folder it runs in and the outside origins approved in this conversation
+(**Revoke**). It opens by itself when a dev server starts during a turn, can
+be resized by dragging its edge, and is a drawer on a phone. A dot on the
+button says a dev server is running.
 
 **Resources.** The panel shows the agent's [resources](#resources): one
 folder per conversation (the current one is marked "this chat" and opened)
@@ -1460,6 +1556,14 @@ single-user agent before it is given up (`start_timeout`).
 - **Shell commands run in a sandbox** without network, credentials or host
   environment; network commands always ask (see
   [Shell commands](#shell-commands-sandbox)).
+- **Web app previews are their own origin.** The preview listener answers
+  only `p-<128-bit token>.localhost:<port>` (one token per conversation, new
+  at every start), strips `Cookie` and `Authorization`, and sets a CSP that
+  allows the preview, its HMR WebSocket and origins approved in that
+  conversation; the app's CSP gains only a `frame-src` entry for it. The
+  services container has no network; approved origins pass a proxy with web
+  search's address checks (see
+  [Web app development](#web-app-development-preview-and-browser)).
 - **Team mode trusts Tailscale, on loopback only.** Identity comes from the
   headers `tailscale serve` sets, believed only on connections from
   127.0.0.1; requests for other hosts than the configured origins, cross-site
@@ -1521,6 +1625,8 @@ State lives in one directory, resolved in this order:
   memory-review/pending/   crash records of temporary reviewer agents (deleted at the next start)
   server/<id>/automation.json
                            automation tokens (hashes only), idempotency keys of recent runs, scheduled tasks (0600)
+  webdev/<letta agent ID>/<conversation>.origins.json
+                           outside origins approved for a conversation's web app (0600)
 ```
 
 **Files** stay in the agent's resources, including after a conversation is
@@ -1696,6 +1802,17 @@ timeout for this agent's runtime (`foregroundExternalTools`, on by default).
   Apple silicon. On Linux with rootful Docker, files are owned by your UID
   as on macOS; with user-namespace remapping they may not be. Each network
   command starts a fresh sandbox (about 1 to 2 seconds).
+- **Web app development.** One dev server per conversation, on port 5173
+  (other ports are not previewed). Team servers run the tools but do not
+  serve previews yet (a second `tailscale serve` port is planned). The
+  preview's address is `*.localhost`, which browsers resolve to loopback;
+  it needs the app's machine (or the same browser) to reach it. Dev servers
+  that depend on cookies do not see them (they are stripped). Under Docker,
+  Chromium runs without its own sandbox (`--no-sandbox`): the container,
+  with no network and no capabilities, is the boundary; Apple Container
+  keeps Chromium's sandbox. WebMCP is experimental in Chromium (enabled with
+  a flag); `@mcp-b/global` covers it in the page. The image is about 1.5 GB
+  on disk (400 MB compressed).
 - **Pinned versions.** `@letta-ai/letta-agent-sdk` is pinned at 0.8.22,
   `unpdf` at 1.8.1 and `@ai-sdk/tui` at 1.0.119 (patched); `ai` is a peer dependency (`^7.0.118`;
   this repository tests 7.0.118). Some workarounds depend on SDK behaviour at

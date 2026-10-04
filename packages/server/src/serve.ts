@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -11,6 +11,7 @@ import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from 
 import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
+import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer } from './preview.js';
 
 /** Default GUI port (the token API uses the next one). */
 export const DEFAULT_PORT = 4400;
@@ -42,6 +43,13 @@ export interface ServeOptions {
    * does not list them as side effects that stay. See `RuntimeOptions.rewindInternalTools`.
    */
   rewindInternalTools?: readonly string[];
+  /**
+   * Web app development (agents with `webDevTools`): the loopback port of
+   * the preview listener, which serves each conversation's dev server at
+   * `http://p-<token>.localhost:<port>/`, its own origin. `0` picks a free
+   * port. @default 0
+   */
+  previewPort?: number;
 }
 
 /** The orchestrator `schedule_task` uses. `callbackUrl`: this server's automation API as the orchestrator reaches it (for example `http://host.docker.internal:4402` from Docker). */
@@ -64,6 +72,8 @@ export interface RunningServer {
   port: number;
   /** The automation API, when enabled. */
   automation?: { url: string; port: number };
+  /** The web app preview listener, for agents with the web development tools (single-user GUI). */
+  preview?: { port: number };
   /** Stop accepting requests, close the agent, then release locks. Idempotent. */
   close(): Promise<void>;
 }
@@ -143,13 +153,13 @@ function memoryWiring(definition: AgentDefinition, directory: string, members?: 
 }
 type MemoryWiring = ReturnType<typeof memoryWiring>;
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   return {
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
@@ -197,14 +207,15 @@ async function listen(server: Server, port: number) {
   return address.port || port;
 }
 
-function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string, extra?: { server?: Server; service?: AutomationService }) {
+function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, log: (line: string) => void, label: string, extra?: { server?: Server; service?: AutomationService; webDev?: { registry: WebDevRegistry; preview: PreviewServer } }) {
   let closing: Promise<void> | undefined;
   return () => closing ??= (async () => {
     // SDK shutdown can await unref'ed resources; keep Node alive until locks release.
     const keepAlive = setInterval(() => {}, 1000);
     server.close(); server.closeAllConnections?.();
-    extra?.service?.close(); extra?.server?.close(); extra?.server?.closeAllConnections?.();
-    try { await runtime.close(); unlock(); log(`${label} stopped cleanly.`); }
+    extra?.service?.close(); extra?.server?.close(); extra?.server?.closeAllConnections?.(); extra?.webDev?.preview.close();
+    // Web development containers stop with the server (each also stops when idle).
+    try { await runtime.close(); await extra?.webDev?.registry.close(); unlock(); log(`${label} stopped cleanly.`); }
     catch (error) { log(`${label} shutdown incomplete; inspect the recorded locks before restarting.`); throw error; }
     finally { clearInterval(keepAlive); }
   })();
@@ -228,7 +239,11 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition, true);
     const memory = memoryWiring(definition, directory);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    // Web app development: each conversation's services (kept across sessions), and the preview listener.
+    let notify: (() => void) | undefined;
+    const webDev = webDevEnabled(definition) ? new WebDevRegistry({ directory: join(statePaths(stateDirectory).root, 'webdev'), onChange: () => notify?.() }) : undefined;
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, webDev), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    notify = () => runtime.webDevChanged();
     const board = decisions.bind(runtime, directory, owner);
     memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
@@ -241,16 +256,31 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       const listening = await listenAutomation(service, options.automation);
       automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
     }
+    let preview: PreviewServer | undefined;
     try {
-      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined).listen(port, '127.0.0.1');
+      let appPort = port;
+      if (webDev) {
+        const tokens = new PreviewTokens();
+        preview = await startPreviewServer({ port: options.previewPort ?? 0, frameAncestors: () => [`http://127.0.0.1:${appPort}`],
+          resolve: token => {
+            const threadId = tokens.threadOf(token);
+            if (!threadId) return undefined;
+            const services = () => { const identity = runtime.conversationIdentity(threadId); return identity ? webDev.get(identity.agentId, identity.conversationId) : undefined; };
+            return { connect: () => services()?.connectPreview(), get origins() { return services()?.origins ?? []; } };
+          } });
+        const previewPort = preview.port;
+        runtime.webDev = { registry: webDev, previewUrl: threadId => `${previewOrigin(tokens.tokenOf(threadId), previewPort)}/` };
+      }
+      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
+      appPort = bound;
       const url = `http://127.0.0.1:${bound}`;
       // Rewinds a stop interrupted are finished first, then outcomes decided before a restart and not sent yet are sent (once).
       await runtime.resumeRewinds(owner).catch(() => {});
       board?.resumeAll();
-      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
-      return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', automation) };
-    } catch (error) { automation?.service.close(); automation?.server.close(); throw error; }
+      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+      return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(webDev && preview ? { webDev: { registry: webDev, preview } } : {}) }) };
+    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); throw error; }
   } catch (error) { unlock(); throw error; }
 }
 
@@ -296,7 +326,7 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...(atlassianEnabled(definition) && !filesEnabled(definition) ? { resources: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.

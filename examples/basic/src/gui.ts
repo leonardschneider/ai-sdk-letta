@@ -31,8 +31,12 @@ if (automationPort !== undefined) {
       : process.env.CONDUCTOR_URL ? { scheduler: { kind: 'conductor' as const, url: process.env.CONDUCTOR_URL, callbackUrl } } : {}) };
 }
 
+// Web app previews (WEBDEV=1): their own loopback listener; --preview-port picks its port (default: a free one).
+const previewPort = flag('--preview-port') ?? process.env.PREVIEW_PORT;
+if (previewPort !== undefined && (!Number.isInteger(Number(previewPort)) || Number(previewPort) < 0 || Number(previewPort) > 65535)) throw new Error('Invalid --preview-port');
+
 // Team mode (several people, through `tailscale serve`): --tailscale --owner you@example.com --origin https://machine.tailnet.ts.net
 const server = args.includes('--tailscale')
   ? await startTeamServer([agent], assets, { port, stateDirectory, owners: list('--owner'), origins: list('--origin'), ...(automation ? { automation } : {}) })
-  : await startGuiServer(agent, assets, { port, stateDirectory, ...(automation ? { automation } : {}) });
+  : await startGuiServer(agent, assets, { port, stateDirectory, ...(automation ? { automation } : {}), ...(previewPort !== undefined ? { previewPort: Number(previewPort) } : {}) });
 closeOnSignals(server);

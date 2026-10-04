@@ -8,7 +8,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  type ConversationRewind, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile,
+  type ConversationRewind, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
@@ -317,6 +317,11 @@ export class ThreadRuntime {
   private readonly members: () => number;
   /** The agent's decisions, when the server keeps them (set by `DecisionBoard`). */
   decisions?: DecisionBoard;
+  /**
+   * Web app development (set by the server for agents with `webDevTools`):
+   * each conversation's services, and its preview's origin.
+   */
+  webDev?: { registry: WebDevRegistry; previewUrl(threadId: string): string | undefined };
   /** Tasks the agent scheduled, when the server schedules them (set by the automation service). */
   rewindHooks?: RewindHooks;
   /**
@@ -1593,6 +1598,38 @@ export class ThreadRuntime {
     this.authorize(owner);
     const thread = this.state.threads.find(t => t.id === id && t.owner === owner);
     return thread ? this.summary(thread) : undefined;
+  }
+  /**
+   * A conversation's web development status for the app: its dev server,
+   * approved origins and preview URL (`{ enabled: false }` for agents without
+   * the web development tools).
+   */
+  webDevStatus(owner: string, threadId: string): ({ enabled: true; previewUrl: string } & WebDevStatus) | { enabled: false } {
+    const thread = this.thread(owner, threadId);
+    const web = this.webDev;
+    const agentId = thread.agentId;
+    const url = web?.previewUrl(thread.id);
+    if (!web || !url) return { enabled: false };
+    const status: WebDevStatus = agentId && thread.conversationId ? web.registry.status(agentId, thread.conversationId) : { container: 'stopped', origins: [] };
+    return { enabled: true, previewUrl: url, ...status };
+  }
+  /** Revoke an origin approved in a conversation (`{ origin }`). */
+  async revokeWebOrigin(owner: string, threadId: string, input: unknown) {
+    const thread = this.thread(owner, threadId);
+    const origin = (input as { origin?: unknown } | undefined)?.origin;
+    if (!this.webDev || typeof origin !== 'string' || origin.length > 300) throw new RuntimeFault('invalid_input', 400);
+    const agentId = thread.agentId;
+    if (!agentId || !thread.conversationId) throw new RuntimeFault('not_found', 404);
+    const revoked = await this.webDev.registry.revokeOrigin(agentId, thread.conversationId, origin);
+    if (!revoked) throw new RuntimeFault('not_found', 404);
+    return this.webDevStatus(owner, threadId);
+  }
+  /** A conversation's web development status changed (dev server, origins): open pages refresh. */
+  webDevChanged() { this.changed(); }
+  /** The Letta agent and conversation of a thread, whoever owns it (the preview listener routes by thread). */
+  conversationIdentity(threadId: string): { agentId: string; conversationId: string } | undefined {
+    const thread = this.state.threads.find(t => t.id === threadId && t.state === 'ready' && !t.archived);
+    return thread?.agentId && thread.conversationId ? { agentId: thread.agentId, conversationId: thread.conversationId } : undefined;
   }
   /** A thread's Letta conversation ID. */
   conversationOf(owner: string, threadId: string) {
