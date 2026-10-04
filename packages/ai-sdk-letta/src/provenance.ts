@@ -25,8 +25,11 @@ import type { GitRunner } from './revert.js';
 
 /** A source of content a turn read. `untrusted` content may carry instructions written by someone else. */
 export type ContentSource = {
-  /** `browser`: a page in the headless browser, or the dev server's output (web app development). */
-  kind: 'web' | 'attachment' | 'atlassian' | 'tool' | 'browser';
+  /**
+   * `browser`: a page in the headless browser, or the dev server's output (web app development).
+   * `app`: an MCP App: its tools' results, a message its view sent (`ui/message`), or the context it set (`ui/update-model-context`).
+   */
+  kind: 'web' | 'attachment' | 'atlassian' | 'tool' | 'browser' | 'app';
   /** What exactly: the tool name, a file name, a URL (display only; shortened). */
   label?: string;
   /** A person reviewed it before the agent saw it (web research approved in the app). Still untrusted: reviewed is not vouched for. */
@@ -131,6 +134,8 @@ export function sourceOfTool(name: string, internal: ReadonlySet<string> = TRUST
   if (name === 'read_file' || name === 'search_files') return { kind: 'attachment', label: name };
   return { kind: 'tool', label: name };
 }
+/** The untrusted content an MCP App's tool call brings into a turn (its result is the app's content, whatever the trusted tools say). */
+export const appSource = (appId: string, tool?: string): ContentSource => ({ kind: 'app', label: `app:${appId}${tool ? ` (${tool})` : ''}` });
 /** Tools whose results carry nothing written by others: asking people, deciding, scheduling, listing files, staying silent, the web development guide and controls. */
 export const TRUSTED_TOOLS: ReadonlySet<string> = new Set(['ask_user', 'stay_silent', 'request_decision', 'cancel_decision', 'schedule_task', 'list_files', 'memory_provenance', 'Read', 'Write', 'Edit', 'Bash', 'web_dev_guide', 'dev_server_stop', 'allow_web_origin']);
 
@@ -167,7 +172,7 @@ export function parseProvenanceTrailers(trailers: Readonly<Record<string, string
   const sources: ContentSource[] = [];
   const listed = trailers[PROVENANCE_TRAILERS.sources];
   if (listed && listed !== 'none') for (const part of listed.split(';').map(s => s.trim()).filter(Boolean)) {
-    const match = /^(web|attachment|atlassian|tool|browser)(?:=(.*?))?(\+reviewed)?$/.exec(part);
+    const match = /^(web|attachment|atlassian|tool|browser|app)(?:=(.*?))?(\+reviewed)?$/.exec(part);
     if (match) sources.push({ kind: match[1] as ContentSource['kind'], ...(match[2] ? { label: match[2] } : {}), ...(match[3] ? { reviewed: true } : {}) });
   }
   const writer = trailers[PROVENANCE_TRAILERS.writer];

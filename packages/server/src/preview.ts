@@ -52,6 +52,12 @@ export function previewToken(host: string | undefined, port: number): string | u
   return match && Number(match[2]) === port ? match[1] : undefined;
 }
 
+/** `s-<token>` of a Host header on this port (an MCP App view instance), or undefined. */
+export function sandboxToken(host: string | undefined, port: number): string | undefined {
+  const match = /^s-([a-f0-9]{32})\.localhost:(\d{1,5})$/.exec(String(host ?? '').toLowerCase());
+  return match && Number(match[2]) === port ? match[1] : undefined;
+}
+
 /** The origin of a conversation's preview. */
 export const previewOrigin = (token: string, port: number) => `http://p-${token}.localhost:${port}`;
 
@@ -104,6 +110,12 @@ export interface PreviewServerOptions {
   frameAncestors(): readonly string[];
   /** Also listen on `::1` (browsers may resolve `*.localhost` there first). @default true */
   ipv6?: boolean;
+  /**
+   * MCP App views (see `AppGate`): what `s-<token>.localhost` serves, once
+   * per token (the sandbox proxy page and its CSP). Without it, such hosts
+   * get 404 like any unknown host.
+   */
+  sandbox?(token: string): { status: 200; html: string; csp: string } | { status: 404 | 410 };
 }
 
 const page = (res: ServerResponse, status: number, title: string, text: string) => {
@@ -117,6 +129,17 @@ export function previewHandler(options: Omit<PreviewServerOptions, 'ipv6'>, port
   const relayed = new Set<Duplex>();
   const route = (req: IncomingMessage) => { const token = previewToken(req.headers.host, port()); return token ? { token, target: options.resolve(token) } : undefined; };
   const http = (req: IncomingMessage, res: ServerResponse) => {
+    // MCP App views: their own origin per instance, served once, only the sandbox proxy page (GET /).
+    const app = options.sandbox ? sandboxToken(req.headers.host, port()) : undefined;
+    if (app) {
+      const strict = { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'X-Content-Type-Options': 'nosniff' };
+      if (req.method !== 'GET' || (req.url ?? '/') !== '/') { res.writeHead(404, strict); res.end('Not found'); return; }
+      const page = options.sandbox!(app);
+      if (page.status !== 200) { res.writeHead(page.status, strict); res.end(page.status === 410 ? 'Gone' : 'Not found'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': page.csp, 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), usb=(), payment=(), display-capture=()' });
+      res.end(page.html);
+      return;
+    }
     const found = route(req);
     if (!found?.target) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end('Not found'); return; }
     const target = found.target;
@@ -140,6 +163,7 @@ export function previewHandler(options: Omit<PreviewServerOptions, 'ipv6'>, port
     res.on('close', () => { if (!res.writableFinished) { upstream.destroy(); stream.destroy(); } });
   };
   const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    if (options.sandbox && sandboxToken(req.headers.host, port())) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
     const found = route(req);
     const stream = found?.target?.connect();
     if (!found || !stream) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }

@@ -197,6 +197,49 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   /** Revoke an origin approved in the conversation: `{ origin }`. Only ever makes it stricter. */
   app.post('/v1/threads/:id/preview/revoke', async (req, res) => res.json(await runtime.revokeWebOrigin(owner, req.params.id, req.body)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
+  /* ---------------- MCP Apps ---------------- */
+  // Views never call these themselves: the app page relays what a view asks for, bound to its instance.
+  const gate = () => { if (!runtime.apps) throw new RuntimeFault('not_found', 404); return runtime.apps; };
+  /** The agent's apps (admins: their tools, policies, declared and granted CSP domains). */
+  app.get('/v1/apps', (req, res) => { const status = gate().apps.status(); res.json({ apps: access && !access.mayAct(req, {}) ? status.map(({ id, name, status: state, enabled }) => ({ id, name, status: state, enabled })) : status, viewTools: gate().apps.viewTools() }); });
+  /** Enable or disable an app: `{ enabled }` (admins). */
+  app.patch('/v1/apps/:app', (req, res) => {
+    if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    if (typeof enabled !== 'boolean') throw new RuntimeFault('invalid_input', 400);
+    try { gate().apps.setEnabled(req.params.app, enabled); } catch { throw new RuntimeFault('not_found', 404); }
+    runtime.appsChanged();
+    res.json({ ok: true });
+  });
+  /** A view instance for a recorded tool call of the thread: `{ toolCallId, placement }`. */
+  app.post('/v1/threads/:id/apps/instances', async (req, res) => res.status(201).json(await gate().instance(owner, req.params.id, req.body)));
+  /** Approvals of the thread's app actions (the cards), and context waiting for the next turn. */
+  app.get('/v1/threads/:id/apps/approvals', (req, res) => res.json({ approvals: gate().pending(owner, req.params.id), context: gate().waitingContext(owner, req.params.id) }));
+  /** Decide an app action: `{ approved }`. Only the person who sent the turn... or anyone in the single-user app; on a team server, members of the agent (admins for others' views). */
+  app.post('/v1/apps/approvals/:approval', async (req, res) => {
+    try { res.json(await gate().decide(owner, req.params.approval, req.body, author(req))); }
+    catch (error) { if (error instanceof RuntimeFault && (error.code === 'already_decided' || error.code === 'approval_expired')) return res.status(409).json({ error: error.code }); throw error; }
+  });
+  /** An approval's outcome (`?wait=1` waits while it is pending). */
+  app.get('/v1/apps/approvals/:approval', async (req, res) => {
+    const control = new AbortController();
+    res.on('close', () => control.abort());
+    const approval = await gate().approval(owner, req.params.approval, req.query.wait === '1', control.signal);
+    if (!res.writableEnded && !res.destroyed) res.json(approval);
+  });
+  /** What a view asked for, relayed by the app page: `tools/call`, `resources/read`, `ui/message`, `ui/update-model-context`, log messages; and its teardown. */
+  app.post('/v1/apps/instances/:instance/:action', async (req, res) => {
+    const g = gate(); const id = req.params.instance;
+    switch (req.params.action) {
+      case 'call': return res.json(await g.call(owner, id, req.body, author(req)));
+      case 'read': return res.json(await g.read(owner, id, req.body));
+      case 'message': return res.json(g.message(owner, id, req.body, author(req)));
+      case 'context': return res.json(g.context(owner, id, req.body, author(req)));
+      case 'log': g.log(owner, id, req.body, author(req)); return res.json({ ok: true });
+      case 'close': g.closeInstance(owner, id); return res.json({ ok: true });
+      default: throw new RuntimeFault('not_found', 404);
+    }
+  });
   app.post('/v1/runs', async (req, res) => res.status(202).json(await runtime.start(owner, req.body, author(req))));
   /* ---------------- rewind ---------------- */
   /** Which of your messages you can edit in this conversation (`{ runIds, refusal? }`; `refusal: 'rewind_not_solo'` when others wrote in it). */
@@ -311,6 +354,8 @@ export interface GuiAgentInfo {
   adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
+  /** The agent has MCP Apps (`mcpApps`): tool lines of app tools render their views. */
+  apps?: boolean;
 }
 
 /**
@@ -428,7 +473,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}) }, versions,
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: true })), adoption: true } : {}) });
   });

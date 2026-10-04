@@ -57,6 +57,18 @@ export function withSource(message: ThreadMessageLike, source: MessageSource | u
   return source ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, source } } } : message;
 }
 
+/** A message an MCP App's view sent (after the person allowed it): which app, and who allowed it. */
+export type MessageApp = { id: string; name: string; toolCallId: string; approvedBy: { id: string; name: string } };
+/** The app recorded by the server on a history message, when it is well formed. */
+export function knownApp(message: Pick<UIMessage, 'metadata'>): MessageApp | undefined {
+  const value = (message.metadata as { app?: Partial<MessageApp> } | undefined)?.app;
+  return value && typeof value.id === 'string' && typeof value.name === 'string' && typeof value.toolCallId === 'string' && value.approvedBy && typeof value.approvedBy.name === 'string'
+    ? { id: value.id.slice(0, 40), name: value.name.slice(0, 120), toolCallId: value.toolCallId, approvedBy: { id: String(value.approvedBy.id ?? ''), name: value.approvedBy.name.slice(0, 120) } } : undefined;
+}
+export function withApp(message: ThreadMessageLike, app: MessageApp | undefined): ThreadMessageLike {
+  return app ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, app } } } : message;
+}
+
 /** The run a user message was sent as (its OTID in history), when it is one: what a rewind edits. */
 export function knownRun(message: Pick<UIMessage, 'metadata'>): string | undefined {
   const value = (message.metadata as { otid?: unknown } | undefined)?.otid;
@@ -129,7 +141,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withApp(withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownApp(visible[index]!) : undefined));
   return mergeAssistantRuns(converted).map(markListened);
 }
 

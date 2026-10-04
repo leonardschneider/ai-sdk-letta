@@ -88,6 +88,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
+  /** The agent has MCP Apps: app tool lines show their views; admins see the Apps list. */
+  apps?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */

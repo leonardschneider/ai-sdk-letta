@@ -27,9 +27,10 @@ import { MemoryJournal } from './memory-journal.js';
 import { randomUUID } from 'node:crypto';
 import { MemoryGuard, type MemoryGuardEvents } from './memory-guard.js';
 import { chooseReviewerModel, lettaReviewer, sweepReviewers, type MemoryReviewer } from './jiminy.js';
-import { provenanceLabel, sourceOfTool, trustEligible, turnProvenance, TRUSTED_TOOLS } from './provenance.js';
+import { appSource, provenanceLabel, sourceOfTool, trustEligible, turnProvenance, TRUSTED_TOOLS } from './provenance.js';
 import { dreamHookCommand, dreamHookSupported, parseDreamRequest, reviewDreamRequest, type DreamRequest } from './dream-review.js';
 import type { UnattendedPolicy } from './tools.js';
+import { MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpApps, type McpAppsOptions } from './mcp-apps.js';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -115,6 +116,13 @@ export interface OpenAgentOptions {
    * the services when it closes.
    */
   webDev?: { registry?: WebDevRegistry } & Pick<WebDevServicesOptions, 'driver' | 'browser'>;
+  /**
+   * MCP Apps of the definition (`mcpApps`): the agent's running apps (a
+   * server passes the ones it keeps across sessions and closes them on
+   * shutdown), or a launcher and connector (tests). Without `apps`, the host
+   * starts its own and stops them when it closes.
+   */
+  mcpApps?: { apps?: McpApps } & Pick<McpAppsOptions, 'launcher' | 'connector'>;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -133,6 +141,8 @@ export interface LettaRuntime<TOOLS extends ToolSet = ToolSet> {
   harnessCommand(command: 'reflect', args?: string): Promise<string>;
   /** Web app development services of the open conversation, when the agent has `webDevTools`. */
   webDev?: WebDevServices;
+  /** The agent's MCP Apps, when its definition has `mcpApps`. */
+  mcpApps?: McpApps;
   /** Close the session and SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
@@ -257,6 +267,8 @@ export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   harnessCommand(command: 'reflect', args?: string): Promise<string>;
   /** Web app development services of this conversation (dev server, preview, browser), when the agent has `webDevTools`. */
   webDev?: WebDevServices;
+  /** The agent's MCP Apps, when its definition has `mcpApps`. */
+  mcpApps?: McpApps;
   /** Close this conversation's session (the host and other conversations stay open). Idempotent. */
   close(): Promise<void>;
 }
@@ -285,7 +297,7 @@ export interface AgentHost<TOOLS extends ToolSet = ToolSet> {
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'webSearch' | 'memoryReview' | 'webDev'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -327,9 +339,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
   let closing: Promise<void> | undefined;
   let guard: MemoryGuard | undefined;
   let webDevCleanup: WebDevRegistry | undefined;
+  let appsCleanup: McpApps | undefined;
   const close = () => closing ??= (async () => {
     // Turns end first (their reviews start), then reviews in flight settle, then the guard stops.
-    try { await Promise.allSettled([...open].map(conversation => conversation.close())); await webDevCleanup?.close(); await guard?.idle(); guard?.close(); await client.close(); }
+    try { await Promise.allSettled([...open].map(conversation => conversation.close())); await webDevCleanup?.close(); await appsCleanup?.close(); await guard?.idle(); guard?.close(); await client.close(); }
     finally { release?.(); }
   })();
   try {
@@ -404,6 +417,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     const ownRegistry = webDevEnabled(definition) && !options.webDev?.registry ? new WebDevRegistry({ directory: join(paths.root, 'webdev'), ...(options.webDev?.driver ? { driver: options.webDev.driver } : {}), ...(options.webDev?.browser ? { browser: options.webDev.browser } : {}) }) : undefined;
     webDevCleanup = ownRegistry;
     const webDevRegistry = webDevEnabled(definition) ? options.webDev?.registry ?? ownRegistry : undefined;
+    // MCP Apps: the app's (kept across hosts), or this host's own (stopped with it). Started before the first conversation opens.
+    const ownApps = definition.mcpApps?.length && !options.mcpApps?.apps ? new McpApps(definition.mcpApps, { directory: mcpAppsDirectory(paths.root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), ...(options.mcpApps?.launcher ? { launcher: options.mcpApps.launcher } : {}), ...(options.mcpApps?.connector ? { connector: options.mcpApps.connector } : {}) }) : undefined;
+    appsCleanup = ownApps;
+    const apps = definition.mcpApps?.length ? options.mcpApps?.apps ?? ownApps : undefined;
     // Conversation creation writes one pending-intent file per agent: create one at a time.
     let creating: Promise<unknown> = Promise.resolve();
     const opened = new Set<string>();
@@ -477,7 +494,11 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             if (webDevRegistry) webDev = webDevRegistry.attach(identity.agentId, conversationId, sandbox, definition.webDev);
           }
         }
+        // MCP Apps: their model-visible tools join the agent's (named <app>__<tool>, with the definition's policy).
+        await apps?.ready();
+        const appTools = apps?.agentTools();
         const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}), ...(webDev ? { [WEBDEV_CONTEXT]: webDev } : {}),
+          ...(apps ? { [MCP_APPS_CONTEXT]: { apps, conversationId } } : {}),
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
         const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
         const desk = options.decisions && decisionsEnabled(definition) ? options.decisions : undefined;
@@ -497,7 +518,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         // Without a sandbox, the shell tools are never exposed.
         const listening = !!options.listening;
         // memory_provenance: who changed a memory file, and from what (the agent asks; the harness answers from git and the ledger).
-        const withProvenance = { ...definition.tools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
+        const agentTools = { ...definition.tools, ...(appTools?.tools ?? {}) } as TOOLS;
+        const withProvenance = { ...agentTools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
         const exposed = listening ? { ...withProvenance, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : withProvenance;
         // Without a sandbox (or without web development), those tools are never exposed.
         const hidden = new Set<string>([...(sandbox ? [] : SANDBOX_TOOL_NAMES), ...(webDev ? [] : WEBDEV_TOOL_NAMES)]);
@@ -506,11 +528,12 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const shell = sandbox;
         // Background harness work must never open a prompt over an idle chat input.
         const bridge = createToolBridge({
-          tools: exposed, permissions: { ...definition.permissions, [MEMORY_PROVENANCE_TOOL]: 'allow', ...(listening ? { [STAY_SILENT_TOOL]: 'allow' } : {}) }, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+          tools: exposed, permissions: { ...definition.permissions, ...(appTools?.permissions ?? {}), [MEMORY_PROVENANCE_TOOL]: 'allow', ...(listening ? { [STAY_SILENT_TOOL]: 'allow' } : {}) }, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
           // Results of tools that bring others' content (web, Atlassian, attachments, application tools) make the turn untrusted for memory.
           onTool: event => {
             if (turnMemoryId && (event.status === 'completion' || event.status === 'error')) {
-              const source = sourceOfTool(event.tool, trustedTools);
+              const app = appTools?.names.get(event.tool);
+              const source = app ? appSource(app.app, app.tool) : sourceOfTool(event.tool, trustedTools);
               // Browser output names the page it came from.
               if (source) journalRef?.noteSource(turnMemoryId, source.kind === 'browser' && webDev ? { ...source, label: event.tool.startsWith('browser_') ? webDev.pageUrl : `dev server (${event.tool})` } : source);
             }
@@ -518,7 +541,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
           toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(webDev ? webDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
             // A search (searching, reading, summarizing) has its own deadline; leave it room to report it.
-            ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}) },
+            ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}),
+            ...(appTools ? Object.fromEntries(Object.keys(appTools.tools).map(name => [name, Math.max(definition.toolTimeoutMs, MCP_APP_LIMITS.callTimeoutMs + 5000)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           unattended: () => turnUnattended,
           paused: () => turnPaused,
@@ -548,7 +572,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const live = session;
         const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
         assertHistorySettled(history.messages);
-        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
+        // App tool calls are shown too (also those of apps that did not start this time).
+        const shownTools = [...Object.keys(agentTools), ...(apps ? apps.records.agentToolNames() : [])];
+        const initialMessages = projectHistory(history.messages, shownTools, undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
         // Dreams reviewed before they merge when the harness supports it (capability), otherwise right after.
@@ -586,7 +612,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const store = resources;
         agent = new LettaAgent<TOOLS>({
           // memory_provenance is the harness's, like the memory tools: never an application tool card.
-          id: definition.id, tools: definition.tools, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
+          id: definition.id, tools: agentTools, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
             turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
             return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => live.abort(), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
@@ -661,14 +687,14 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             finally { await updater.close(); }
           },
         };
-        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, shownTools, undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         const harnessCommand = async (command: 'reflect', args = '') => {
           if (command !== 'reflect') throw new Error('Unsupported harness command');
           const response = await live.sendCommand<{ type: string; success?: boolean; output?: unknown; error?: unknown }>({ type: 'execute_command', command_id: command, runtime: { agent_id: identity.agentId, conversation_id: conversationId }, args: args.slice(0, 2000) }, { responseType: 'execute_command_response', timeoutMs: REQUEST_TIMEOUT_MS });
           if (response.success !== true) throw new Error(typeof response.error === 'string' ? response.error.slice(0, 300) : 'harness_command_failed');
           return typeof response.output === 'string' ? response.output : '';
         };
-        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), truncated: history.truncated, startupStatus, close: shutdown };
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), ...(apps ? { mcpApps: apps } : {}), truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
       } catch (error) { await shutdown(); throw error; }
@@ -677,7 +703,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     return {
       definition, identity, lease, ...(resources ? { resources } : {}), get memory() { return guard; },
       openConversation,
-      open: async target => { const { agent, conversationId, title, history, rewind, memory, harnessCommand, webDev, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, memory, harnessCommand, ...(webDev ? { webDev } : {}), close: closeConversation }; },
+      open: async target => { const { agent, conversationId, title, history, rewind, memory, harnessCommand, webDev, mcpApps, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, memory, harnessCommand, ...(webDev ? { webDev } : {}), ...(mcpApps ? { mcpApps } : {}), close: closeConversation }; },
       close,
     };
   } catch (error) { await close(); throw error; }
@@ -721,6 +747,9 @@ async function webResearcher(definition: AgentDefinition, option: OpenAgentOptio
   if (!settings.summarize) await sweepWebSummarizers({ directory, backendDirectory }).catch(() => 0);
   return createWebResearcher({ ...settings, summarize });
 }
+
+/** Where an agent's MCP Apps keep their unpacked packages, call records and settings: `<state>/mcp-apps/<definition id>/`. */
+export const mcpAppsDirectory = (stateRoot: string, definitionId: string) => join(stateRoot, 'mcp-apps', definitionId);
 
 /** Title of a conversation created when none was chosen (first launch of a new agent). */
 export const newConversationTitle = (now = new Date()) => `Conversation ${now.toISOString().slice(0, 16).replace('T', ' ')}`;
@@ -790,7 +819,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
-    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, ...(conversation.webDev ? { webDev: conversation.webDev } : {}), ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
+    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, ...(conversation.webDev ? { webDev: conversation.webDev } : {}), ...(conversation.mcpApps ? { mcpApps: conversation.mcpApps } : {}), ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
   } catch (error) { await host.close(); throw error; }
 }
 
