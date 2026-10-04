@@ -706,7 +706,8 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         signal.removeEventListener('abort', confirmWindow);
         if (stopTimer) clearTimeout(stopTimer);
         signal.removeEventListener('abort', abort);
-        if (!completed) void session?.abort().catch(() => {});
+        // A failure (not a stop, which already asked the backend to cancel): cancel whatever may still run.
+        if (!completed && !signal.aborted) void session?.abort().catch(() => {});
         session?.close();
         // Letta confirmed the turn finished: its delivery is complete, whatever the reader does next.
         if (completed) { try { this.delivery?.complete(); state.settle({ end: 'completed' }); } catch { this.fail(state); } }

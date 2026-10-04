@@ -239,6 +239,7 @@ const errorText: Record<string, string> = {
   conversation_archived: 'The conversation is archived. Restore it in the app, or use another one.',
   start_timeout: 'The agent stayed busy for too long; the turn was not sent.',
   timed_out: 'The turn timed out.', cancelled: 'The turn was cancelled.', not_sent: 'The turn was withdrawn before it was sent.',
+  idle_timeout: 'The turn made no progress for too long and was stopped; the conversation stays usable.', max_duration: 'The turn reached its time limit and was stopped; the conversation stays usable.',
   delivery_uncertain: 'The server restarted while the turn ran; nothing was replayed.', runtime_failed: 'The turn failed.',
   actor_not_member: 'The token\'s user is no longer a member of this agent.',
 };
@@ -397,7 +398,7 @@ export class AutomationService {
             agent.store.update(state => { const run = state.runs.find(r => r.id === record.id); if (run) run.threadId = threadId; });
           }
           const latest = runtime.latestRun(owner, record.threadId);
-          if (!runtime.queueing && latest && latest.status !== 'completed') {
+          if (!runtime.queueing && latest && !latest.usable) {
             if (latest.status === 'running') { await pause(); continue; }
             return this.fail(agent, record, 'conversation_blocked');
           }
@@ -440,6 +441,8 @@ export class AutomationService {
     // It asked people to decide: the work waits for them (not a failure).
     if (run.status === 'completed' && decision?.status === 'pending') return { ...result, status: 'decision_pending' };
     if (run.status === 'completed') return { ...result, status: 'completed' };
+    // Stopped with a known outcome (Stop, or a turn limit): the partial reply is the result; the conversation stays usable.
+    if (run.status === 'stopped') { const stop = String([...run.events].reverse().find(event => event.type === 'stopped')?.data.code ?? 'cancelled'); return { ...result, status: stop === 'cancelled' ? 'cancelled' : 'failed', error: { code: stop, message: message(stop) } }; }
     const code = String([...run.events].reverse().find(event => event.type === 'failed')?.data.code ?? (run.status === 'interrupted' ? 'delivery_uncertain' : 'runtime_failed'));
     return { ...result, status: run.status === 'cancelled' && code === 'cancelled' ? 'cancelled' : 'failed', error: { code, message: message(code) } };
   }

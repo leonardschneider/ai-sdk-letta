@@ -28,6 +28,7 @@ import { LatexContext } from './markdown.js';
 import { resolveLatex, type LatexOverride } from './latex.js';
 import { LatexMenu } from './latex-menu.js';
 import { TrustMenu } from './trust-menu.js';
+import { checkSummary, isLocked, lockedNotice, stoppedLine, type CheckResult } from './turn-state.js';
 import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
@@ -45,7 +46,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[] };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; code?: string };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -56,7 +57,6 @@ const chip = (file: Pick<FileInfo, 'name' | 'kind' | 'label' | 'bytes' | 'pages'
 type Current = { id: string; draft: boolean };
 const SAVED = 'ai-sdk-letta-thread';
 const newDraft = (): Current => ({ id: uuid(), draft: true });
-const blockedNotice = 'This conversation has an unfinished or uncertain turn, so it’s read-only. Nothing is replayed automatically — start a new chat to continue.';
 
 /**
  * Loads the session, then shows the app for one agent: the only one of the
@@ -139,6 +139,12 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(!unreachable);
   const [blocked, setBlocked] = useState('');
+  // The read-only notice offers "Check and unlock" (the last turn's outcome is uncertain, not a local error).
+  const [checkable, setCheckable] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkNote, setCheckNote] = useState('');
+  // A stopped reply (Stop or a turn limit): marked under the reply; the conversation stays usable.
+  const [stoppedNote, setStoppedNote] = useState<{ runId: string; text: string }>();
   const [interaction, setInteraction] = useState<InteractionRequest>();
   const [interactionOutcome, setInteractionOutcome] = useState('');
   const [sentAnswer, setSentAnswer] = useState<InteractionResponse>();
@@ -213,7 +219,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     const render = () => setMessages([...base,
       withRun(withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision), id),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
-      markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
+      markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : events.at(-1)?.type === 'stopped' ? { type: 'incomplete', reason: 'cancelled' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
     try {
       const response = await fetch(apiPath(`/v1/runs/${id}/events`), { signal: control.signal });
@@ -243,24 +249,23 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             currentInteraction.current.resolved = true;
             setInteractionOutcome(event.type === 'interaction_resolved' ? 'Response received. Waiting for the agent…' : event.data.code === 'expired' ? 'Not reviewed in time: it now waits for review in this conversation (and the bell).' : event.data.code === 'timed_out' ? 'This question timed out. Your response was not submitted.' : event.data.code === 'cancelled' ? 'This question was cancelled. Your response was not submitted.' : 'This question ended before an answer was confirmed. Do not resend this turn.');
           }
-          if (event.type === 'completed' || event.type === 'failed') {
+          if (event.type === 'completed' || event.type === 'failed' || event.type === 'stopped') {
             ended = true; endedAt = new Date().toISOString(); lastRun.current = id;
             if (currentInteraction.current?.runId === id) {
               const answered = currentInteraction.current.resolved;
-              setInteractionOutcome(previous => answered ? previous === 'Response received. Waiting for the agent…' ? event.type === 'completed' ? 'Response received. The agent has finished.' : 'Response received, but the agent could not finish. Do not resend.' : previous : 'This question closed before an answer was confirmed. Do not resend this turn.');
+              setInteractionOutcome(previous => answered ? previous === 'Response received. Waiting for the agent…' ? event.type === 'completed' ? 'Response received. The agent has finished.' : event.type === 'stopped' ? 'Response received; the reply was then stopped.' : 'Response received, but the agent could not finish. Do not resend.' : previous : event.type === 'stopped' ? 'The reply was stopped before this was answered.' : 'This question closed before an answer was confirmed. Do not resend this turn.');
               currentInteraction.current.resolved = true;
             }
+            // A stopped reply (Stop, or a turn limit) with a known outcome: marked as stopped; the conversation stays usable.
+            if (event.type === 'stopped') setStoppedNote({ runId: id, text: stoppedLine(event.data.code) });
             // Team mode: the conversation's state (read-only or not) comes from the view refreshed when this ends.
-            if (event.type === 'failed' && !team) {
-              const code = String(event.data.code);
-              setBlocked(code === 'cancelled' ? 'You stopped this reply. To keep things consistent nothing is replayed — start a new chat to continue.' : code === 'timed_out' ? 'This reply timed out. Nothing is replayed automatically — start a new chat to continue.' : `This reply didn’t finish (${code}). Nothing is replayed automatically — start a new chat to continue.`);
-            }
+            if (event.type === 'failed' && !team) { setBlocked(lockedNotice(String(event.data.code))); setCheckable(true); }
           }
           render();
         }
       }
       if (!ended) throw new Error('Stream disconnected. Refresh to reconnect without replaying the turn.');
-    } catch (e) { if (!control.signal.aborted) setBlocked(`${e instanceof Error ? e.message : String(e)}`); }
+    } catch (e) { if (!control.signal.aborted) { setBlocked(`${e instanceof Error ? e.message : String(e)}`); setCheckable(false); } }
     finally {
       setTurns(n => n + 1);
       if (stream.current === control) {
@@ -299,15 +304,44 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision); return; }
       if (liveRun.current) return;
       setMessages(base);
-      setBlocked(!!view.status && !['running', 'completed'].includes(view.status) ? blockedNotice : '');
+      showState(view);
     } finally { viewing.current = false; }
+  }
+
+  /** The conversation's state from its view: read-only (with Check and unlock) after an uncertain turn; a stopped reply marked as such. */
+  function showState(view: View) {
+    const locked = isLocked(view.status);
+    setBlocked(locked ? lockedNotice(view.code) : '');
+    setCheckable(locked); setCheckNote('');
+    setStoppedNote(view.stopped ? { runId: view.stopped.runId, text: stoppedLine(view.stopped.code) } : undefined);
+  }
+  /** Check and unlock: ask Letta (read-only) whether the uncertain turn ended; unlock when it did. Never resends anything. */
+  async function checkAndUnlock() {
+    const target = currentRef.current;
+    if (target.draft || checking) return;
+    setChecking(true); setCheckNote('');
+    try {
+      const result = await api<CheckResult>(`/v1/threads/${encodeURIComponent(target.id)}/check`, {});
+      if (currentRef.current.id !== target.id) return;
+      if (!result.unlocked) { setCheckNote(checkSummary(result)); return; }
+      const view = await api<View>(`/v1/threads/${target.id}/view`, undefined, 'GET');
+      if (currentRef.current.id !== target.id) return;
+      lastRun.current = view.lastRunId;
+      setMessages(historyMessages(view.messages)); setQueue(view.queue ?? []);
+      showState(view);
+      toast(checkSummary(result));
+      focusComposer();
+    } catch (e) {
+      setCheckNote(errorCode(e) === 'runtime_busy' ? 'The agent is busy right now; try again in a moment.' : errorCode(e) === 'not_locked' ? 'This conversation is already usable.' : 'Couldn’t check with Letta. Nothing was changed.');
+      if (errorCode(e) === 'not_locked') void refreshView().catch(() => {});
+    } finally { setChecking(false); }
   }
 
   async function select(id: string) {
     // Team mode: other conversations keep running on the server while you look elsewhere.
     if (operation.current || (liveRun.current && !team)) return;
     if (team) { stream.current?.abort(); liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
-    operation.current = true; setLoading(true); setBlocked(''); setInteraction(undefined); setInteractionOutcome('');
+    operation.current = true; setLoading(true); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     const previous = currentRef.current;
     setCurrent({ id, draft: false }); setMessages([]); setDrawer(false);
     try {
@@ -320,8 +354,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       localStorage.setItem(SAVED_THREAD, id); lastRun.current = view.lastRunId;
       void loadDecisions(id);
       const base = historyMessages(view.messages); setMessages(base); setQueue(view.queue ?? []);
-      const failed = !!view.status && !['running', 'completed'].includes(view.status);
-      setBlocked(failed ? blockedNotice : '');
+      showState(view);
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
       if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision);
     } catch (e) {
@@ -335,7 +368,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     if (operation.current || (liveRun.current && !team)) return;
     stream.current?.abort();
     if (team) { liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
-    setCurrent(newDraft()); setMessages([]); setBlocked(''); setInteraction(undefined); setInteractionOutcome('');
+    setCurrent(newDraft()); setMessages([]); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     lastRun.current = null; setDrawer(false); setLoading(false);
     localStorage.removeItem(SAVED_THREAD);
     focusComposer();
@@ -520,7 +553,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     const files = uploads.map(chip);
     if (!text.trim() && !wire.length && !uploads.length) throw new MessageNotSentError();
     if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); throw new MessageNotSentError(); }
-    operation.current = true;
+    operation.current = true; setStoppedNote(undefined);
     // Sending ends your typing (the server clears it too).
     typingState.current = { at: 0 }; setMention(undefined);
     const startedAt = new Date().toISOString();
@@ -560,7 +593,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
           throw new MessageNotSentError();
         }
         if (queueing) setQueue(list => list.filter(item => item.id !== id)); else setRunning(false);
-        setBlocked(`Couldn’t confirm that your message was delivered (${code}). Refresh before doing anything else — it won’t be resent automatically.`);
+        setBlocked(`Couldn’t confirm that your message was delivered (${code}). Refresh before doing anything else — it won’t be resent automatically.`); setCheckable(false);
         return;
       }
       if (first) void autoTitle(target.id, text.trim() ? text : uploads[0]?.name ?? 'Image');
@@ -652,7 +685,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (currentRef.current.id !== threadId) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      setMessages(base); setQueue(view.queue ?? []); setBlocked('');
+      setMessages(base); setQueue(view.queue ?? []); setBlocked(''); setCheckable(false); setStoppedNote(undefined);
       void refreshThreads().catch(() => {});
       setTurns(n => n + 1);
       if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, [], [], view.live.author);
@@ -817,7 +850,10 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                   <PendingDecisionBar decision={pendingHere}/>
                   {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.members ?? 0) > 1}/>}
                   {team && !current.draft && !readOnly && <TypingLine people={selected?.typing ?? []} me={team.user.id}/>}
-                  {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}</span><button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
+                  {stoppedNote && !blocked && !running && <div className="stopped-line" role="status" data-run={stoppedNote.runId}><Square size={11} aria-hidden="true"/><span>{stoppedNote.text}</span></div>}
+                  {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}{checkNote && <><br/><em className="check-note">{checkNote}</em></>}</span>
+                    {checkable && !current.draft && <button type="button" className="btn small primary" disabled={running || checking} onClick={() => void checkAndUnlock()}>{checking ? 'Checking…' : 'Check and unlock'}</button>}
+                    <button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
                   {readOnly
                     ? <div className="readonly-bar"><span>This conversation is archived and read-only.</span><button type="button" className="btn primary small" onClick={() => void restore(current.id)}><ArchiveRestore size={15} aria-hidden="true"/>Restore</button></div>
                     : <ComposerPrimitive.Root className="composer" data-disabled={(!!blocked || loading) || undefined}>

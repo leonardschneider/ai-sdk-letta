@@ -478,7 +478,7 @@ export class DecisionBoard {
         const thread = this.runtime.threadSummary(this.owner, record.threadId);
         if (!thread || thread.archived) { this.block(record, 'conversation_archived'); return; }
         const latest = this.runtime.latestRun(this.owner, record.threadId);
-        if (!this.runtime.queueing && latest && latest.status !== 'completed') {
+        if (!this.runtime.queueing && latest && !latest.usable) {
           if (latest.status === 'running') { await this.runtime.waitForChange(this.runtime.version, 2000); continue; }
           this.block(record, 'conversation_blocked'); return;
         }

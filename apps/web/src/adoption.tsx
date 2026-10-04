@@ -228,5 +228,35 @@ export function ProjectDialog({ agent, onClose, onSaved }: { agent: AgentInfo; o
         <button type="submit" className="btn primary" disabled={!sandbox || saving || !trimmed || trimmed === current}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>
+    {sandbox && <CommandTimeout agent={agent} onSaved={onSaved}/>}
   </Modal>;
+}
+
+/** The adopted agent's sandbox per-command timeout (a full site build can take minutes). */
+function CommandTimeout({ agent, onSaved }: { agent: AgentInfo; onSaved(): void }) {
+  const toast = useToast();
+  const current = Math.round((agent.adopted?.commandTimeoutMs ?? 120_000) / 1000);
+  const [seconds, setSeconds] = useState(String(current));
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState('');
+  const value = Number(seconds);
+  const valid = Number.isInteger(value) && value >= 1 && value <= 240;
+  async function save() {
+    setSaving(true); setProblem('');
+    try {
+      await adoptionApi(`/agents/${encodeURIComponent(agent.id)}/sandbox`, { commandTimeoutMs: value * 1000 }, 'PUT');
+      toast(`${agent.name}’s commands may now run for up to ${value} s each.`);
+      onSaved();
+    } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
+  }
+  return <form className="command-timeout" onSubmit={event => { event.preventDefault(); if (valid && value !== current) void save(); }}>
+    <label className="automations-heading" htmlFor="command-timeout">Command time limit</label>
+    <div className="command-timeout-row">
+      <input id="command-timeout" className="member-input" type="number" min={1} max={240} step={1} value={seconds} disabled={saving} onChange={event => { setSeconds(event.target.value); setProblem(''); }} aria-describedby="command-timeout-help" aria-invalid={!valid || undefined}/>
+      <span>seconds per command</span>
+      <button type="submit" className="btn primary small" disabled={saving || !valid || value === current}>{saving ? 'Saving…' : 'Save'}</button>
+    </div>
+    <p id="command-timeout-help" className="adopt-meta">A command still running then is stopped, and the agent gets its output so far. Raise it for long builds (up to 240 s: Letta ends any tool call after 5 minutes). Changing it restarts {agent.name}’s sandbox.</p>
+    {problem && <p className="form-error" role="alert">{problem}</p>}
+  </form>;
 }
