@@ -153,6 +153,15 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
    * @default { memory: '3G', idleTimeoutMs: 1800000 }
    */
   webDev?: WebDevConfig;
+  /**
+   * Adopt an existing local Letta agent in place (for example one made with
+   * Letta Code): this definition opens that agent, by ID, with its memory and
+   * conversations. It is never created, and its system prompt, model and
+   * tags are not changed (`instructions` and `model` are not applied; set
+   * `model` to the agent's model, which the reviewer and summarizer use).
+   * Its own Letta Code commits are reviewed but never reverted.
+   */
+  adopt?: { agentId: string };
 }
 
 /** A validated, immutable agent definition. */
@@ -172,6 +181,8 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly memory: Readonly<MemorySettings>;
   /** Web development settings (used when the definition has `webDevTools`). */
   readonly webDev: ResolvedWebDevConfig;
+  /** An existing Letta agent this definition adopts in place (see {@link AgentDefinitionInput.adopt}). */
+  readonly adopt?: Readonly<{ agentId: string }>;
 }
 
 /** Tools the harness uses for MemFS. They are confined to the agent's own memory directory. */
@@ -233,7 +244,10 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   const webSearch = resolveWebSearch(input.webSearch);
   if (names.includes('memory_provenance')) throw new Error('Tool name "memory_provenance" is reserved: the runtime provides it');
   const memory = resolveMemory(input.memory);
+  if (input.adopt !== undefined && (input.adopt === null || typeof input.adopt !== 'object' || typeof input.adopt.agentId !== 'string' || !/^agent-local-[a-zA-Z0-9-]{1,100}$/.test(input.adopt.agentId))) throw new Error('adopt.agentId must be a local Letta agent ID (agent-local-...)');
+  const adopt = input.adopt ? Object.freeze({ agentId: input.adopt.agentId }) : undefined;
   return Object.freeze({
+    ...(adopt ? { adopt } : {}),
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
     permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
   });

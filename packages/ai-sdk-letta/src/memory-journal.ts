@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { execFile, execFileSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CONVERSATION_TRAILER, REWIND_TRAILER, TURN_TRAILER, commitInfo, commitsSince, commitsWithTrailer, headOf, planRevert, withTrailers, type CommitInfo, type FilePlan, type GitRunner, type RevertPlan } from './revert.js';
@@ -39,7 +39,9 @@ type Entry = { commit: string; kind: 'turn' | 'shared'; turns: string[]; convers
 type Ledger = { version: 1; since: string; entries: Entry[]; starts?: Record<string, string>;
   /** Untrusted content each conversation has read (it stays in its context, so later turns are untrusted too). */
   tainted?: Record<string, ContentSource[]> };
-type Active = { conversationId?: string; start?: string; overlapped: boolean; provenance?: TurnProvenance };
+type Active = { conversationId?: string; start?: string; overlapped: boolean; provenance?: TurnProvenance;
+  /** Memory files uncommitted when the turn started, with their content hash: not the turn's, so its end-of-turn commit leaves them alone. */
+  dirty?: Map<string, string> };
 /** Lines a reviewer drops: lines `start`..`end` (1-based, inclusive) of `path` at HEAD, with their exact text (joined with "\n"). */
 export type LineDrop = { path: string; start: number; end: number; text: string };
 /** A turn's recorded memory commits (see {@link MemoryJournal.endTurn}). */
@@ -124,6 +126,8 @@ export class MemoryJournal {
     if (provenance && conversationId) for (const source of this.taintOf(conversationId)) provenance = withSource(provenance, { ...source, label: `${source.label ?? source.kind} (earlier in this conversation)` });
     const entry: Active = { ...(conversationId ? { conversationId } : {}), overlapped: this.active.size > 0, ...(provenance ? { provenance: { ...provenance, turn, ...(conversationId ? { conversationId } : {}) } } : {}) };
     this.active.set(turn, entry);
+    // What was uncommitted before the turn, read now (synchronously), before the turn can write anything.
+    try { entry.dirty = this.dirtyNow(); } catch { entry.dirty = undefined; }
     void serial(this.memoryDirectory, async () => { entry.start = await headOf(this.git).catch(() => undefined); });
   }
   /** The running turn's provenance (with the sources it has read so far), if it was given one. */
@@ -157,7 +161,7 @@ export class MemoryJournal {
     if (!entry) return undefined;
     return serial(this.memoryDirectory, async () => {
       try {
-        if (!this.mergeInProgress()) await this.sweep(turn, conversationId ?? entry.conversationId, entry.overlapped, entry.provenance);
+        if (!this.mergeInProgress()) await this.sweep(turn, conversationId ?? entry.conversationId, entry.overlapped, entry.provenance, entry.dirty);
         const commits = (await commitsSince(this.git, entry.start)).filter(c => !entry.start || c.commit !== entry.start);
         const ledger = this.ledger();
         if (entry.start) { ledger.starts ??= {}; ledger.starts[turn] = entry.start; const keys = Object.keys(ledger.starts); if (keys.length > 5000) for (const old of keys.slice(0, keys.length - 5000)) delete ledger.starts[old]; }
@@ -218,15 +222,36 @@ export class MemoryJournal {
     }
     return false;
   }
-  /** Commit uncommitted Markdown changes (the agent's), as the agent: "Agent memory changes", with the turn's provenance as trailers. */
-  private async sweep(turn: string, conversationId: string | undefined, overlapped: boolean, provenance?: TurnProvenance) {
-    const status = (await this.git(['status', '--porcelain', '-z', '--', '*.md'])).stdout.toString();
-    if (!status.replace(/\0/g, '').trim()) return;
-    await this.git(['add', '-A', '--', '*.md']);
-    const staged = await this.git(['diff', '--cached', '--quiet'], { ok1: true });
+  /** Uncommitted Markdown files now, with a hash of their content (`deleted` for a removed file). */
+  private dirtyNow(): Map<string, string> {
+    const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: this.memoryDirectory, LANG: 'C', LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
+    const out = execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', this.memoryDirectory, 'status', '--porcelain', '-z', '--untracked-files=all', '--no-renames', '--', '*.md'], { env, encoding: 'buffer', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).toString().split('\0').filter(Boolean);
+    const files = new Map<string, string>();
+    for (const line of out) {
+      const path = line.slice(3);
+      if (!path || path.split('/').some(part => !part || part === '..' || part.startsWith('.'))) continue;
+      let hash = 'deleted';
+      try { hash = createHash('sha256').update(readFileSync(join(this.memoryDirectory, ...path.split('/')))).digest('hex'); } catch { /* deleted */ }
+      files.set(path, hash);
+    }
+    return files;
+  }
+  /**
+   * Commit the Markdown changes the turn left uncommitted, as the agent:
+   * "Agent memory changes", with the turn's provenance as trailers. Only
+   * files that changed during the turn: edits that were already uncommitted
+   * when it started (`before`; for example left by another program) are not
+   * the turn's and stay uncommitted, unless the turn changed them again.
+   */
+  private async sweep(turn: string, conversationId: string | undefined, overlapped: boolean, provenance?: TurnProvenance, before?: ReadonlyMap<string, string>) {
+    const now = this.dirtyNow();
+    const paths = [...now].filter(([path, hash]) => !before || before.get(path) !== hash).map(([path]) => path);
+    if (!paths.length) return;
+    await this.git(['add', '-A', '--', ...paths]);
+    const staged = await this.git(['diff', '--cached', '--quiet', '--', ...paths], { ok1: true });
     if (staged.code === 0) return;
     const message = withTrailers('Agent memory changes', { [TURN_TRAILER]: overlapped ? undefined : turn, [CONVERSATION_TRAILER]: overlapped ? undefined : conversationId, ...(provenance && !overlapped ? provenanceTrailers(provenance) : {}) });
-    await this.git(['-c', `user.name=${this.author.replace(/[\r\n]/g, ' ')}`, '-c', `user.email=${AGENT_EMAIL}`, 'commit', '-q', '--no-verify', '-F', '-'], { input: `${message}\n` });
+    await this.git(['-c', `user.name=${this.author.replace(/[\r\n]/g, ' ')}`, '-c', `user.email=${AGENT_EMAIL}`, 'commit', '-q', '--no-verify', '-F', '-', '--', ...paths], { input: `${message}\n` });
   }
 
   /** The commits of `turns` recorded in the ledger (only `turn` ones), and the others since `since`. */

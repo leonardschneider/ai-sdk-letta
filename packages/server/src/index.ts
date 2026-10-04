@@ -4,9 +4,9 @@
  *
  * @packageDocumentation
  */
-export { ThreadRuntime, RuntimeFault, MAX_QUEUED, MAX_BATCH, displayRun, toolFailureReason, fileFault, fileSummary, publicSource, publicDecisionRun, type RunDecision, type RunSource, type RunAutomation, type RuntimeEvent, type DisplayOverride, type Run, type RunAuthor, type RunImage, type RunFile, type RunInput, type RuntimeHost, type RuntimeOptions, type RuntimeSession, type RewindIntent, type RewindHooks } from './runtime.js';
+export { ThreadRuntime, RuntimeFault, MAX_QUEUED, MAX_BATCH, displayRun, toolFailureReason, fileFault, fileSummary, publicSource, publicDecisionRun, type RunDecision, type RunSource, type RunAutomation, type RuntimeEvent, type DisplayOverride, type Run, type RunAuthor, type RunImage, type RunFile, type RunInput, type RuntimeHost, type ImportedConversation, type RuntimeOptions, type RuntimeSession, type RewindIntent, type RewindHooks } from './runtime.js';
 export { rewoundSpan, soloRefusal, forkPoint, externalEffects, rewindTurn, REWIND_REFUSALS, type RewindSummary, type RewindTurn, type ExternalEffect, type RewindDecision, type RewindSchedule } from './rewind.js';
-export { guiApp, appCsp, teamApp, tokenApiApp, runtimeRoutes, DecisionFeed, decisionFeedRoute, type FeedAgent, type FeedDecision, type AppAutomation, contentDisposition, previewType, BODY_LIMIT_BYTES, RUN_BODY_LIMIT_BYTES, UPLOAD_BODY_LIMIT_BYTES, PREVIEW_LIMIT_BYTES, PREVIEW_CSP, PDF_PREVIEW_CSP, type GuiAgentInfo, type RouteAccess, type RouteIntegrations, type TeamAgent, type TeamAppOptions } from './http.js';
+export { guiApp, appCsp, teamApp, tokenApiApp, runtimeRoutes, DecisionFeed, decisionFeedRoute, type FeedAgent, type FeedDecision, type AppAutomation, contentDisposition, previewType, BODY_LIMIT_BYTES, RUN_BODY_LIMIT_BYTES, UPLOAD_BODY_LIMIT_BYTES, PREVIEW_LIMIT_BYTES, PREVIEW_CSP, PDF_PREVIEW_CSP, type GuiAgentInfo, type GuiAdoption, type RouteAccess, type RouteIntegrations, type TeamAgent, type TeamAppOptions } from './http.js';
 export { integrationRoutes, atlassianMediaRoute } from './integrations.js';
 export { startPreviewServer, previewHandler, previewCsp, previewToken, previewOrigin, upstreamHeaders, PreviewTokens, type PreviewServer, type PreviewServerOptions, type PreviewTarget } from './preview.js';
 export { runtimeVersions, packageVersion, packageJsonPath, type RuntimeVersions } from './versions.js';
@@ -15,3 +15,4 @@ export { AutomationService, AutomationStore, automationApp, automationAdminRoute
 export { n8nOrchestrator, conductorOrchestrator, cronAt, CONDUCTOR_FIRE_WORKFLOW, type Orchestrator, type OrchestratorJob, type OrchestratorHandle, type N8nOrchestratorOptions, type ConductorOrchestratorOptions } from './scheduler.js';
 export { TeamDirectory, tailscaleIdentity, decodeHeaderValue, servedOrigin, authorOf, DIRECTORY_LIMITS, type TailscaleIdentity, type TeamUser, type Membership, type MemberRole, type MemberSummary } from './team.js';
 export { DecisionBoard, DecisionConflict, DECISION_BOARD_LIMITS, type DecisionRecord, type DecisionStatus, type DecisionPerson, type PublicDecision } from './decisions.js';
+export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, type AdoptionBackend, type AdoptionRegistryOptions, type HostFactory } from './adoption.js';

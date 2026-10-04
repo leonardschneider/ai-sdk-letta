@@ -4,6 +4,7 @@ import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, Mes
 import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
+import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, RemoveAgentDialog } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -66,31 +67,44 @@ function Root() {
   const [session, setSession] = useState<Session>();
   const [failed, setFailed] = useState(false);
   const [agentId, setAgentId] = useState<string>();
-  useEffect(() => {
-    void (async () => {
-      try {
-        const loaded = await api<Session>('/session');
-        if (loaded.csrf) setCsrf(loaded.csrf);
-        if (loaded.mode === 'team') {
-          const saved = localStorage.getItem(AGENT_SAVED);
-          const chosen = loaded.agents.find(a => a.id === saved) ?? loaded.agents[0];
-          setAgentBase(chosen?.id); setAgentId(chosen?.id);
-        }
-        setSession(loaded);
-      } catch { setFailed(true); }
-    })();
+  const load = useCallback(async (prefer?: string) => {
+    try {
+      const loaded = await api<Session>('/session');
+      if (loaded.csrf) setCsrf(loaded.csrf);
+      if (loaded.mode === 'team') {
+        const saved = localStorage.getItem(AGENT_SAVED);
+        const chosen = loaded.agents.find(a => a.id === saved) ?? loaded.agents[0];
+        setAgentBase(chosen?.id); setAgentId(chosen?.id);
+      } else if (loaded.adoption) {
+        // Single-user app with adopted agents: the app's own agent lives at /api, adopted ones at /api/agents/<id>.
+        const wanted = prefer ?? localStorage.getItem(AGENT_SAVED);
+        const chosen = loaded.agents?.find(a => a.id === wanted);
+        if (prefer) localStorage.setItem(AGENT_SAVED, prefer);
+        setAgentBase(chosen?.id); setAgentId(chosen?.id ?? loaded.agent.id);
+      }
+      setSession(loaded);
+    } catch { setFailed(true); }
   }, []);
+  useEffect(() => { void load(); }, [load]);
   const onSwitch = useCallback((id: string) => { localStorage.setItem(AGENT_SAVED, id); setAgentBase(id); setAgentId(id); }, []);
   if (failed) return <App agent={{ id: '', name: 'ai-sdk-letta', approvalTools: [] }} unreachable/>;
   if (!session) return <App agent={{ id: '', name: 'Connecting…', approvalTools: [] }} connecting/>;
+  if (session.mode !== 'team' && session.adoption) {
+    const agents = [session.agent, ...(session.agents ?? [])];
+    const agent = agents.find(a => a.id === agentId) ?? session.agent;
+    const local: Local = { agents, onSwitch: id => { setAgentBase(id === session.agent.id ? undefined : id); localStorage.setItem(AGENT_SAVED, id); setAgentId(id); }, reload: id => void load(id ?? session.agent.id) };
+    return <App key={agent.id} agent={agent} versions={session.versions} local={local}/>;
+  }
   if (session.mode !== 'team') return <App agent={session.agent} versions={session.versions}/>;
   const agent = session.agents.find(a => a.id === agentId);
   if (!agent || !session.user.id) return <NoAccess user={session.user}/>;
   return <App key={agent.id} agent={agent} versions={session.versions} team={{ user: session.user as Author, agents: session.agents, onSwitch }}/>;
 }
 const AGENT_SAVED = 'ai-sdk-letta-agent';
+/** Single-user app with adopted agents: the agents to switch between, and reloading the session after one is added or removed. */
+type Local = { agents: AgentInfo[]; onSwitch(id: string): void; reload(select?: string): void };
 
-function App({ agent, versions, team, connecting, unreachable }: { agent: AgentInfo; versions?: Versions; team?: Team; connecting?: boolean; unreachable?: boolean }) {
+function App({ agent, versions, team, local, connecting, unreachable }: { agent: AgentInfo; versions?: Versions; team?: Team; local?: Local; connecting?: boolean; unreachable?: boolean }) {
   const toast = useToast();
   const approvalTools = useMemo(() => new Set(agent.approvalTools), [agent.approvalTools]);
   const filesEnabled = !!agent.files;
@@ -99,7 +113,10 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const atlassianEnabled = !!agent.integrations?.includes('atlassian');
   const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
-  const SAVED_THREAD = team ? `${SAVED}:${agent.id}` : SAVED;
+  const SAVED_THREAD = team || agent.adopted ? `${SAVED}:${agent.id}` : SAVED;
+  const [adoptOpen, setAdoptOpen] = useState(false);
+  const [removing, setRemoving] = useState<AgentInfo>();
+  const [instructionsOf, setInstructionsOf] = useState<AgentInfo>();
   const isAdmin = agent.role === 'admin';
   const [queue, setQueue] = useState<QueuedTurn[]>([]);
   const [liveAuthor, setLiveAuthor] = useState<Author>();
@@ -107,7 +124,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const [automationsOpen, setAutomationsOpen] = useState(false);
   // Automations (n8n, Conductor, scripts) start turns too: the app follows changes it did not make, also when one person uses it.
   // Decisions: their outcomes start turns too (someone decides, the work resumes).
-  const decisionsEnabled = team ? team.agents.some(a => a.decisions) : !!agent.decisions;
+  const decisionsEnabled = team ? team.agents.some(a => a.decisions) : local ? local.agents.some(a => a.decisions) : !!agent.decisions;
   // Memory review (Jiminy): the Memory view, toasts when a change is reverted, and held changes as decisions.
   const memoryEnabled = !!agent.memory;
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -726,12 +743,13 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
   const openDecision = useCallback((decision: FeedDecision) => {
     setDrawer(false);
     const focus = () => setTimeout(() => document.getElementById(`decision-${decision.id}`)?.scrollIntoView({ block: 'center' }), 300);
-    if (team && decision.agent.id !== agent.id) { localStorage.setItem(`${SAVED}:${decision.agent.id}`, decision.thread.id); team.onSwitch(decision.agent.id); return; }
+    const switcher = team ?? local;
+    if (switcher && decision.agent.id !== agent.id) { localStorage.setItem(team || local?.agents.find(a => a.id === decision.agent.id)?.adopted ? `${SAVED}:${decision.agent.id}` : SAVED, decision.thread.id); switcher.onSwitch(decision.agent.id); return; }
     if (currentRef.current.id === decision.thread.id) { focus(); return; }
     void select(decision.thread.id).then(focus);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [team, agent.id]);
-  const bell = decisionsEnabled ? <DecisionBell decisions={feed.decisions} showAgent={!!team && team.agents.length > 1} {...(team ? { me: { id: team.user.id, name: team.user.name } } : {})} onOpen={openDecision}/> : undefined;
+  }, [team, local, agent.id]);
+  const bell = decisionsEnabled ? <DecisionBell decisions={feed.decisions} showAgent={(!!team && team.agents.length > 1) || (!!local && local.agents.length > 1)} {...(team ? { me: { id: team.user.id, name: team.user.name } } : {})} onOpen={openDecision}/> : undefined;
 
   const title = current.draft ? 'New chat' : selected?.title ?? '';
   const agentLatex = agent.ui?.latex;
@@ -755,7 +773,7 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : {})}
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf}/> } : {})}
             footer={<>{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); }}/>
@@ -850,6 +868,9 @@ function App({ agent, versions, team, connecting, unreachable }: { agent: AgentI
             onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
+        {adoptOpen && local && <AddAgentDialog onClose={() => setAdoptOpen(false)} onAdded={id => { setAdoptOpen(false); local.reload(id); }}/>}
+        {removing && local && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(undefined)} onRemoved={() => { setRemoving(undefined); local.reload(); }}/>}
+        {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
         {memoryOpen && <MemoryDialog agentName={agent.name} admin={!team || isAdmin} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}

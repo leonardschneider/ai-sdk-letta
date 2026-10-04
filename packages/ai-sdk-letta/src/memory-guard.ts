@@ -98,6 +98,8 @@ export type MemoryRefusal = { code: 'protected_memory' | 'new_root_file'; path: 
 export function reviewFloor(files: readonly { path: string; protected: boolean; upkeep?: boolean }[], provenance: Pick<TurnProvenance, 'actor' | 'unattended' | 'sources' | 'writer' | 'trustMode' | 'automationFloor'>): { floor: Verdict; rule?: string } {
   // Index upkeep (see isIndexUpkeep) is not a directive change.
   const touchesProtected = files.some(f => f.protected && !f.upkeep);
+  // The agent's own Letta Code sessions (adopted agents): its owner's work, never reverted; Jiminy may flag it.
+  if (provenance.writer === 'letta-code') return { floor: 'accept' };
   if (touchesProtected && provenance.writer !== 'agent') return { floor: 'reject', rule: 'protected file changed outside a turn' };
   // Trust mode: an attended person's turn in a conversation that trusts Jiminy; Jiminy decides (it may still only tighten).
   if (touchesProtected && !adminClean(provenance) && !trustEligible(provenance)) return { floor: 'reject', rule: 'protected file changed outside an admin turn with no untrusted content' };
@@ -203,6 +205,14 @@ export interface MemoryGuardOptions {
   events?: MemoryGuardEvents;
   /** Most reviews kept in memory for display. @default 200 */
   keep?: number;
+  /**
+   * An adopted agent (see `AgentDefinition.adopt`): commits its own Letta
+   * Code sessions made outside the app's turns (author email `email`,
+   * usually `<agentId>@letta.com`) are shown as "From Letta Code" and never
+   * reverted; Jiminy may review them but only flags. `since`: when it was
+   * adopted (earlier history shows as "Before adoption").
+   */
+  adopted?: { email: string; since?: string };
   /** Where reviews are kept across restarts (JSON). Optional. */
   file?: string;
   log?: (line: string) => void;
@@ -447,10 +457,12 @@ export class MemoryGuard {
         verdict = stricter(floor, failedReview(review.files));
       }
     } else if (!reviewer && floor === 'accept') verdict = 'accept';
+    // Letta Code commits are only ever flagged, never reverted or held.
+    if (review.provenance.writer === 'letta-code' && verdict !== 'accept') verdict = 'flag';
     review.verdict = verdict;
     if (this.closed) { review.status = 'done'; review.error ??= 'closed'; return; }
     // Claims attributed to people: the named member confirms (the change is held meanwhile); anyone else, an admin review.
-    const claims = review.jiminy?.claims?.length && verdict !== 'reject' && review.kind === 'turn' ? this.matchClaims(review.jiminy.claims, review.provenance.actor.id) : [];
+    const claims = review.jiminy?.claims?.length && verdict !== 'reject' && review.kind === 'turn' && review.provenance.writer !== 'letta-code' ? this.matchClaims(review.jiminy.claims, review.provenance.actor.id) : [];
     if (claims.length && claims.some(c => c.match !== 'self')) {
       review.claims = claims;
       // One confirmer per change: claims naming several members go to an admin too.
@@ -601,7 +613,10 @@ export class MemoryGuard {
     const reviews = this.reviews;
     return { path: clean, protected: this.protects(clean), sections: sections(lines).slice(0, 200).map(section => {
       const review = reviews.find(r => r.commits.includes(section.commit) || r.reapply === section.commit);
-      const label = section.provenance ? provenanceLabel(section.provenance) : /reflection/i.test(section.subject) || /reflection/i.test(section.author) ? 'Dreaming' : 'Unknown (before provenance was recorded)';
+      const since = this.options.adopted?.since;
+      const label = section.provenance ? provenanceLabel(section.provenance) : since && Date.parse(section.date) < Date.parse(since) ? 'Before adoption'
+        : this.options.adopted && section.author.toLowerCase().endsWith(`<${this.options.adopted.email.toLowerCase()}>`) ? 'From Letta Code'
+        : /reflection/i.test(section.subject) || /reflection/i.test(section.author) ? 'Dreaming' : 'Unknown (before provenance was recorded)';
       return { lines: section.lines.join('\n').slice(0, 400), from: section.from, to: section.to, by: label, at: section.date, ...(section.turn ? { turn: section.turn } : {}), commit: section.commit.slice(0, 12),
         ...(review ? { review: `${review.verdict ?? 'pending'}${review.jiminy ? ` (trust ${review.jiminy.trust.toFixed(2)}): ${review.jiminy.reason.slice(0, 160)}` : ''}` } : {}) };
     }) };
@@ -667,6 +682,9 @@ export class MemoryGuard {
       const turn = meta?.trailers['X-Turn'];
       const recorded = meta ? parseProvenanceTrailers(meta.trailers) : undefined;
       const dream = dreamOf(commit);
+      // Adopted agents: commits of its own Letta Code sessions (its identity's email, not a dream) are the owner's work.
+      const lettaCode = !!this.options.adopted && !turn && group.every(c => !dreamOf(c) && c.author.toLowerCase() === this.options.adopted!.email.toLowerCase());
+      if (lettaCode) { await this.start({ kind: 'turn', commits: ids, provenance: { actor: { kind: 'agent' }, sources: [], writer: 'letta-code' }, mergedAt: commit.date }); continue; }
       const provenance: MemoryReview['provenance'] = turn && recorded ? { ...recorded, turn } : { actor: { kind: dream ? 'dreaming' : 'harness' }, sources: [], writer: dream ? 'reflection' : 'harness' };
       const files = await this.filesOf(ids);
       // Index upkeep (MEMORY.md link lines) by a dream is not a directive change: reviewed with the rest instead of reverted.

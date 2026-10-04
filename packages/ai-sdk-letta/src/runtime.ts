@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ConversationForkHydrationError, LettaAgentClient, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
+import { ConversationForkHydrationError, LettaAgentClient, type ListMessagesOptions, type ListMessagesResult, type LettaCodeClientSessionOptions, type LettaCodeSession, type LettaConversation, type SessionDeviceStatus } from '@letta-ai/letta-agent-sdk';
 import { jsonSchema, tool, type Tool, type ToolSet, type UIMessage } from 'ai';
 import { LettaAgent } from './agent.js';
 import { creationOptions, dreamingCommand, INTERNAL_MEMORY_TOOLS, type AgentDefinition } from './definition.js';
@@ -20,6 +20,7 @@ import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDe
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
+import { adoptionRefusal, lettaCodeActivity } from './adoption.js';
 import { createWebResearcher, WEB_SEARCH_CONTEXT, WEB_SEARCH_LIMITS, WEB_SEARCH_TOOL, webSearchEnabled, type WebResearch, type WebResearcher, type WebResearcherOptions } from './web-search.js';
 import { lettaSummarizer, sweepWebSummarizers } from './web-summarizer.js';
 import { MemoryJournal } from './memory-journal.js';
@@ -333,8 +334,15 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
   })();
   try {
     const backend = localBackendDirectory();
+    // Adopted agents (made elsewhere, such as Letta Code) are opened in place: never created, and refused while Letta Code uses them.
+    if (definition.adopt) {
+      const activity = lettaCodeActivity(definition.adopt.agentId, { backendDirectory: backend });
+      if (activity.active) throw new Error(`letta_code_active: ${activity.reason}`);
+    }
     const lease = await acquireIdentity(cwd, definition, backend, {
+      ...(definition.adopt ? { adopt: definition.adopt.agentId } : {}),
       create: async () => {
+        if (definition.adopt) throw new Error('An adopted agent is never created');
         const models = await client.models.list();
         if (!models.entries.some(model => model.handle === definition.model)) throw new Error(`Model "${definition.model}" is not available on the local Letta backend; connect its provider first`);
         return client.createAgent(creationOptions(definition, cwd));
@@ -344,7 +352,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const inspector = managementClient();
         try {
           const agent = await inspector.agents.retrieve(id);
-          if (agent.id !== id || agent.name !== definition.name) throw new Error('Mapped agent identity mismatch; refusing to recreate');
+          if (definition.adopt) { const refused = adoptionRefusal(agent); if (refused || agent.id !== id) throw new Error(refused ?? 'agent_missing'); }
+          else if (agent.id !== id || agent.name !== definition.name) throw new Error('Mapped agent identity mismatch; refusing to recreate');
           if (!agent.tags?.includes('git-memory-enabled')) throw new Error('Mapped agent has MemFS disabled; refusing to continue');
         } finally { await inspector.close(); }
       },
@@ -384,7 +393,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     // The memory guard is created with the first conversation (it needs the memory directory) and shared by all.
     const guardFor = (journal: MemoryJournal) => guard ??= (() => {
       const created = MemoryGuard.open({ journal, settings: { protected: definition.memory.protected, reviewer: definition.memory.reviewer, reviewTimeoutMs: definition.memory.reviewTimeoutMs },
-        ...(reviewer ? { reviewer } : {}), ...(guardEvents ? { events: guardEvents } : {}), file: join(paths.memory, `${identity.agentId}.reviews.json`) });
+        ...(reviewer ? { reviewer } : {}), ...(guardEvents ? { events: guardEvents } : {}), file: join(paths.memory, `${identity.agentId}.reviews.json`),
+        ...(definition.adopt ? { adopted: { email: `${identity.agentId}@letta.com`, ...(identity.adoptedAt ? { since: identity.adoptedAt } : {}) } } : {}) });
       created.watch();
       void created.resume();
       return created;
@@ -538,7 +548,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const live = session;
         const history = await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS));
         assertHistorySettled(history.messages);
-        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening });
+        const initialMessages = projectHistory(history.messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         // The SDK's dreaming option writes global defaults. Use the protocol
         // command with project scope (the private state cwd) instead.
         // Dreams reviewed before they merge when the harness supports it (capability), otherwise right after.
@@ -651,7 +661,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             finally { await updater.close(); }
           },
         };
-        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening });
+        const reload = async () => projectHistory((await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS))).messages, Object.keys(definition.tools), undefined, { listening, ...(definition.adopt ? { foreignTools: true } : {}) });
         const harnessCommand = async (command: 'reflect', args = '') => {
           if (command !== 'reflect') throw new Error('Unsupported harness command');
           const response = await live.sendCommand<{ type: string; success?: boolean; output?: unknown; error?: unknown }>({ type: 'execute_command', command_id: command, runtime: { agent_id: identity.agentId, conversation_id: conversationId }, args: args.slice(0, 2000) }, { responseType: 'execute_command_response', timeoutMs: REQUEST_TIMEOUT_MS });
@@ -750,14 +760,14 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
     const conversation = await host.openConversation(choice);
     const { live, conversationId } = conversation;
     // Navigation reads through this same mapped runtime; it never enumerates other agents.
-    let listedIds = new Set<string>(identity.namedOnly ? [] : ['default']);
+    let listedIds = new Set<string>(identity.namedOnly && !identity.adopted ? [] : ['default']);
     const navigation: NavigationSource = {
       agentId: identity.agentId, currentId: conversationId,
       list: async signal => {
         assertIdle(await live.getDeviceStatus({ timeoutMs: REQUEST_TIMEOUT_MS }));
         const reader = managementClient(15_000);
         try {
-          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly);
+          const result = await listNavigationEntries(query => reader.conversations.list(query), identity.agentId, signal, !identity.namedOnly || !!identity.adopted);
           listedIds = new Set(result.entries.map(entry => entry.id));
           return result;
         } finally { await reader.close(); }
@@ -826,4 +836,66 @@ function watchDreamRequests(session: LettaCodeSession, agentId: string, decide: 
     handled.add(request.request_id);
     void decide(request).then(response => send(response as unknown as Record<string, unknown>), () => send({ type: 'reflection_merge_response', request_id: request.request_id, decision: 'reject', reason: 'review_failed' }));
   });
+}
+
+
+type RawTransport = { request(type: string, body: unknown, response: string): Promise<{ success?: boolean; messages?: unknown; has_more?: unknown; next_before?: unknown; error?: unknown }> };
+/**
+ * One page of a conversation's backend history through the management
+ * connection (read-only; no session). The SDK's `listMessages` drops
+ * `agent_id`, which the backend needs for `default`: its management
+ * transport (created by the first call, here `agents.retrieve`) forwards the
+ * agent-scoped query.
+ */
+async function managementHistory(client: LettaAgentClient, agentId: string): Promise<(conversationId: string, query: ListMessagesOptions) => Promise<ListMessagesResult>> {
+  const agent = await client.agents.retrieve(agentId);
+  if (agent.id !== agentId) throw new Error('agent_missing');
+  const transport = (client as unknown as { managementTransport?: RawTransport | null }).managementTransport;
+  if (!transport || typeof transport.request !== 'function') throw new Error('history_unavailable');
+  return async (conversationId, query) => {
+    const response = await transport.request('conversation_messages_list', { conversation_id: conversationId, query: { ...query, agent_id: agentId } }, 'conversation_messages_list_response');
+    if (response.success !== true || !Array.isArray(response.messages)) throw new Error('history_unavailable');
+    return { messages: response.messages as ListMessagesResult['messages'], ...(typeof response.has_more === 'boolean' ? { hasMore: response.has_more } : {}), ...(typeof response.next_before === 'string' || response.next_before === null ? { nextBefore: response.next_before as string | null } : {}) };
+  };
+}
+
+/**
+ * Read a conversation's display history without opening a session: nothing
+ * is sent, configured or locked (adopted agents' conversations are only
+ * read until someone sends). Projected like `presentation.initialMessages`,
+ * with other programs' tool calls (Letta Code's) as inert tool parts.
+ * `default` is the agent's default conversation.
+ */
+export async function peekConversation(agentId: string, conversationId: string, appTools: readonly string[] = [], limit = 2000): Promise<{ messages: UIMessage[]; truncated: boolean }> {
+  if (!validConversationId(conversationId)) throw new Error('Invalid conversation ID');
+  const client = managementClient(REQUEST_TIMEOUT_MS);
+  try {
+    const page = await managementHistory(client, agentId);
+    if (conversationId !== 'default') {
+      const conversation = await client.conversations.retrieve(conversationId);
+      if (conversation.agent_id !== agentId) throw new Error('Conversation belongs to another agent');
+    }
+    const history = await loadHistory(query => page(conversationId, query), limit);
+    if (history.messages.some(m => { const owner = (m as unknown as { agent_id?: unknown }).agent_id; return owner !== undefined && owner !== agentId; })) throw new Error('History of another agent');
+    return { messages: projectHistory(history.messages, appTools, undefined, { foreignTools: true }), truncated: history.truncated };
+  } finally { await client.close(); }
+}
+
+/**
+ * A glance at a conversation without opening a session: its first user
+ * message (plain text, at most 60 characters; a title for conversations
+ * without a summary) and the time of its newest message.
+ */
+export async function conversationGlance(agentId: string, conversationId: string): Promise<{ firstUserText?: string; lastMessageAt?: string }> {
+  if (!validConversationId(conversationId)) return {};
+  const client = managementClient(REQUEST_TIMEOUT_MS);
+  try {
+    const page = await managementHistory(client, agentId);
+    const read = (order: 'asc' | 'desc', limit: number) => page(conversationId, { order, limit }).then(r => r.messages, () => [] as ListMessagesResult['messages']);
+    const [first, last] = await Promise.all([read('asc', 30), read('desc', 1)]);
+    const text = projectHistory(first, [], 0).find(m => m.role === 'user')?.parts.find(p => p.type === 'text') as { text?: string } | undefined;
+    const line = text?.text?.replace(/\s+/g, ' ').trim();
+    const date = (last[0] as unknown as { date?: unknown } | undefined)?.date;
+    return { ...(line ? { firstUserText: line.length > 60 ? `${line.slice(0, 59)}…` : line } : {}), ...(typeof date === 'string' && Number.isFinite(Date.parse(date)) ? { lastMessageAt: new Date(date).toISOString() } : {}) };
+  } catch { return {}; } finally { await client.close(); }
 }

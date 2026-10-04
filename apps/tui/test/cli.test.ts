@@ -31,3 +31,11 @@ test('named conversations: a new agent\'s picker has no default conversation; an
   assert.deepEqual(legacy.map(row => row.id), ['default', 'local-conv-2']);
   assert.match(newConversationTitle(new Date('2026-10-03T09:12:30Z')), /^Conversation 2026-10-03 09:12$/);
 });
+
+test('--agent opens an agent adopted in the browser app; adopted agents list their default conversation', () => {
+  assert.deepEqual(parseTerminalArgs(['--agent', 'blog-2cc740f1', '--resume']), { agent: 'blog-2cc740f1', resume: true });
+  assert.throws(() => parseTerminalArgs(['--agent']), /--agent requires/);
+  assert.throws(() => parseTerminalArgs(['--agent', '../x']), /--agent requires/);
+  const rows = conversationRows({ version: 2, definitionId: 'blog-2cc740f1', name: 'blog', backend: '/b', agentId: 'agent-local-x', adopted: true }, []);
+  assert.deepEqual(rows.map(r => r.id), ['default']);
+});

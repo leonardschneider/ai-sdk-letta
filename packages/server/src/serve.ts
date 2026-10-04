@@ -3,13 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler } from 'ai-sdk-letta';
+import { type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
+import { AdoptionRegistry, adoptedPeek } from './adoption.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
 import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer } from './preview.js';
 
@@ -50,6 +51,13 @@ export interface ServeOptions {
    * port. @default 0
    */
   previewPort?: number;
+  /**
+   * Single-user GUI: adopt existing local Letta agents in place ("Add agent"
+   * in the app; see `AdoptionRegistry`). `true` offers files, decisions and
+   * ask_user (plus web search when configured); pass a sandbox to offer
+   * shell commands too. @default true
+   */
+  adoption?: boolean | { sandbox?: SandboxConfig; dreaming?: Partial<DreamingSettings> };
 }
 
 /** The orchestrator `schedule_task` uses. `callbackUrl`: this server's automation API as the orchestrator reaches it (for example `http://host.docker.internal:4402` from Docker). */
@@ -165,6 +173,8 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
+    // Adopted agents: their conversations are read without opening a session until someone sends.
+    ...(definition.adopt ? { peek: adoptedPeek(definition.adopt.agentId, Object.keys(definition.tools)) } : {}),
   };
 }
 
@@ -256,6 +266,22 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       const listening = await listenAutomation(service, options.automation);
       automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
     }
+    // Adopted agents (existing local Letta agents opened in place), each with its own runtime and memory review.
+    const adoption = options.adoption === false ? undefined : new AdoptionRegistry({
+      stateDirectory, owner, reserved: { definitionIds: [definition.id], agentIds: () => runtime.agentIds() }, log,
+      environment: { ...(typeof options.adoption === 'object' && options.adoption.sandbox ? { sandbox: options.adoption.sandbox } : {}), ...(typeof options.adoption === 'object' && options.adoption.dreaming ? { dreaming: options.adoption.dreaming } : {}), webSearch: !!(options.webSearch ?? process.env.SEARXNG_URL?.trim()) },
+      build: (adopted, folder) => {
+        mkdirSync(folder, { recursive: true, mode: 0o700 });
+        const desk = decisionDesk(adopted, true);
+        const wiring = memoryWiring(adopted, folder);
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring), join(folder, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        const hostedBoard = desk.bind(hosted, folder, owner);
+        wiring.bind(hosted, hostedBoard);
+        hostedBoard?.resumeAll();
+        return { runtime: hosted, ...(hostedBoard ? { board: hostedBoard } : {}) };
+      },
+    });
+    adoption?.start();
     let preview: PreviewServer | undefined;
     try {
       let appPort = port;
@@ -271,7 +297,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
         const previewPort = preview.port;
         runtime.webDev = { registry: webDev, previewUrl: threadId => `${previewOrigin(tokens.tokenOf(threadId), previewPort)}/` };
       }
-      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined).listen(port, '127.0.0.1');
+      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui()).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       appPort = bound;
       const url = `http://127.0.0.1:${bound}`;
@@ -279,8 +305,9 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       await runtime.resumeRewinds(owner).catch(() => {});
       board?.resumeAll();
       log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
-      return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(webDev && preview ? { webDev: { registry: webDev, preview } } : {}) }) };
-    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); throw error; }
+      const stop = lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(webDev && preview ? { webDev: { registry: webDev, preview } } : {}) });
+      return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: async () => { await adoption?.close(); await stop(); } };
+    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); await adoption?.close(); throw error; }
   } catch (error) { unlock(); throw error; }
 }
 

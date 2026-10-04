@@ -84,13 +84,17 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[]; fil
   memory?: boolean;
   /** The agent trusts Jiminy with protected memory by default (each conversation can override it). */
   trustJiminy?: boolean;
+  /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
+  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
   /** Team servers: when the agent replies unless a conversation overrides it. */
   replyMode?: import('ai-sdk-letta/listening').ReplyModeSetting };
 /** `GET /api/session`: the single-user app (one agent) or a team server (the agents you belong to). */
 export type Session =
-  | { mode?: undefined; csrf: string; agent: AgentInfo; versions?: import('./versions.js').Versions }
+  | { mode?: undefined; csrf: string; agent: AgentInfo; versions?: import('./versions.js').Versions;
+    /** Adopted agents (existing local Letta agents), when the app can add them (`adoption`). */
+    agents?: AgentInfo[]; adoption?: boolean }
   | { mode: 'team'; csrf?: string; user: Person; agents: AgentInfo[]; versions?: import('./versions.js').Versions };
 /** A member of an agent (`GET /api/agents/<id>/members`). */
 export type Member = Person & { id: string; role: 'admin' | 'member'; pending: boolean; you?: boolean };

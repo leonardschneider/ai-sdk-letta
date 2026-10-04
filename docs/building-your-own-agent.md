@@ -995,6 +995,37 @@ export const planner = defineAgent({
 });
 ```
 
+### Open an agent you already have (adopt it in place)
+
+An agent made elsewhere, for example with Letta Code, can be opened by its
+ID instead of creating one: `adopt` maps the definition to that agent (its
+memory and conversations, nothing copied). Its system prompt, model and
+tags are not changed (`instructions` is not applied; set `model` to its
+model, which the memory reviewer uses), and it is never created: a missing
+agent, or one another definition already uses, is refused.
+
+```ts
+// src/adopted.ts
+import { defineAgent, fileTools, FILE_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+export const blog = defineAgent({
+  id: 'blog',
+  name: 'blog',
+  model: 'openai-codex/gpt-6-astra',
+  instructions: 'Kept: an adopted agent keeps its own system prompt.',
+  tools: { ...fileTools },
+  permissions: { ...FILE_TOOL_PERMISSIONS },
+  adopt: { agentId: 'agent-local-2cc740f1-9438-4173-9418-aa89a45d258d' },
+});
+```
+
+Use one place at a time: opening refuses while a Letta Code session of the
+agent runs (`letta --agent <id>`). From the adoption on, its memory is
+protected and reviewed like any agent's; commits its own Letta Code
+sessions make show as "From Letta Code" and are never reverted. The GUI
+does all of this for you with **Add agent…** (see the README, "Your
+existing Letta agents").
+
 ## 10. State, identity, starting fresh
 
 State lives in one directory: the `stateDirectory` option (`--state-dir` in
@@ -1007,6 +1038,7 @@ on Windows). The parts you will meet:
 <state>/agents/<id>.lock      held while a process has the agent open
 <state>/agents/*.pending.json an operation whose outcome is unknown (see 12)
 <state>/server/<id>/          GUI and API threads
+<state>/adopted.json          agents added in the GUI (Add agent), by Letta ID
 <state>/attachments/          attached files, per Letta agent and conversation
 <state>/tool-traces/          metadata-only tool audit
 ```
