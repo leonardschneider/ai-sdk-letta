@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, ChevronDown, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
 import { ApiError, serverApi, type AgentInfo } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
+import { toggleToolSet } from './tool-sets.js';
 
 /** A local Letta agent as the "Add agent" picker lists it (`GET /api/adoption/agents`). */
 export type LocalAgent = { agentId: string; name: string; model: string; lastActivity?: string; conversations: number; adoptedAs?: string; refusal?: string; inApp?: boolean; busy?: boolean };
 type Picker = { agents: LocalAgent[]; tools: { available: string[]; defaults: string[] } };
 
-const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell commands (sandbox)', decisions: 'Decisions', web_search: 'Web search', ask_user: 'Questions' };
+const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell commands (sandbox)', decisions: 'Decisions', web_search: 'Web search', ask_user: 'Questions', web_dev: 'Web development (dev server, preview, browser)', mcp_app_dev: 'MCP App development' };
 /** The server's message for a refusal, or a fixed text. */
 export const adoptionMessage = (error: unknown) => (error instanceof AdoptionError ? error.message : undefined) ?? 'That didn’t work. Nothing was changed.';
 class AdoptionError extends Error { constructor(readonly code: string, message: string) { super(message); } }
@@ -22,7 +23,8 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', agent_claimed: 'This agent is already in the app.', agent_missing: 'This agent no longer exists.',
       agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'Only agents with MemFS memory can be added.', runtime_busy: 'Wait until the agent finishes replying, then try again.',
       session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
-      sandbox_unavailable: 'This server has no sandbox, so it cannot mount a project folder.',
+      sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
+      mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
     };
     // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
     const project = (error.code === 'project_unsafe' || error.code === 'project_has_credentials') && error.detail ? error.detail : undefined;
@@ -40,7 +42,7 @@ const when = (value?: string) => {
  * adopted agents: switch agents, add one, remove the current one, or update
  * its instructions.
  */
-export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void }) {
+export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void }) {
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
       <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`}>
@@ -58,6 +60,7 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
         </DropdownMenu.RadioGroup>
         <DropdownMenu.Separator className="menu-sep"/>
         <DropdownMenu.Item className="menu-item" onSelect={onAdd}><Plus size={15} aria-hidden="true"/>Add agent…</DropdownMenu.Item>
+        {current.adopted && onTools && <DropdownMenu.Item className="menu-item" onSelect={() => onTools(current)}><Wrench size={15} aria-hidden="true"/>Tools…</DropdownMenu.Item>}
         {current.adopted && onProject && <DropdownMenu.Item className="menu-item" onSelect={() => onProject(current)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>}
         {current.adopted && <DropdownMenu.Item className="menu-item" onSelect={() => onInstructions(current)}><FileDiff size={15} aria-hidden="true"/>Update instructions…</DropdownMenu.Item>}
         {current.adopted && <DropdownMenu.Item className="menu-item danger" onSelect={() => onRemove(current)}><Trash2 size={15} aria-hidden="true"/>Remove from app…</DropdownMenu.Item>}
@@ -120,7 +123,7 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
     </ul>
     {agent && data && <fieldset className="adopt-tools">
       <legend className="automations-heading">Tools it gets here</legend>
-      {data.tools.available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} onChange={event => setTools(list => event.target.checked ? [...list, set] : list.filter(s => s !== set))}/>{TOOL_LABELS[set] ?? set}</label>)}
+      {data.tools.available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} onChange={event => setTools(list => toggleToolSet(list, set, event.target.checked))}/>{TOOL_LABELS[set] ?? set}</label>)}
       <p className="adopt-meta">Its system prompt, model and tags stay unchanged. Every tool call follows the app’s permissions.</p>
     </fieldset>}
     {problem && <p className="form-error" role="alert">{problem} {/Letta Code/.test(problem) && <button type="button" className="link-btn" onClick={() => void add()}>Retry</button>}</p>}
@@ -128,6 +131,48 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
       <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
       <button type="button" className="btn primary" disabled={!agent || saving} onClick={() => void add()}>{saving ? 'Adding…' : 'Add'}</button>
     </div>
+  </Modal>;
+}
+
+/**
+ * The tool sets of an adopted agent (`PUT /api/adoption/agents/<id>/tools`).
+ * Saving restarts its runtime; open conversations get the new tools on their
+ * next message.
+ */
+export function ToolsDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  const toast = useToast();
+  const current = agent.adopted?.tools ?? [];
+  const available = agent.adopted?.available ?? current;
+  const [tools, setTools] = useState<string[]>(current);
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState('');
+  const changed = tools.length !== current.length || tools.some(t => !current.includes(t));
+  async function save() {
+    setSaving(true); setProblem('');
+    try {
+      await adoptionApi(`/agents/${encodeURIComponent(agent.id)}/tools`, { tools }, 'PUT');
+      toast(`${agent.name}’s tools changed. Open conversations get them on their next message.`);
+      onSaved();
+    } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
+  }
+  return <Modal label={`Tools of ${agent.name}`} onClose={onClose} className="automations adopt">
+    <div className="members-head">
+      <div><h2 className="modal-title">Tools</h2>
+        <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. After a change, update its instructions so it knows its tools.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
+      <fieldset className="adopt-tools">
+        <legend className="automations-heading">Tools it gets here</legend>
+        {available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} disabled={saving} onChange={event => { setTools(list => toggleToolSet(list, set, event.target.checked)); setProblem(''); }}/>{TOOL_LABELS[set] ?? set}</label>)}
+        <p className="adopt-meta">Saving restarts {agent.name}’s sandbox and services.</p>
+      </fieldset>
+      {problem && <p className="form-error" role="alert">{problem}</p>}
+      <div className="modal-actions">
+        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
+      </div>
+    </form>
   </Modal>;
 }
 

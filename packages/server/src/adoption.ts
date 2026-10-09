@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import {
-  ADOPTED_TOOL_SETS, AdoptionStore, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
+  ADOPTED_TOOL_SETS, AdoptionStore, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
   forgetIdentity, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
   withoutInstructionsSection, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
 } from 'ai-sdk-letta';
@@ -64,9 +64,14 @@ export function lettaAdoptionBackend(): AdoptionBackend {
 }
 
 /** One hosted adopted agent. */
-type Hosted = { record: AdoptionRecord; definition: AgentDefinition; runtime: ThreadRuntime; board?: DecisionBoard; router: express.Express };
-/** How the server builds the runtime of an adopted agent (the same wiring as its own agent). */
-export type HostFactory = (definition: AgentDefinition, folder: string) => { runtime: ThreadRuntime; board?: DecisionBoard };
+type Hosted = { record: AdoptionRecord; definition: AgentDefinition; runtime: ThreadRuntime; board?: DecisionBoard; router: express.Express; close?: () => Promise<void>; webDev?: boolean; apps?: boolean };
+/**
+ * How the server builds the runtime of an adopted agent (the same wiring as
+ * its own agent). `close` stops what the runtime does not own (its web
+ * development services, its MCP App servers), after the runtime closed;
+ * `webDev` and `apps` tell the browser to show the Preview pane and app views.
+ */
+export type HostFactory = (definition: AgentDefinition, folder: string) => { runtime: ThreadRuntime; board?: DecisionBoard; close?: () => Promise<void>; webDev?: boolean; apps?: boolean };
 
 /** Options of {@link AdoptionRegistry}. */
 export interface AdoptionRegistryOptions {
@@ -82,7 +87,8 @@ export interface AdoptionRegistryOptions {
 
 const REFUSALS: Record<string, string> = {
   agent_missing: 'This agent no longer exists.', agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'This agent has no MemFS memory; only agents with MemFS can be added.',
-  sandbox_unavailable: 'This server has no sandbox, so it cannot mount a project folder.',
+  sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
+  mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
   agent_claimed: 'This agent is already in the app.', letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', capacity_reached: 'The app holds as many agents as it can.',
 };
 
@@ -123,21 +129,32 @@ export class AdoptionRegistry {
     }
     const definition = adoptedDefinition(usable, this.options.environment);
     const folder = join(statePaths(this.options.stateDirectory).server(definition.id), 'gui');
-    const { runtime, board } = this.options.build(definition, folder);
+    const { runtime, board, close, webDev, apps } = this.options.build(definition, folder);
     const router = runtimeRoutes(express(), runtime, this.options.owner);
-    const hosted: Hosted = { record, definition, runtime, ...(board ? { board } : {}), router };
+    const hosted: Hosted = { record, definition, runtime, ...(board ? { board } : {}), router, ...(close ? { close } : {}), ...(webDev ? { webDev } : {}), ...(apps ? { apps } : {}) };
     this.hosted.set(record.definitionId, hosted);
     if (board) this.feed?.add({ agent: { id: definition.id, name: definition.name }, board, runtime, owner: this.options.owner });
     return hosted;
   }
+  /** Stop a hosted agent: its runtime, then what it does not own (web development services, MCP App servers). */
+  private async unhost(hosted: Hosted) {
+    this.hosted.delete(hosted.record.definitionId); this.feed?.remove(hosted.record.definitionId);
+    try { await hosted.runtime.close(); } finally { await hosted.close?.().catch(error => this.options.log?.(`Services of ${hosted.record.definitionId} not stopped: ${error instanceof Error ? error.message : String(error)}`)); }
+  }
+  /** The runtime of an adopted agent (by its definition ID), if hosted. */
+  runtime(definitionId: string): ThreadRuntime | undefined { return this.hosted.get(definitionId)?.runtime; }
+  /** The runtimes of the adopted agents. */
+  runtimes(): ThreadRuntime[] { return [...this.hosted.values()].map(h => h.runtime); }
   /** Agents for the session (the switcher). */
   agents(): GuiAgentInfo[] {
-    return [...this.hosted.values()].map(({ record, definition, runtime }) => ({
+    return [...this.hosted.values()].map(({ record, definition, runtime, webDev, apps }) => ({
       id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
       files: record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
+      // Web development: the Preview pane (and the Resources panel without files); MCP App development: app views.
+      ...(webDev ? { webDev: true, ...(!record.tools.includes('files') ? { resources: true } : {}) } : {}), ...(apps ? { apps: true } : {}),
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
-      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}) },
+      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -155,7 +172,7 @@ export class AdoptionRegistry {
   async adopt(input: unknown): Promise<AdoptionRecord> {
     const { agentId, tools } = (input ?? {}) as { agentId?: unknown; tools?: unknown };
     if (typeof agentId !== 'string' || !/^agent-local-[a-zA-Z0-9-]{1,100}$/.test(agentId)) throw new RuntimeFault('invalid_input', 400);
-    const sets = tools === undefined ? defaultAdoptedTools(this.options.environment) : validTools(tools);
+    const sets = tools === undefined ? defaultAdoptedTools(this.options.environment) : this.validTools(tools);
     if (this.store.read().some(r => r.agentId === agentId) || this.options.reserved.agentIds?.().includes(agentId)) throw new RuntimeFault('agent_claimed');
     const agent = await this.backend.agent(agentId);
     const refused = adoptionRefusal(agent);
@@ -176,9 +193,7 @@ export class AdoptionRegistry {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
-    this.hosted.delete(definitionId);
-    this.feed?.remove(definitionId);
-    await hosted.runtime.close();
+    await this.unhost(hosted);
     try { forgetIdentity(statePaths(this.options.stateDirectory).agents, definitionId); } catch { /* reopened later by the same mapping */ }
     this.store.remove(definitionId);
     return { removed: true, agentId: hosted.record.agentId };
@@ -187,11 +202,10 @@ export class AdoptionRegistry {
   async setTools(definitionId: string, input: unknown) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
-    const sets = validTools((input as { tools?: unknown } | undefined)?.tools);
+    const sets = this.validTools((input as { tools?: unknown } | undefined)?.tools);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const record = this.store.update(definitionId, r => ({ ...r, tools: sets }));
-    this.hosted.delete(definitionId); this.feed?.remove(definitionId);
-    await hosted.runtime.close();
+    await this.unhost(hosted);
     this.host(record);
     return record;
   }
@@ -216,10 +230,9 @@ export class AdoptionRegistry {
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const record = this.store.update(definitionId, r => {
       const { project: _old, ...rest } = r;
-      return path === null ? rest : { ...rest, project: path, tools: r.tools.includes('sandbox') ? r.tools : [...r.tools, 'sandbox'] };
+      return path === null ? rest : { ...rest, project: path, tools: r.tools.includes('sandbox') ? r.tools : orderedAdoptedTools([...r.tools, 'sandbox']) };
     });
-    this.hosted.delete(definitionId); this.feed?.remove(definitionId);
-    await hosted.runtime.close();
+    await this.unhost(hosted);
     this.host(record);
     return { project: record.project ?? null, tools: record.tools };
   }
@@ -236,8 +249,7 @@ export class AdoptionRegistry {
     if (!this.options.environment?.sandbox) throw new RuntimeFault('sandbox_unavailable');
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const record = this.store.update(definitionId, r => { const { commandTimeoutMs: _old, ...rest } = r; return value === null ? rest : { ...rest, commandTimeoutMs: value }; });
-    this.hosted.delete(definitionId); this.feed?.remove(definitionId);
-    await hosted.runtime.close();
+    await this.unhost(hosted);
     this.host(record);
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
   }
@@ -331,7 +343,14 @@ export class AdoptionRegistry {
   async close() {
     if (this.closing) return;
     this.closing = true;
-    await Promise.allSettled([...this.hosted.values()].map(hosted => hosted.runtime.close()));
+    await Promise.allSettled([...this.hosted.values()].map(hosted => this.unhost(hosted)));
+  }
+  /** Tool sets from a request: known, in order, and fitting the host (see `adoptedToolsRefusal`). */
+  private validTools(value: unknown): AdoptedToolSet[] {
+    const sets = validTools(value);
+    const refused = adoptedToolsRefusal(sets, this.options.environment);
+    if (refused) throw new RuntimeFault(refused, refused === 'sandbox_unavailable' ? 409 : 400);
+    return sets;
   }
 }
 
@@ -339,10 +358,10 @@ export class AdoptionRegistry {
 class ProjectRefusal extends Error { constructor(readonly code: string, message: string) { super(message); } }
 
 /** Tool sets the host can offer. */
-export const availableTools = (environment: AdoptionEnvironment = {}): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => (set !== 'sandbox' || !!environment.sandbox) && (set !== 'web_search' || !!environment.webSearch));
+export const availableTools = (environment: AdoptionEnvironment = {}): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => (set !== 'sandbox' || !!environment.sandbox) && (set !== 'web_search' || !!environment.webSearch) && ((set !== 'web_dev' && set !== 'mcp_app_dev') || webDevSandbox(environment)));
 function validTools(value: unknown): AdoptedToolSet[] {
   if (!Array.isArray(value) || value.length > ADOPTED_TOOL_SETS.length || value.some(v => typeof v !== 'string' || !(ADOPTED_TOOL_SETS as readonly string[]).includes(v))) throw new RuntimeFault('invalid_input', 400);
-  return [...new Set(value as AdoptedToolSet[])];
+  return orderedAdoptedTools(value as AdoptedToolSet[]);
 }
 
 /** A read-only `peek` for the runtime host of an adopted agent (see {@link RuntimeHost.peek}). */

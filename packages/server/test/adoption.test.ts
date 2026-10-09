@@ -35,6 +35,7 @@ function fixture(environment?: { sandbox?: { provider: 'docker'; git: { name: st
   const peeked: string[] = [];
   let opened = 0;
   const built: { id: string; sandbox?: { project?: { path: string } } }[] = [];
+  const closed: string[] = [];
   const build = (definition: { id: string; sandbox?: { project?: { path: string } } }, folder: string) => {
     built.push(definition);
     mkdirSync(folder, { recursive: true });
@@ -42,11 +43,12 @@ function fixture(environment?: { sandbox?: { provider: 'docker'; git: { name: st
       open: async () => { opened++; throw new Error('no session in tests'); }, close: async () => {},
       peek: async (conversationId: string): Promise<UIMessage[]> => { peeked.push(conversationId); return [{ id: 'h1', role: 'user', parts: [{ type: 'text', text: `hello ${conversationId}` }] }, { id: 'h2', role: 'assistant', parts: [{ type: 'dynamic-tool', toolName: 'Bash', toolCallId: 'c', state: 'output-available', input: {}, output: 'ok' } as never] }]; },
     }, join(folder, 'state.json'), 'local-gui');
-    return { runtime };
+    const tools = (definition as { tools?: object }).tools ?? {};
+    return { runtime, ...('dev_server_start' in tools ? { webDev: true } : {}), ...('mcp_app_dev_start' in tools ? { apps: true } : {}), close: async () => { closed.push(definition.id); } };
   };
   const options = { stateDirectory: dir, owner: 'local-gui', reserved: { definitionIds: ['example-assistant'], agentIds: () => [] as string[] }, backend: fake.backend, build, ...(environment ? { environment } : {}) };
   const registry = new AdoptionRegistry(options as never);
-  return { dir, fake, registry, options, peeked, built, opened: () => opened };
+  return { dir, fake, registry, options, peeked, built, closed, opened: () => opened };
 }
 
 test('adopting lists existing conversations (default included) read-only, persists across restarts, and removing never deletes the agent', async () => {
@@ -218,6 +220,36 @@ test('sandbox command timeout: set per adopted agent (the runtime restarts with 
   try {
     await plain.registry.adopt({ agentId: BLOG });
     await assert.rejects(plain.registry.setSandbox('blog-2cc740f1', { commandTimeoutMs: 60_000 }), (e: { code?: string }) => e.code === 'sandbox_unavailable');
+    await plain.registry.close();
+  } finally { rmSync(plain.dir, { recursive: true, force: true }); }
+});
+
+test('web_dev and mcp_app_dev: validated, reported to the browser, and their services closed when the tools change or the agent goes', async () => {
+  const { dir, registry, built, closed } = fixture(SANDBOX);
+  try {
+    await assert.rejects(registry.adopt({ agentId: BLOG, tools: ['files', 'sandbox', 'mcp_app_dev'] }), (e: { code?: string }) => e.code === 'mcp_app_dev_needs_web_dev');
+    await assert.rejects(registry.adopt({ agentId: BLOG, tools: ['files', 'web_dev'] }), (e: { code?: string }) => e.code === 'web_dev_needs_sandbox');
+    const record = await registry.adopt({ agentId: BLOG, tools: ['mcp_app_dev', 'web_dev', 'sandbox', 'files'] });
+    assert.deepEqual(record.tools, ['files', 'sandbox', 'web_dev', 'mcp_app_dev'], 'stored in their canonical order');
+    assert.equal((built.at(-1) as { sandbox?: { image?: string } }).sandbox?.image?.startsWith('ai-sdk-letta-webdev:'), true);
+    const info = registry.agents()[0]!;
+    assert.equal(info.webDev, true); assert.equal(info.apps, true);
+    assert.ok(info.adopted?.available?.includes('mcp_app_dev'));
+    const fewer = await registry.setTools('blog-2cc740f1', { tools: ['files', 'sandbox', 'web_dev'] });
+    assert.deepEqual(fewer.tools, ['files', 'sandbox', 'web_dev']);
+    assert.deepEqual(closed, ['blog-2cc740f1'], 'the old runtime\'s services closed');
+    assert.equal(registry.agents()[0]!.webDev, true); assert.equal(registry.agents()[0]!.apps, undefined);
+    await registry.setTools('blog-2cc740f1', { tools: ['files'] });
+    assert.equal(registry.agents()[0]!.webDev, undefined);
+    await registry.remove('blog-2cc740f1');
+    assert.deepEqual(closed, ['blog-2cc740f1', 'blog-2cc740f1', 'blog-2cc740f1']);
+    await registry.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const plain = fixture();
+  try {
+    await assert.rejects(plain.registry.adopt({ agentId: BLOG, tools: ['files', 'sandbox', 'web_dev'] }), (e: { code?: string }) => e.code === 'sandbox_unavailable');
+    assert.equal((await plain.registry.adopt({ agentId: BLOG })).tools.includes('web_dev'), false);
+    assert.equal(plain.registry.agents()[0]!.adopted?.available?.includes('web_dev'), false, 'not offered without a sandbox');
     await plain.registry.close();
   } finally { rmSync(plain.dir, { recursive: true, force: true }); }
 });

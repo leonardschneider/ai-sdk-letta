@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -12,7 +12,7 @@ import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
 import { AdoptionRegistry, adoptedPeek } from './adoption.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
-import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer } from './preview.js';
+import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer, type PreviewTarget } from './preview.js';
 import { AppGate } from './mcp-apps.js';
 
 /** Default GUI port (the token API uses the next one). */
@@ -268,16 +268,12 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition, true);
     const memory = memoryWiring(definition, directory);
-    // Web app development: each conversation's services (kept across sessions), and the preview listener.
-    let notify: (() => void) | undefined;
-    const webDev = webDevEnabled(definition) ? new WebDevRegistry({ directory: join(statePaths(stateDirectory).root, 'webdev'), onChange: () => notify?.() }) : undefined;
-    // MCP Apps: started now (in the background), kept across sessions, stopped with the server.
-    // Installed apps, or MCP Apps dev mode (mcpAppDevTools) without any.
-    const apps = appsEnabled(definition) ? new McpApps(definition.mcpApps ?? [], { directory: mcpAppsDirectory(statePaths(stateDirectory).root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), onChange: () => notify?.(), log }) : undefined;
-    void apps?.ready();
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, webDev, apps), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
-    notify = () => runtime.webDevChanged();
-    if (apps) runtime.apps = new AppGate({ apps, runtime, owner, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, sandboxPort: () => previewRef.port, auditFile: join(directory, 'app-audit.ndjson'), person: () => ({ id: LOCAL_USER_ID, name: 'You' }) });
+    // Web app development and MCP Apps: each runtime's services (kept across sessions), on one shared preview listener (started below).
+    const previewMembers = new Set<PreviewMember>();
+    const dev = devServices(definition, stateDirectory, log);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    const { webDev, apps } = dev;
+    previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
     memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
@@ -291,38 +287,38 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
     }
     // Adopted agents (existing local Letta agents opened in place), each with its own runtime and memory review.
+    const adoptionEnvironment: AdoptionEnvironment = { ...(typeof options.adoption === 'object' && options.adoption.sandbox ? { sandbox: options.adoption.sandbox } : {}), ...(typeof options.adoption === 'object' && options.adoption.dreaming ? { dreaming: options.adoption.dreaming } : {}), webSearch: !!(options.webSearch ?? process.env.SEARXNG_URL?.trim()) };
     const adoption = options.adoption === false ? undefined : new AdoptionRegistry({
-      stateDirectory, owner, reserved: { definitionIds: [definition.id], agentIds: () => runtime.agentIds() }, log,
-      environment: { ...(typeof options.adoption === 'object' && options.adoption.sandbox ? { sandbox: options.adoption.sandbox } : {}), ...(typeof options.adoption === 'object' && options.adoption.dreaming ? { dreaming: options.adoption.dreaming } : {}), webSearch: !!(options.webSearch ?? process.env.SEARXNG_URL?.trim()) },
+      stateDirectory, owner, reserved: { definitionIds: [definition.id], agentIds: () => runtime.agentIds() }, log, environment: adoptionEnvironment,
       build: (adopted, folder) => {
         mkdirSync(folder, { recursive: true, mode: 0o700 });
         const desk = decisionDesk(adopted, true);
         const wiring = memoryWiring(adopted, folder);
-        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring), join(folder, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        // Its own web development services and MCP App servers (web_dev, mcp_app_dev), on the shared preview listener.
+        const services = devServices(adopted, stateDirectory, log);
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps), join(folder, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        const member = services.bind(hosted, { owner, directory: folder, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port });
+        previewMembers.add(member);
         const hostedBoard = desk.bind(hosted, folder, owner);
         wiring.bind(hosted, hostedBoard);
         hostedBoard?.resumeAll();
-        return { runtime: hosted, ...(hostedBoard ? { board: hostedBoard } : {}) };
+        return { runtime: hosted, ...(hostedBoard ? { board: hostedBoard } : {}), ...(services.webDev ? { webDev: true } : {}), ...(services.apps ? { apps: true } : {}),
+          close: async () => { previewMembers.delete(member); await services.close(); } };
       },
     });
     adoption?.start();
     let preview: PreviewServer | undefined;
     try {
       let appPort = port;
-      if (webDev || apps) {
-        const tokens = new PreviewTokens();
-        // Web app previews (p-<token>) and MCP App views (s-<token>, one origin per view) share one loopback listener.
+      // One loopback listener serves every agent's web app previews (p-<token>) and MCP App views (s-<token>, one origin per view).
+      // It also starts whenever adopted agents may get web development (a docker or apple-container sandbox): their tools can be
+      // turned on at any time, and the app's CSP (frame-src) names the listener's port when the app is served.
+      if (webDev || apps || (adoption && webDevSandbox(adoptionEnvironment))) {
         preview = await startPreviewServer({ port: options.previewPort ?? 0, frameAncestors: () => [`http://127.0.0.1:${appPort}`],
-          resolve: token => {
-            const threadId = tokens.threadOf(token);
-            if (!threadId || !webDev) return undefined;
-            const services = () => { const identity = runtime.conversationIdentity(threadId); return identity ? webDev.get(identity.agentId, identity.conversationId) : undefined; };
-            return { connect: () => services()?.connectPreview(), get origins() { return services()?.origins ?? []; } };
-          },
-          ...(runtime.apps ? { sandbox: (token: string) => runtime.apps!.sandboxPage(token) } : {}) });
-        const previewPort = preview.port;
-        previewRef.port = previewPort;
-        if (webDev) runtime.webDev = { registry: webDev, previewUrl: threadId => `${previewOrigin(tokens.tokenOf(threadId), previewPort)}/` };
+          // Tokens are random (128 bits) and per runtime: at most one runtime knows a token.
+          resolve: token => { for (const member of previewMembers) { const target = member.resolve(token); if (target) return target; } return undefined; },
+          sandbox: token => { for (const member of previewMembers) { const page = member.sandbox(token); if (page.status !== 404) return page; } return { status: 404 }; } });
+        previewRef.port = preview.port;
       }
       const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui()).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
@@ -334,7 +330,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview && webDev ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}${preview && apps ? `\nMCP App views: http://s-<view token>.localhost:${preview.port}/ (loopback, one origin per view) · apps: ${(definition.mcpApps ?? []).map(a => a.id).join(', ') || 'none installed'}${mcpAppDevEnabled(definition, webDevEnabled(definition)) ? ' · dev mode' : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
       const stop = lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(preview ? { webDev: { ...(webDev ? { registry: webDev } : {}), preview } } : {}), ...(apps ? { apps } : {}) });
       return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: async () => { await adoption?.close(); await stop(); } };
-    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); await apps?.close(); await adoption?.close(); throw error; }
+    } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await dev.close(); await adoption?.close(); throw error; }
   } catch (error) { unlock(); throw error; }
 }
 
@@ -377,6 +373,45 @@ export interface TeamServeOptions extends ServeOptions {
    * `https://machine.tailnet.ts.net`. Requests for other hosts are refused.
    */
   origins: readonly string[];
+}
+
+/** What the shared preview listener asks one runtime: the conversation of a preview token, and an MCP App view's page. */
+type PreviewMember = { resolve(token: string): PreviewTarget | undefined; sandbox(token: string): { status: 200; html: string; csp: string } | { status: 404 | 410 } };
+
+/**
+ * Web app development (`webDevTools`) and MCP Apps (installed ones, or dev
+ * mode) of one agent: its services registry and app servers (created now,
+ * apps started in the background), then `bind` wires them into its runtime
+ * (the app gate, preview URLs with its own preview tokens) and returns what
+ * the shared preview listener asks it. `close` stops them (after the runtime).
+ * The main agent and each adopted agent get their own.
+ */
+function devServices(definition: AgentDefinition, stateDirectory: string, log: (line: string) => void) {
+  let notify: (() => void) | undefined;
+  const webDev = webDevEnabled(definition) ? new WebDevRegistry({ directory: join(statePaths(stateDirectory).root, 'webdev'), onChange: () => notify?.() }) : undefined;
+  // Installed apps, or MCP Apps dev mode (mcpAppDevTools) without any.
+  const apps = appsEnabled(definition) ? new McpApps(definition.mcpApps ?? [], { directory: mcpAppsDirectory(statePaths(stateDirectory).root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), onChange: () => notify?.(), log }) : undefined;
+  void apps?.ready();
+  const tokens = new PreviewTokens();
+  return {
+    webDev, apps,
+    bind(runtime: ThreadRuntime, wiring: { owner: string; directory: string; appOrigin(): string; previewPort(): number }): PreviewMember {
+      notify = () => runtime.webDevChanged();
+      if (apps) runtime.apps = new AppGate({ apps, runtime, owner: wiring.owner, appOrigin: wiring.appOrigin, sandboxPort: wiring.previewPort, auditFile: join(wiring.directory, 'app-audit.ndjson'), person: () => ({ id: LOCAL_USER_ID, name: 'You' }) });
+      // No preview URL until the listener is up.
+      if (webDev) runtime.webDev = { registry: webDev, previewUrl: threadId => wiring.previewPort() ? `${previewOrigin(tokens.tokenOf(threadId), wiring.previewPort())}/` : undefined };
+      return {
+        resolve: token => {
+          const threadId = tokens.threadOf(token);
+          if (!threadId || !webDev) return undefined;
+          const services = () => { const identity = runtime.conversationIdentity(threadId); return identity ? webDev.get(identity.agentId, identity.conversationId) : undefined; };
+          return { connect: () => services()?.connectPreview(), get origins() { return services()?.origins ?? []; } };
+        },
+        sandbox: token => runtime.apps?.sandboxPage(token) ?? { status: 404 },
+      };
+    },
+    close: async () => { await webDev?.close(); await apps?.close(); },
+  };
 }
 
 /** What the browser may know about a definition. */

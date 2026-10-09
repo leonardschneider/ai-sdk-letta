@@ -7,6 +7,7 @@ import { jsonSchema, tool, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import { MCP_APPS_IMAGE, SANDBOX_LABEL, SandboxError, cliOf, ensureImage, exec, remove, sweepStaleSandboxes, track, type Cli, type ResolvedSandboxConfig } from './sandbox.js';
 import { FrameMux, TUNNEL_SCRIPT, handleEgress } from './webdev-tunnel.js';
+import { PORT_WAIT_SCRIPT, openHttpTunnel, type McpAppHttpEndpoint } from './mcp-app-http.js';
 import { normalizeWebOrigin, type CommandLine } from './webdev.js';
 import { TOOL_OUTPUT_LIMIT } from './tools.js';
 
@@ -61,6 +62,17 @@ export interface McpAppConfig {
   tools?: Readonly<Record<string, McpAppToolPolicy>>;
   /** HTTPS origins the app may reach: from its server (through the egress tunnel) and from its view (intersected with the view's declared CSP). @default none */
   origins?: readonly string[];
+  /**
+   * How the host talks to the server: `"stdio"` (the command speaks MCP on
+   * stdin/stdout) or `"http"` (Streamable HTTP: the command listens on
+   * `127.0.0.1:<port>` inside its container, with `PORT` and `HOST` set;
+   * reached through a tunnel, no port is published). @default "stdio"
+   */
+  transport?: 'stdio' | 'http';
+  /** Port of an `http` server inside its container (1024–65535, not 3128). @default 3000 */
+  port?: number;
+  /** Path of the MCP endpoint of an `http` server (`path` is the app's folder). @default "/mcp" */
+  endpoint?: string;
 }
 /** A validated `mcpApps` entry. */
 export interface ResolvedMcpAppConfig {
@@ -72,6 +84,8 @@ export interface ResolvedMcpAppConfig {
   readonly version?: string;
   readonly tools: Readonly<Record<string, McpAppToolPolicy>>;
   readonly origins: readonly string[];
+  /** Streamable HTTP inside the container (absent: stdio). */
+  readonly http?: { readonly port: number; readonly path: string };
 }
 
 /** Limits of MCP Apps. */
@@ -96,7 +110,16 @@ export const MCP_APP_LIMITS = Object.freeze({
   maxLineBytes: 8 * 1024 * 1024,
   /** Dev apps running at once in one conversation. */
   maxDevApps: 3,
+  /** How long an HTTP server may take to accept connections after it started. */
+  httpReadyTimeoutMs: 60_000,
 });
+
+/** Defaults of Streamable HTTP servers (dev apps and installed apps). */
+export const MCP_APP_HTTP_DEFAULTS = Object.freeze({ port: 3000, path: '/mcp' });
+/** An MCP endpoint path: starts with "/", at most 200 URL path characters, no query. */
+export const MCP_APP_HTTP_PATH = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,199}$/;
+/** Is this a usable server port (1024–65535)? Ports the host uses itself are refused by the callers. */
+export const validHttpPort = (port: unknown): port is number => typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535;
 
 const ID = /^[a-z][a-z0-9-]{0,23}$/;
 /** Validate a definition's `mcpApps`. */
@@ -109,8 +132,8 @@ export function resolveMcpApps(input: unknown): readonly ResolvedMcpAppConfig[] 
     const where = `mcpApps[${index}]`;
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${where} must be an object`);
     const value = entry as Record<string, unknown>;
-    const unknown = Object.keys(value).filter(key => !['id', 'package', 'path', 'command', 'args', 'version', 'tools', 'origins'].includes(key));
-    if (unknown.length) throw new Error(`Unknown ${where} setting(s): ${unknown.join(', ')}. Supported: id, package, path, command, args, version, tools, origins.`);
+    const unknown = Object.keys(value).filter(key => !['id', 'package', 'path', 'command', 'args', 'version', 'tools', 'origins', 'transport', 'port', 'endpoint'].includes(key));
+    if (unknown.length) throw new Error(`Unknown ${where} setting(s): ${unknown.join(', ')}. Supported: id, package, path, command, args, version, tools, origins, transport, port, endpoint.`);
     if (typeof value.id !== 'string' || !ID.test(value.id)) throw new Error(`${where}.id must be 1–24 lowercase letters, digits or "-", starting with a letter`);
     if (seen.has(value.id)) throw new Error(`Duplicate MCP App id "${value.id}"`);
     seen.add(value.id);
@@ -160,7 +183,16 @@ export function resolveMcpApps(input: unknown): readonly ResolvedMcpAppConfig[] 
         if (!origins.includes(normalized.origin)) origins.push(normalized.origin);
       }
     }
-    return Object.freeze({ id: value.id, ...(source ? { source: Object.freeze(source) } : {}), ...(command ? { command: Object.freeze(command) } : {}), ...(args?.length ? { args: Object.freeze(args) } : {}), ...(value.version ? { version: value.version as string } : {}), tools: Object.freeze(tools), origins: Object.freeze(origins) });
+    let http: ResolvedMcpAppConfig['http'];
+    if (value.transport !== undefined && value.transport !== 'stdio' && value.transport !== 'http') throw new Error(`${where}.transport must be "stdio" or "http"`);
+    if (value.transport === 'http') {
+      const port = value.port ?? MCP_APP_HTTP_DEFAULTS.port;
+      if (!validHttpPort(port) || port === MCP_APP_PROXY_PORT) throw new Error(`${where}.port must be an integer from 1024 to 65535, not ${MCP_APP_PROXY_PORT} (the egress proxy)`);
+      const path = value.endpoint ?? MCP_APP_HTTP_DEFAULTS.path;
+      if (typeof path !== 'string' || !MCP_APP_HTTP_PATH.test(path)) throw new Error(`${where}.endpoint must be a URL path such as "/mcp"`);
+      http = Object.freeze({ port, path });
+    } else if (value.port !== undefined || value.endpoint !== undefined) throw new Error(`${where}: port and endpoint need transport "http"`);
+    return Object.freeze({ id: value.id, ...(http ? { http } : {}), ...(source ? { source: Object.freeze(source) } : {}), ...(command ? { command: Object.freeze(command) } : {}), ...(args?.length ? { args: Object.freeze(args) } : {}), ...(value.version ? { version: value.version as string } : {}), tools: Object.freeze(tools), origins: Object.freeze(origins) });
   }));
 }
 
@@ -378,38 +410,69 @@ export interface McpAppClient {
   listResources?(signal?: AbortSignal): Promise<{ resources: { uri: string; name?: string; mimeType?: string; _meta?: Record<string, unknown> }[] }>;
   close(): Promise<void>;
 }
-/** Connects a client to a command line (default: `@ai-sdk/mcp` over {@link ProcessStdioTransport}, advertising the MCP Apps extension). */
-export type McpAppConnector = (line: CommandLine, onClose: () => void) => Promise<McpAppClient>;
+/**
+ * Connects a client to a server: a command line (stdio) or a Streamable HTTP
+ * endpoint (default: `@ai-sdk/mcp`, advertising the MCP Apps extension).
+ * `onClose` is called when the connection is gone (the process exited, or
+ * the HTTP endpoint's tunnel closed or failed).
+ */
+export type McpAppConnector = (target: CommandLine | McpAppHttpEndpoint, onClose: () => void) => Promise<McpAppClient>;
+/** Is this connector target a Streamable HTTP endpoint? */
+export const isHttpTarget = (target: CommandLine | McpAppHttpEndpoint): target is McpAppHttpEndpoint => (target as McpAppHttpEndpoint).kind === 'http';
 
-export const mcpAppConnector: McpAppConnector = async (line, onClose) => {
-  let mcp: typeof import('@ai-sdk/mcp');
-  try { mcp = await import('@ai-sdk/mcp'); }
+const loadMcp = async (): Promise<typeof import('@ai-sdk/mcp')> => {
+  try { return await import('@ai-sdk/mcp'); }
   catch { throw new SandboxError('sandbox_unavailable', 'MCP Apps need the optional package @ai-sdk/mcp; install it (see the ai-sdk-letta README, "MCP Apps")'); }
+};
+type AiSdkMcpClient = Awaited<ReturnType<typeof import('@ai-sdk/mcp')['createMCPClient']>>;
+const wrapClient = (client: AiSdkMcpClient, close: () => Promise<void>): McpAppClient => ({
+  serverInfo: client.serverInfo as McpAppClient['serverInfo'],
+  listTools: async () => await client.listTools() as { tools: McpToolDefinition[] },
+  callTool: async (name, args, signal) => await client.callTool({ name, arguments: args, ...(signal ? { options: { signal } } : {}) }) as McpCallResult,
+  readResource: async (uri, signal) => await client.readResource({ uri, ...(signal ? { options: { signal } } : {}) }) as never,
+  listResources: async signal => await client.listResources({ ...(signal ? { options: { signal } } : {}) }) as never,
+  close,
+});
+
+/** Streamable HTTP (`@ai-sdk/mcp`'s `http` transport with the endpoint's fetch). */
+async function httpConnect(mcp: typeof import('@ai-sdk/mcp'), endpoint: McpAppHttpEndpoint, onClose: () => void): Promise<McpAppClient> {
+  let closed = false;
+  const closeOnce = () => { if (closed) return; closed = true; unsubscribe?.(); onClose(); };
+  let unsubscribe: (() => void) | undefined;
+  // A failing request (the server or tunnel is gone) rejects that call; the tunnel closing ends the app.
+  const client = await mcp.createMCPClient({ transport: { type: 'http', url: endpoint.url, fetch: endpoint.fetch as never }, capabilities: mcp.mcpAppClientCapabilities as never, clientName: 'ai-sdk-letta', onUncaughtError: () => {} });
+  unsubscribe = endpoint.onClosed?.(closeOnce);
+  return wrapClient(client, async () => { await Promise.race([client.close().catch(() => {}), new Promise(done => setTimeout(done, 2000))]); closeOnce(); });
+}
+
+export const mcpAppConnector: McpAppConnector = async (target, onClose) => {
+  const mcp = await loadMcp();
+  if (isHttpTarget(target)) return httpConnect(mcp, target, onClose);
+  const line = target;
   const transport = new ProcessStdioTransport(line);
   const client = await mcp.createMCPClient({ transport: transport as never, capabilities: mcp.mcpAppClientCapabilities as never, clientName: 'ai-sdk-letta', onUncaughtError: () => {} }).catch(async error => { await transport.close(); throw error; });
   // The client set its own close handler while connecting: chain ours after it.
   const wrapped = transport.onclose;
   transport.onclose = () => { wrapped?.(); onClose(); };
-  return {
-    serverInfo: client.serverInfo as McpAppClient['serverInfo'],
-    listTools: async () => await client.listTools() as { tools: McpToolDefinition[] },
-    callTool: async (name, args, signal) => await client.callTool({ name, arguments: args, ...(signal ? { options: { signal } } : {}) }) as McpCallResult,
-    readResource: async (uri, signal) => await client.readResource({ uri, ...(signal ? { options: { signal } } : {}) }) as never,
-    listResources: async signal => await client.listResources({ ...(signal ? { options: { signal } } : {}) }) as never,
-    // The transport kills the process whatever the client does.
-    close: async () => { await Promise.race([client.close().catch(() => {}), new Promise(done => setTimeout(done, 2000))]); await transport.close(); },
-  };
+  // The transport kills the process whatever the client does.
+  return wrapClient(client, async () => { await Promise.race([client.close().catch(() => {}), new Promise(done => setTimeout(done, 2000))]); await transport.close(); });
 };
 
-/** A running app server's environment (a container, or a process in tests). */
-export interface McpAppRuntime {
-  /** The command line that runs the server with stdio attached. */
-  line: CommandLine;
+/**
+ * A running app server's environment (a container, or a process in tests):
+ * a command line to run with stdio attached (`line`), or a Streamable HTTP
+ * server that already runs (`http`).
+ */
+export type McpAppRuntime = McpAppRuntimeBase & ({ line: CommandLine; http?: undefined } | { http: McpAppHttpEndpoint; line?: undefined });
+/** What every {@link McpAppRuntime} has. */
+export interface McpAppRuntimeBase {
   /** A byte stream end for the egress tunnel (`listen 3128`), when the app has origins. */
   tunnel?: CommandLine;
-  /** Stop it (remove the container). Idempotent. */
+  /** Stop it (remove the container, close the HTTP tunnel). Idempotent. */
   stop(): Promise<void>;
 }
+/** What a connector reaches for a runtime. */
+export const runtimeTarget = (runtime: McpAppRuntime): CommandLine | McpAppHttpEndpoint => runtime.http ?? runtime.line!;
 /** Starts an app's environment. */
 export type McpAppLauncher = (app: PreparedMcpApp, signal?: AbortSignal) => Promise<McpAppRuntime>;
 /** An app ready to launch: its files on the host (unpacked), and its command. */
@@ -417,6 +480,8 @@ export type PreparedMcpApp = { config: ResolvedMcpAppConfig; folder?: string; co
 
 /** Port of the egress proxy inside an app's container. */
 export const MCP_APP_PROXY_PORT = 3128;
+/** Marks an installed app's Streamable HTTP server processes (`<mark>=1`), to tell when it exited. */
+const MCP_APP_MARK = 'AI_SDK_LETTA_MCP_APP';
 
 /** The `docker run` / `container run` arguments of an app's container. */
 export function mcpAppRunArgs(kind: 'docker' | 'apple-container', name: string, options: { image: string; folder?: string; labels: Readonly<Record<string, string>>; uid?: { uid: number; gid: number }; memory?: string }): string[] {
@@ -445,10 +510,32 @@ export function containerLauncher(config: Pick<ResolvedSandboxConfig, 'provider'
     if (started.code !== 0) { await remove(cli, name); throw new SandboxError('sandbox_unavailable', `The MCP App container could not start: ${started.stderr.trim().slice(-300)}`); }
     const env = app.config.origins.length ? ['-e', `HTTPS_PROXY=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', `https_proxy=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', 'NODE_USE_ENV_PROXY=1'] : [];
     const workdir = cli.kind === 'apple-container' && app.folder ? ['-w', '/app'] : [];
+    const tunnel = app.config.origins.length ? { tunnel: { command: cli.binary, args: ['exec', '-i', name, 'node', '-e', TUNNEL_SCRIPT, 'listen', String(MCP_APP_PROXY_PORT)] } } : {};
+    if (!app.config.http) {
+      return {
+        line: { command: cli.binary, args: ['exec', '-i', ...workdir, ...env, name, ...app.command] },
+        ...tunnel,
+        stop: (() => { let stopped: Promise<void> | undefined; return () => stopped ??= remove(cli as Cli, name); })(),
+      };
+    }
+    // Streamable HTTP: the server runs detached (output to /tmp/app.log in the container) and is reached through a `connect <port>` tunnel.
+    const { port, path } = app.config.http;
+    const httpEnv = [...env, '-e', `PORT=${port}`, '-e', 'HOST=127.0.0.1', '-e', `${MCP_APP_MARK}=1`];
+    const fail = async (message: string) => { await remove(cli as Cli, name); throw new SandboxError('sandbox_unavailable', message); };
+    const detached = await exec(cli.binary, ['exec', '-d', ...workdir, ...httpEnv, name, 'sh', '-c', 'exec >>/tmp/app.log 2>&1 </dev/null; exec "$@"', 'sh', ...app.command], 30_000);
+    if (detached.code !== 0) return fail(`MCP App "${app.config.id}": the server could not start: ${detached.stderr.trim().slice(-300)}`);
+    const seconds = Math.round(MCP_APP_LIMITS.httpReadyTimeoutMs / 1000);
+    const waited = await exec(cli.binary, ['exec', name, 'node', '-e', PORT_WAIT_SCRIPT, 'wait', String(port), String(seconds), `${MCP_APP_MARK}=1`], MCP_APP_LIMITS.httpReadyTimeoutMs + 15_000);
+    const outcome = waited.stdout.trim().split('\n').at(-1) ?? '';
+    if (outcome !== 'ready') {
+      const log = (await exec(cli.binary, ['exec', name, 'tail', '-n', '20', '/tmp/app.log'], 15_000)).stdout.trim().slice(-1500);
+      return fail(`MCP App "${app.config.id}": ${outcome === 'exited' ? 'the server exited' : `nothing listened on 127.0.0.1:${port} within ${seconds} s`}${log ? `. Its output:\n${log}` : ''}`);
+    }
+    const http = openHttpTunnel({ command: cli.binary, args: ['exec', '-i', name, 'node', '-e', TUNNEL_SCRIPT, 'connect', String(port)] }, `http://127.0.0.1:${port}${path}`);
     return {
-      line: { command: cli.binary, args: ['exec', '-i', ...workdir, ...env, name, ...app.command] },
-      ...(app.config.origins.length ? { tunnel: { command: cli.binary, args: ['exec', '-i', name, 'node', '-e', TUNNEL_SCRIPT, 'listen', String(MCP_APP_PROXY_PORT)] } } : {}),
-      stop: (() => { let stopped: Promise<void> | undefined; return () => stopped ??= remove(cli as Cli, name); })(),
+      http: http.endpoint,
+      ...tunnel,
+      stop: (() => { let stopped: Promise<void> | undefined; return () => stopped ??= (async () => { await http.close(); await remove(cli as Cli, name); })(); })(),
     };
   };
 }
@@ -684,7 +771,7 @@ export class McpApps {
       const runtime = live.runtime = await this.launcher(prepared, deadline);
       if (this.closed) { await runtime.stop(); return; }
       if (runtime.tunnel) live.tunnel = this.egress(config, runtime.tunnel);
-      const client = live.client = await withDeadline(this.connector(runtime.line, () => { if (live.client === client) { live.status = 'stopped'; live.error = 'The app server exited.'; this.changed(); } }), deadline, 'start_timeout');
+      const client = live.client = await withDeadline(this.connector(runtimeTarget(runtime), () => { if (live.client === client) { live.status = 'stopped'; live.error = 'The app server exited.'; this.changed(); } }), deadline, 'start_timeout');
       live.serverInfo = client.serverInfo;
       const listed = await withDeadline(client.listTools(), deadline, 'start_timeout');
       live.tools = (Array.isArray(listed.tools) ? listed.tools : []).filter(t => t && typeof t.name === 'string' && /^[\w.:/-]{1,128}$/.test(t.name)).slice(0, MCP_APP_LIMITS.maxTools);
@@ -927,7 +1014,7 @@ export class McpApps {
     try {
       const runtime = live.runtime = await spec.launch(deadline);
       if (this.closed) { await runtime.stop(); throw new Error('closed'); }
-      const client = live.client = await withDeadline(this.connector(runtime.line, () => { if (live.client === client) { live.status = 'stopped'; live.error = 'The dev app server exited (see mcp_app_dev_logs).'; this.changed(); } }), deadline, 'start_timeout');
+      const client = live.client = await withDeadline(this.connector(runtimeTarget(runtime), () => { if (live.client === client) { live.status = 'stopped'; live.error = 'The dev app server exited (see mcp_app_dev_logs).'; this.changed(); } }), deadline, 'start_timeout');
       live.serverInfo = client.serverInfo;
       const listed = await withDeadline(client.listTools(), deadline, 'start_timeout');
       live.tools = (Array.isArray(listed?.tools) ? listed.tools : []).filter(t => t && typeof t.name === 'string' && /^[\w.:/-]{1,128}$/.test(t.name)).slice(0, MCP_APP_LIMITS.maxTools);
@@ -937,7 +1024,7 @@ export class McpApps {
       live.status = 'running';
       this.options.log?.(`Dev app ${id}: generation ${live.dev.generation} started · ${live.tools.length} tool(s), ${live.views.size} view(s).`);
     } catch (error) {
-      const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (does it speak MCP over stdio? see mcp_app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
+      const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (${live.runtime?.http ? `does it serve Streamable HTTP at ${live.runtime.http.url}?` : 'does it speak MCP over stdio?'} see mcp_app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
       await this.stopOne(live);
       live.status = 'failed'; live.error = message;
     } finally { this.changed(); }

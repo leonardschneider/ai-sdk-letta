@@ -18,3 +18,12 @@ test('Letta Code tool calls in an adopted agent\'s history render as generic "Us
   assert.doesNotThrow(() => toolSummary('Bash', 'plain text output', {}));
   assert.doesNotThrow(() => toolSummary('Read', undefined, {}));
 });
+
+test('tool set checkboxes keep dependencies: MCP App development checks web development and the sandbox; unchecking the sandbox unchecks what needs it', async () => {
+  const { toggleToolSet } = await import('../src/tool-sets.js');
+  assert.deepEqual(toggleToolSet(['files'], 'mcp_app_dev', true).sort(), ['files', 'mcp_app_dev', 'sandbox', 'web_dev']);
+  assert.deepEqual(toggleToolSet(['files', 'sandbox'], 'web_dev', true).sort(), ['files', 'sandbox', 'web_dev']);
+  assert.deepEqual(toggleToolSet(['files', 'sandbox', 'web_dev', 'mcp_app_dev'], 'web_dev', false), ['files', 'sandbox']);
+  assert.deepEqual(toggleToolSet(['files', 'sandbox', 'web_dev', 'mcp_app_dev'], 'sandbox', false), ['files']);
+  assert.deepEqual(toggleToolSet(['files', 'sandbox', 'web_dev', 'mcp_app_dev'], 'mcp_app_dev', false), ['files', 'sandbox', 'web_dev']);
+});

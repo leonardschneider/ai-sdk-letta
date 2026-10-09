@@ -4,11 +4,13 @@
  *
  * Adapted from the official ext-apps skill `create-mcp-app` (v2.0.3,
  * https://github.com/modelcontextprotocol/ext-apps), whose code is under
- * Apache-2.0 and documentation under CC-BY-4.0; changed for this host (stdio
- * dev apps in a services container without network, the `ask` policy of
- * view calls, a single-file view). The example was checked against
- * `@modelcontextprotocol/ext-apps` 2.0.3 and `@modelcontextprotocol/server`
- * 2.0.0, and against the ext-apps `basic-server-vanillajs` example.
+ * Apache-2.0 and documentation under CC-BY-4.0; changed for this host
+ * (Streamable HTTP dev apps in a services container without network, the
+ * `ask` policy of view calls, a single-file view). The example was checked
+ * against `@modelcontextprotocol/ext-apps` 2.0.3 and
+ * `@modelcontextprotocol/server` 2.0.0 (`createMcpHandler` behind plain
+ * `node:http`, no `@modelcontextprotocol/node`), and against the ext-apps
+ * `basic-server-vanillajs` example. The FastMCP note was not run here.
  *
  * @module
  */
@@ -33,23 +35,23 @@ zod@^4.2.0, esbuild@^0.25 (bundles the view). Not the old
 
 ## How this host runs your app
 
-- Your server is a dev app of this conversation: mcp_app_dev_start runs your
-  command over stdio in the services container. stdout is MCP only; log to
-  stderr (console.error). No network there, and the command must not build
-  or install anything.
-- Install packages with run_command_online (the user approves it; plain
-  run_command has no network) in the app folder: \`npm install\`. Nothing is
-  vendored. Then build with run_command.
+- mcp_app_dev_start runs your server in the services container (no
+  network; the command must not build or install). It serves **Streamable
+  HTTP** on 127.0.0.1:$PORT (PORT=3000, HOST=127.0.0.1 set; "port" to
+  change, not 5173/3128), endpoint /mcp ("path" to change). Its output goes
+  to mcp_app_dev_logs. Legacy stdio: "transport": "stdio".
+- Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`
+  (or \`mcp.http_app()\` under uvicorn); assumed at /mcp, else pass "path".
+- Install with run_command_online (the user approves; run_command has no
+  network) in the app folder: \`npm install\`. Then build with run_command.
 - Tool visibility (\`_meta.ui.visibility\`): "model" tools become yours as
-  dev_<name>__<tool> from your next turn (calling one renders its view in the
-  chat, with a Dev badge); "app" tools only the view may call. Default: both.
-- Each call from the view (app.callServerTool) asks the user first (an
-  approval card). Expect a delay; show the result when it comes back.
+  dev_<name>__<tool> next turn (calling one renders its view, Dev badge);
+  "app" tools only the view may call. Default: both.
+- Each view call (app.callServerTool) asks the user first: expect a delay.
 - View CSP: no network unless granted (declared \`_meta.ui.csp\` domains
   intersected with the origins the user approved; for dev apps, none).
-  Inline scripts and styles work; no eval, no workers, no form submission
-  (form-action 'none': call preventDefault), no external scripts or fonts.
-  So inline everything into one HTML string.
+  Inline scripts and styles work; no eval, workers, form submission
+  (call preventDefault), external scripts or fonts: inline everything.
 - Support light and dark (\`color-scheme: light dark\`) and narrow widths.
 
 ## API cheat-sheet
@@ -80,33 +82,48 @@ package.json:
   "dependencies": { "@modelcontextprotocol/ext-apps": "2.0.3", "@modelcontextprotocol/server": "2.0.0", "zod": "^4.2.0", "esbuild": "^0.25.0" } }
 \`\`\`
 
-server.js:
+server.js (\`createMcpHandler\` builds a server per request: keep state
+outside the factory):
 \`\`\`js
 import { readFileSync } from 'node:fs';
-import { McpServer } from '@modelcontextprotocol/server';
-import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { createServer } from 'node:http';
+import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { z } from 'zod';
 
-const server = new McpServer({ name: 'notes', version: '0.1.0' });
 const uri = 'ui://notes/board.html';
 const notes = [];
 const board = () => ({ content: [{ type: 'text', text: \`\${notes.length} note(s)\` }], structuredContent: { notes } });
 
-registerAppTool(server, 'show_board', { title: 'Notes board', description: 'Show the notes board.',
-  inputSchema: z.object({}), _meta: { ui: { resourceUri: uri } } }, async () => board());
-registerAppTool(server, 'add_note', { description: 'Add a note (from the view).',
-  inputSchema: z.object({ text: z.string().min(1).max(200) }),
-  _meta: { ui: { resourceUri: uri, visibility: ['app'] } } },
-  async ({ text }) => { notes.push({ text }); return board(); });
-
-registerAppResource(server, 'Notes board', uri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
-  const js = readFileSync(new URL('./dist/view.js', import.meta.url), 'utf8').replaceAll('</script', '<\\\\/script');
-  return { contents: [{ uri, mimeType: RESOURCE_MIME_TYPE, text:
-    \`<!doctype html><html><body><h1>Notes</h1><ul id="list"></ul>
+const handler = createMcpHandler(() => {
+  const server = new McpServer({ name: 'notes', version: '0.1.0' });
+  registerAppTool(server, 'show_board', { title: 'Notes board', description: 'Show the notes board.',
+    inputSchema: z.object({}), _meta: { ui: { resourceUri: uri } } }, async () => board());
+  registerAppTool(server, 'add_note', { description: 'Add a note (from the view).',
+    inputSchema: z.object({ text: z.string().min(1).max(200) }),
+    _meta: { ui: { resourceUri: uri, visibility: ['app'] } } },
+    async ({ text }) => { notes.push({ text }); return board(); });
+  registerAppResource(server, 'Notes board', uri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
+    const js = readFileSync(new URL('./dist/view.js', import.meta.url), 'utf8').replaceAll('</script', '<\\\\/script');
+    return { contents: [{ uri, mimeType: RESOURCE_MIME_TYPE, text:
+      \`<!doctype html><html><body><h1>Notes</h1><ul id="list"></ul>
 <form id="f"><input id="t" required><button>Add</button></form><script>\${js}</script></body></html>\` }] };
+  });
+  return server;
 });
-await server.connect(new StdioServerTransport());
+
+createServer(async (req, res) => {
+  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+  if (url.pathname !== '/mcp') { res.writeHead(404).end(); return; }
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const headers = Object.entries(req.headers).flatMap(([k, v]) => v === undefined ? [] : [[k, String(v)]]);
+  const response = await handler.fetch(new Request(url, { method: req.method, headers,
+    ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) }));
+  res.writeHead(response.status, Object.fromEntries(response.headers));
+  if (response.body) for await (const chunk of response.body) res.write(chunk);
+  res.end();
+}).listen(Number(process.env.PORT ?? 3000), '127.0.0.1', () => console.error('listening'));
 \`\`\`
 
 view.js:
@@ -125,15 +142,15 @@ document.getElementById('f').addEventListener('submit', async e => {
 app.connect();
 \`\`\`
 
-Keep state in the server (until the next reload), not in the view.
+State lives in the server until the next reload, not in the view.
 
 ## The loop
 
 1. Scaffold the folder (above), run_command_online \`npm install\`,
    run_command \`npm run build\`.
 2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
-   It runs the contract check: fix every error (mcp_app_dev_check again).
-   If it fails to start, read mcp_app_dev_logs.
+   It waits for the port, then runs the contract check: fix every error
+   (mcp_app_dev_check again). If it fails to start, read mcp_app_dev_logs.
 3. mcp_app_dev_call tests any tool (also "app" ones) without the user.
 4. Call your dev_<name>__<tool> (next turn): the view renders in the chat;
    the user can open it in the side panel.

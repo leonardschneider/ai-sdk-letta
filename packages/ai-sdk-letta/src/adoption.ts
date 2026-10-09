@@ -14,6 +14,10 @@ import { checkProjectFolder, projectNote, sandboxTools, SandboxError, SANDBOX_LI
 import { decisionTools, DECISION_TOOL_PERMISSIONS } from './decisions.js';
 import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from './web-search.js';
 import { askUserTool, ASK_USER_TOOL } from './tools.js';
+import { webDevTools, WEBDEV_TOOL_PERMISSIONS, WEB_DEV_NOTE } from './webdev.js';
+import { mcpAppDevTools, MCP_APP_DEV_TOOL_PERMISSIONS } from './mcp-app-dev.js';
+import { MCP_APP_DEV_NOTE } from './mcp-app-guide.js';
+import { SANDBOX_IMAGE } from './sandbox.js';
 
 /**
  * Adopting existing local Letta agents in place: an agent made elsewhere
@@ -29,8 +33,14 @@ import { askUserTool, ASK_USER_TOOL } from './tools.js';
  * @module
  */
 
-/** Tool sets an adopted agent may get. */
-export const ADOPTED_TOOL_SETS = ['files', 'sandbox', 'decisions', 'web_search', 'ask_user'] as const;
+/**
+ * Tool sets an adopted agent may get, in their canonical order. `web_dev`
+ * (`webDevTools`: dev server, Preview pane, headless browser) needs
+ * `sandbox`; `mcp_app_dev` (`mcpAppDevTools`) needs `web_dev`. Both need a
+ * host sandbox with the built-in `docker` or `apple-container` provider
+ * (see {@link adoptedToolsRefusal}).
+ */
+export const ADOPTED_TOOL_SETS = ['files', 'sandbox', 'decisions', 'web_search', 'ask_user', 'web_dev', 'mcp_app_dev'] as const;
 export type AdoptedToolSet = typeof ADOPTED_TOOL_SETS[number];
 
 /** One adopted agent, as the app records it. */
@@ -241,6 +251,9 @@ export function adoptedInstructionsSection(tools: readonly string[], memoryPolic
     'You are also used through the ai-sdk-letta app (a browser app). There, only these tools are available: '
       + (tools.length ? tools.join(', ') : 'none besides memory') + '. Letta Code tools (shell, file editing outside memory, subagents) are not available in the app; do not call them there.',
     ...(project ? [projectNote(project)] : []),
+    // Web and MCP App development: the agent learns to call their guides first (its own system prompt never gets the app's notes otherwise).
+    ...(tools.includes('web_dev_guide') ? [WEB_DEV_NOTE] : []),
+    ...(tools.includes('mcp_app_guide') ? [MCP_APP_DEV_NOTE] : []),
     memoryPolicy, INSTRUCTIONS_END].join('\n');
 }
 
@@ -312,6 +325,26 @@ export function validCommandTimeout(value: unknown): value is number {
 /** What the host offers adopted agents: a sandbox (for `sandbox`), whether web search is set up (for `web_search`), and dreaming in the app (default off). */
 export type AdoptionEnvironment = { sandbox?: SandboxConfig; webSearch?: boolean; dreaming?: Partial<DreamingSettings> };
 
+/** Whether the host's sandbox can run web development (`web_dev`, `mcp_app_dev`): the built-in `docker` or `apple-container` provider. */
+export const webDevSandbox = (environment: AdoptionEnvironment = {}): boolean => environment.sandbox?.provider === 'docker' || environment.sandbox?.provider === 'apple-container';
+
+/**
+ * Why a choice of tool sets is refused (a fixed code), or `undefined`:
+ * `sandbox_unavailable` (`web_dev` or `mcp_app_dev` without a docker or
+ * apple-container sandbox on the host), `mcp_app_dev_needs_web_dev`,
+ * `web_dev_needs_sandbox`.
+ */
+export function adoptedToolsRefusal(sets: readonly AdoptedToolSet[], environment: AdoptionEnvironment = {}): string | undefined {
+  const has = new Set(sets);
+  if ((has.has('web_dev') || has.has('mcp_app_dev')) && !webDevSandbox(environment)) return 'sandbox_unavailable';
+  if (has.has('mcp_app_dev') && !has.has('web_dev')) return 'mcp_app_dev_needs_web_dev';
+  if (has.has('web_dev') && !has.has('sandbox')) return 'web_dev_needs_sandbox';
+  return undefined;
+}
+
+/** Tool sets in their canonical order ({@link ADOPTED_TOOL_SETS}), without duplicates. */
+export const orderedAdoptedTools = (sets: readonly AdoptedToolSet[]): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => sets.includes(set));
+
 /** Tool sets an adopted agent gets by default: files, decisions and `ask_user`, plus the sandbox and web search when the host has them. */
 export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): AdoptedToolSet[] {
   return ['files', ...(environment.sandbox ? ['sandbox' as const] : []), 'decisions', ...(environment.webSearch ? ['web_search' as const] : []), 'ask_user'];
@@ -323,19 +356,27 @@ export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): Adop
  * with its fail-closed permission), and the default memory protection.
  * Its system prompt is never applied (see {@link instructionsUpdate}).
  * With a project folder ({@link AdoptionRecord.project}) and the sandbox,
- * the folder is mounted at `/project`.
+ * the folder is mounted at `/project`. With `web_dev` the sandbox uses the
+ * web development image (unless the host names another than the default).
  */
 export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionEnvironment = {}): AgentDefinition {
   const sets = new Set(record.tools);
+  // Web development needs the shell tools and a CLI sandbox; MCP App development needs web development (a record that no longer fits the host just loses them).
+  const webDev = sets.has('web_dev') && sets.has('sandbox') && webDevSandbox(environment);
+  const appDev = webDev && sets.has('mcp_app_dev');
   // Its own project folder replaces the host's (if any); the sandbox checks it again and mounts its real path.
-  const sandbox = environment.sandbox ? { ...environment.sandbox, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
+  // With web development, the default image becomes the web development one (defineAgent picks WEBDEV_IMAGE when no image is named).
+  const base = environment.sandbox ? (webDev && environment.sandbox.image === SANDBOX_IMAGE ? (({ image: _default, ...rest }) => rest)(environment.sandbox) : environment.sandbox) : undefined;
+  const sandbox = base ? { ...base, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
   const tools: ToolSet = {
     ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
     ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
+    ...(webDev ? webDevTools : {}), ...(appDev ? mcpAppDevTools : {}),
   };
   const permissions: Record<string, ToolPermission> = {
     ...(sets.has('files') ? FILE_TOOL_PERMISSIONS : {}), ...(sets.has('sandbox') && environment.sandbox ? SANDBOX_TOOL_PERMISSIONS : {}),
     ...(sets.has('decisions') ? DECISION_TOOL_PERMISSIONS : {}), ...(sets.has('web_search') && environment.webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: 'allow' as const } : {}),
+    ...(webDev ? WEBDEV_TOOL_PERMISSIONS : {}), ...(appDev ? MCP_APP_DEV_TOOL_PERMISSIONS : {}),
   };
   return defineAgent({
     id: record.definitionId, name: record.name.slice(0, 120) || record.agentId, model: record.model.includes('/') ? record.model : 'unknown/unknown',
