@@ -102,3 +102,4 @@ export {
   mcpAppDevTools, MCP_APP_DEV_TOOL_NAMES, MCP_APP_DEV_TOOL_PERMISSIONS, MCP_APP_DEV_LIMITS, includesMcpAppDevTools, mcpAppDevEnabled, mcpAppDevToolTimeouts, formatDevStart, formatFindings, formatCallResult,
   type McpAppDevToolName,
 } from './mcp-app-dev.js';
+export { MCP_APP_GUIDE, MCP_APP_DEV_NOTE } from './mcp-app-guide.js';

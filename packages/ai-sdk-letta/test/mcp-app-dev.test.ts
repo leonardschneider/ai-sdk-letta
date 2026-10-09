@@ -200,3 +200,14 @@ test('definition: dev mode needs webDevTools and a built-in sandbox; enables app
   const withoutDev = defineAgent({ ...base, tools: { ...sandboxTools, ...webDevTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS, ...WEBDEV_TOOL_PERMISSIONS }, sandbox: { provider: 'docker' } });
   assert.equal(mcpAppDevEnabled(withoutDev, webDevEnabled(withoutDev)), false);
 });
+
+test('mcp_app_guide: bounded, attributed, the object form of callServerTool, and each dev tool points to it', async () => {
+  const { run, apps } = setup();
+  const guide = await run('mcp_app_guide', {});
+  assert.equal(guide.isError, undefined);
+  assert.ok(guide.text.length < 7000, `about 1.5k tokens (${guide.text.length} chars)`);
+  for (const needle of ['create-mcp-app', 'Apache-2.0', 'CC-BY-4.0', '@modelcontextprotocol/ext-apps@2.0.3', 'registerAppTool', 'registerAppResource', '_meta: { ui: { resourceUri', 'text/html;profile=mcp-app', 'new App(', 'app.connect()', "callServerTool({ name: 'add_note', arguments:", 'run_command_online', 'mcp_app_dev_reload']) assert.ok(guide.text.includes(needle), needle);
+  assert.equal(MCP_APP_DEV_TOOL_PERMISSIONS.mcp_app_guide, 'allow');
+  assert.match((mcpAppDevTools.mcp_app_dev_start as { description: string }).description, /mcp_app_guide/);
+  await apps.close();
+});

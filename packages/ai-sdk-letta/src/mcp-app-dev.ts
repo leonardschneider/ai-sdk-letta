@@ -4,6 +4,7 @@ import { SandboxError } from './sandbox.js';
 import { WEBDEV_CONTEXT, WEBDEV_LIMITS, WebDevServices } from './webdev.js';
 import { DEV_APP_NAME, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevStart, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
 import { lintMcpApp, type McpAppLintFinding } from './mcp-app-lint.js';
+import { MCP_APP_GUIDE } from './mcp-app-guide.js';
 
 /**
  * MCP Apps dev mode: the agent writes an MCP server (with views) in its
@@ -18,9 +19,9 @@ import { lintMcpApp, type McpAppLintFinding } from './mcp-app-lint.js';
  */
 
 /** A dev app tool name. */
-export type McpAppDevToolName = 'mcp_app_dev_start' | 'mcp_app_dev_reload' | 'mcp_app_dev_stop' | 'mcp_app_dev_status' | 'mcp_app_dev_logs' | 'mcp_app_dev_call' | 'mcp_app_dev_check';
+export type McpAppDevToolName = 'mcp_app_guide' | 'mcp_app_dev_start' | 'mcp_app_dev_reload' | 'mcp_app_dev_stop' | 'mcp_app_dev_status' | 'mcp_app_dev_logs' | 'mcp_app_dev_call' | 'mcp_app_dev_check';
 /** Every dev app tool. */
-export const MCP_APP_DEV_TOOL_NAMES: readonly McpAppDevToolName[] = ['mcp_app_dev_start', 'mcp_app_dev_reload', 'mcp_app_dev_stop', 'mcp_app_dev_status', 'mcp_app_dev_logs', 'mcp_app_dev_call', 'mcp_app_dev_check'];
+export const MCP_APP_DEV_TOOL_NAMES: readonly McpAppDevToolName[] = ['mcp_app_guide', 'mcp_app_dev_start', 'mcp_app_dev_reload', 'mcp_app_dev_stop', 'mcp_app_dev_status', 'mcp_app_dev_logs', 'mcp_app_dev_call', 'mcp_app_dev_check'];
 /** Most text a dev app tool returns. */
 export const MCP_APP_DEV_LIMITS = Object.freeze({ maxText: 14_000, maxStructured: 6_000, maxMeta: 2_000, maxFindings: 40 });
 
@@ -127,8 +128,14 @@ const nameOnly = jsonSchema<NameInput>({ type: 'object', properties: { name: nam
  * ```
  */
 export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
+  mcp_app_guide: tool({
+    description: 'The guide to building MCP Apps here (pinned SDK versions, how this host runs them, API cheat-sheet, a minimal working example, the dev loop). Read it once before you build or change an MCP App.',
+    inputSchema: jsonSchema<Record<string, never>>({ type: 'object', properties: {}, additionalProperties: false }),
+    execute: async () => ({ text: MCP_APP_GUIDE }),
+    toModelOutput: textModelOutput,
+  }),
   mcp_app_dev_start: tool({
-    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation: it runs over stdio (stdout is MCP; stderr goes to its log) in the services container, without network. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js --stdio"}. Build first (run_command); the command must not build or install anything.',
+    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation: it runs over stdio (stdout is MCP; stderr goes to its log) in the services container, without network. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js --stdio"}. Build first (run_command); the command must not build or install anything. Read mcp_app_guide first.',
     inputSchema: jsonSchema<StartInput>({ type: 'object', properties: {
       name: nameSchema,
       command: { type: 'string', minLength: 1, maxLength: WEBDEV_LIMITS.maxCommandChars, description: 'Shell command that runs the MCP server on stdio, in the foreground.' },
@@ -164,7 +171,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     toModelOutput: textModelOutput,
   }),
   mcp_app_dev_reload: tool({
-    description: 'Restart a dev app after you changed (and rebuilt) it: same folder and command. Returns what changed (tools added, removed or changed; views changed) and the contract check. Open views of it render again; tool-list changes reach you at your next turn.',
+    description: 'Restart a dev app after you changed (and rebuilt) it: same folder and command. Returns what changed (tools added, removed or changed; views changed) and the contract check. Open views of it render again; tool-list changes reach you at your next turn. See mcp_app_guide.',
     inputSchema: nameOnly,
     execute: async ({ name }, options) => {
       const ctx = contextOf(options.context);

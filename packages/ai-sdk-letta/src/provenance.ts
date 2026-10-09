@@ -137,7 +137,7 @@ export function sourceOfTool(name: string, internal: ReadonlySet<string> = TRUST
 /** The untrusted content an MCP App's tool call brings into a turn (its result is the app's content, whatever the trusted tools say). */
 export const appSource = (appId: string, tool?: string): ContentSource => ({ kind: 'app', label: `app:${appId}${tool ? ` (${tool})` : ''}` });
 /** Tools whose results carry nothing written by others: asking people, deciding, scheduling, listing files, staying silent, the web development guide and controls. */
-export const TRUSTED_TOOLS: ReadonlySet<string> = new Set(['ask_user', 'stay_silent', 'request_decision', 'cancel_decision', 'schedule_task', 'list_files', 'memory_provenance', 'Read', 'Write', 'Edit', 'Bash', 'web_dev_guide', 'dev_server_stop', 'allow_web_origin']);
+export const TRUSTED_TOOLS: ReadonlySet<string> = new Set(['ask_user', 'stay_silent', 'request_decision', 'cancel_decision', 'schedule_task', 'list_files', 'memory_provenance', 'Read', 'Write', 'Edit', 'Bash', 'web_dev_guide', 'mcp_app_guide', 'dev_server_stop', 'allow_web_origin']);
 
 /** The trailers of a provenance (empty values omitted). */
 export function provenanceTrailers(provenance: TurnProvenance): Record<string, string | undefined> {
