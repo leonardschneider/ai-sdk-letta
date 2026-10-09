@@ -92,10 +92,10 @@ export {
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';
 export {
-  McpApps, McpAppRecords, McpAppError, ProcessStdioTransport, agentInputSchema, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
+  McpApps, McpAppRecords, McpAppViewStates, McpAppError, MCP_APP_STATE_MOUNT, ProcessStdioTransport, agentInputSchema, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
   mcpAppConnector, isHttpTarget, runtimeTarget, containerLauncher, mcpAppRunArgs, prepareMcpApp, prepareMcpApps, MCP_APP_LIMITS, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, validHttpPort, MCP_APPS_CONTEXT, MCP_APP_PROXY_PORT, devAppId, isDevAppId, DEV_APP_NAME,
   type McpAppConfig, type ResolvedMcpAppConfig, type McpAppToolPolicy, type McpToolDefinition, type McpToolVisibility, type McpAppCspDomains, type McpCallResult, type McpAppClient, type McpAppConnector,
-  type McpAppRuntime, type McpAppRuntimeBase, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppViewAction, VIEW_ACTION_GRANT, type McpAppsOptions, type McpAppsContext, type McpAppDevSpec, type McpAppDevStart,
+  type McpAppRuntime, type McpAppRuntimeBase, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppViewState, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppViewAction, VIEW_ACTION_GRANT, type McpAppsOptions, type McpAppsContext, type McpAppDevSpec, type McpAppDevStart,
 } from './mcp-apps.js';
 export { lintMcpApp, MCP_APP_SCHEMA_VERSION, type McpAppLintFinding } from './mcp-app-lint.js';
 export { tunnelFetch, openHttpTunnel, PORT_WAIT_SCRIPT, RESERVED_HTTP_PORTS, MCP_APP_HTTP_LIMITS, type McpAppHttpEndpoint } from './mcp-app-http.js';

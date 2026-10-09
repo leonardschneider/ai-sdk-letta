@@ -1,7 +1,7 @@
 import { tool, jsonSchema, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import { SandboxError } from './sandbox.js';
-import { WEBDEV_CONTEXT, WEBDEV_LIMITS, WebDevServices } from './webdev.js';
+import { WEBDEV_CONTEXT, WEBDEV_LIMITS, WebDevServices, devAppStateDir } from './webdev.js';
 import { DEV_APP_NAME, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevStart, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
 import { lintMcpApp, type McpAppLintFinding } from './mcp-app-lint.js';
 import { MCP_APP_GUIDE } from './mcp-app-guide.js';
@@ -159,19 +159,20 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
           const http = { port: port ?? MCP_APP_HTTP_DEFAULTS.port, path: path ?? MCP_APP_HTTP_DEFAULTS.path };
           if (!MCP_APP_HTTP_PATH.test(http.path)) return { text: 'Error (command_invalid): path must be a URL path such as "/mcp".', isError: true };
           let folder = cwd;
+          let stateDir = devAppStateDir(name);
           const result = await apps.startDev({
             name, conversationId, folder: services.resolveFolder(cwd), command,
             // Every launch (re)starts the server and opens a new tunnel; reloads use the folder found first.
             launch: async signal => {
               const launched = await services.devAppHttpStart(name, { command, ...(folder !== undefined ? { cwd: folder } : {}), ...http }, signal);
               if (!launched.ok) throw new Error(launched.text);
-              folder = launched.folder;
+              folder = launched.folder; stateDir = launched.stateDir;
               return { http: launched.endpoint, stop: () => services.stopDevApp(name) };
             },
             touch: () => services.touch(),
           }, options.abortSignal);
           const findings = result.status === 'running' ? await lint(apps, result.app, options.abortSignal) : undefined;
-          return { text: `${formatDevStart(result, findings)}\nFolder: ${services.resolveFolder(folder)}\nCommand: ${command}\nTransport: Streamable HTTP at http://127.0.0.1:${http.port}${http.path} (in the services container)`, ...(result.status === 'running' ? {} : { isError: true }) };
+          return { text: `${formatDevStart(result, findings)}\nFolder: ${services.resolveFolder(folder)}\nCommand: ${command}\nTransport: Streamable HTTP at http://127.0.0.1:${http.port}${http.path} (in the services container)\nSTATE_DIR: ${stateDir} (kept across restarts: persist server state there)`, ...(result.status === 'running' ? {} : { isError: true }) };
         }
         if (port !== undefined || path !== undefined) return { text: 'Error (command_invalid): port and path are for transport "http".', isError: true };
         // The folder is checked once, now; reloads launch the same line again.
@@ -190,7 +191,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
           touch: () => services.touch(),
         }, options.abortSignal);
         const findings = result.status === 'running' ? await lint(apps, result.app, options.abortSignal) : undefined;
-        return { text: `${formatDevStart(result, findings)}\nFolder: ${first.folder}\nCommand: ${command}\nTransport: stdio`, ...(result.status === 'running' ? {} : { isError: true }) };
+        return { text: `${formatDevStart(result, findings)}\nFolder: ${first.folder}\nCommand: ${command}\nTransport: stdio\nSTATE_DIR: ${first.stateDir} (kept across restarts: persist server state there)`, ...(result.status === 'running' ? {} : { isError: true }) };
       } catch (error) { return failure(error); }
     },
     toModelOutput: textModelOutput,

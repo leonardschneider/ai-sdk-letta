@@ -101,6 +101,11 @@ export const MCP_APP_LIMITS = Object.freeze({
   maxRecordBytes: 512 * 1024,
   /** Calls recorded per agent (oldest forgotten first). */
   maxRecords: 1000,
+  /** Largest saved view state (`ui/state/save`, serialized JSON). */
+  maxViewStateBytes: 64 * 1024,
+  /** Saved view states kept per agent, and their total size (oldest forgotten first). */
+  maxViewStates: 500,
+  maxViewStateTotalBytes: 8 * 1024 * 1024,
   /** Most text of a result the model sees. */
   maxModelText: 14_000,
   /** Deadline of one tool call. */
@@ -477,7 +482,11 @@ export const runtimeTarget = (runtime: McpAppRuntime): CommandLine | McpAppHttpE
 /** Starts an app's environment. */
 export type McpAppLauncher = (app: PreparedMcpApp, signal?: AbortSignal) => Promise<McpAppRuntime>;
 /** An app ready to launch: its files on the host (unpacked), and its command. */
-export type PreparedMcpApp = { config: ResolvedMcpAppConfig; folder?: string; command: string[]; packageName?: string; packageVersion?: string };
+export type PreparedMcpApp = { config: ResolvedMcpAppConfig; folder?: string; command: string[]; packageName?: string; packageVersion?: string;
+  /** The app's persistent state folder on the host (`<state>/mcp-apps/<definition>/state/<app>`), mounted read-write at `/state` (`STATE_DIR`). Kept across restarts, upgrades and removal. */
+  stateDir?: string };
+/** Where an installed app's state folder is mounted in its container (its `STATE_DIR`). */
+export const MCP_APP_STATE_MOUNT = '/state';
 
 /** Port of the egress proxy inside an app's container. */
 export const MCP_APP_PROXY_PORT = 3128;
@@ -485,10 +494,10 @@ export const MCP_APP_PROXY_PORT = 3128;
 const MCP_APP_MARK = 'AI_SDK_LETTA_MCP_APP';
 
 /** The `docker run` / `container run` arguments of an app's container. */
-export function mcpAppRunArgs(kind: 'docker' | 'apple-container', name: string, options: { image: string; folder?: string; labels: Readonly<Record<string, string>>; uid?: { uid: number; gid: number }; memory?: string }): string[] {
+export function mcpAppRunArgs(kind: 'docker' | 'apple-container', name: string, options: { image: string; folder?: string; stateDir?: string; labels: Readonly<Record<string, string>>; uid?: { uid: number; gid: number }; memory?: string }): string[] {
   const user = options.uid ? ['--user', `${options.uid.uid}:${options.uid.gid}`] : [];
   const labels = Object.entries(options.labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
-  const mount = options.folder ? ['--mount', `type=bind,src=${options.folder},dst=/app,readonly`] : [];
+  const mount = [...(options.folder ? ['--mount', `type=bind,src=${options.folder},dst=/app,readonly`] : []), ...(options.stateDir ? ['--mount', `type=bind,src=${options.stateDir},dst=${MCP_APP_STATE_MOUNT}`] : [])];
   const keepAlive = ['sh', '-c', 'while :; do sleep 3600; done'];
   const memory = options.memory ?? '512M';
   if (kind === 'docker') return ['run', '-d', '--name', name, '--init', '--network', 'none', ...user, '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=128m', '--pids-limit', '256', '--memory', memory, '--cpus', '1', ...labels, ...mount, '-w', options.folder ? '/app' : '/tmp', options.image, ...keepAlive];
@@ -507,9 +516,9 @@ export function containerLauncher(config: Pick<ResolvedSandboxConfig, 'provider'
     const uid = typeof process.getuid === 'function' ? { uid: process.getuid(), gid: process.getgid!() } : undefined;
     const labels = { [SANDBOX_LABEL]: '1', [`${SANDBOX_LABEL}.pid`]: String(process.pid), [`${SANDBOX_LABEL}.host`]: hostname(), [`${SANDBOX_LABEL}.role`]: 'mcp-app', [`${SANDBOX_LABEL}.app`]: app.config.id };
     track(cli, name);
-    const started = await exec(cli.binary, mcpAppRunArgs(cli.kind, name, { image, ...(app.folder ? { folder: app.folder } : {}), labels, ...(uid ? { uid } : {}) }), 120_000);
+    const started = await exec(cli.binary, mcpAppRunArgs(cli.kind, name, { image, ...(app.folder ? { folder: app.folder } : {}), ...(app.stateDir ? { stateDir: app.stateDir } : {}), labels, ...(uid ? { uid } : {}) }), 120_000);
     if (started.code !== 0) { await remove(cli, name); throw new SandboxError('sandbox_unavailable', `The MCP App container could not start: ${started.stderr.trim().slice(-300)}`); }
-    const env = app.config.origins.length ? ['-e', `HTTPS_PROXY=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', `https_proxy=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', 'NODE_USE_ENV_PROXY=1'] : [];
+    const env = [...(app.config.origins.length ? ['-e', `HTTPS_PROXY=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', `https_proxy=http://127.0.0.1:${MCP_APP_PROXY_PORT}`, '-e', 'NODE_USE_ENV_PROXY=1'] : []), ...(app.stateDir ? ['-e', `STATE_DIR=${MCP_APP_STATE_MOUNT}`] : [])];
     const workdir = cli.kind === 'apple-container' && app.folder ? ['-w', '/app'] : [];
     const tunnel = app.config.origins.length ? { tunnel: { command: cli.binary, args: ['exec', '-i', name, 'node', '-e', TUNNEL_SCRIPT, 'listen', String(MCP_APP_PROXY_PORT)] } } : {};
     if (!app.config.http) {
@@ -655,6 +664,52 @@ export class McpAppRecords {
   }
 }
 
+/** The saved state of one view (`ui/state/save`, a host extension): per app and tool call. */
+export type McpAppViewState = { conversationId: string; toolCallId: string; app: string; resourceUri: string; state: unknown; bytes: number; at: string };
+/**
+ * Saved view states (`ui/state/save`), next to the records in their own
+ * private file (`view-state.json`, 0600, atomic writes). Never shown to
+ * the agent. Bounded per state ({@link MCP_APP_LIMITS}.maxViewStateBytes)
+ * and in total (the oldest forgotten first).
+ */
+export class McpAppViewStates {
+  private states: McpAppViewState[];
+  constructor(private readonly file: string) {
+    try { const saved = JSON.parse(readFileSync(file, 'utf8')) as { states?: unknown }; this.states = Array.isArray(saved.states) ? saved.states as McpAppViewState[] : []; } catch { this.states = []; }
+  }
+  /** Save the state of a recorded call's view. Throws `state_too_large` over the limit (nothing changes). */
+  save(record: Pick<McpAppRecord, 'conversationId' | 'toolCallId' | 'app' | 'resourceUri'>, state: unknown): { bytes: number } {
+    const json = JSON.stringify(state ?? null);
+    const bytes = Buffer.byteLength(json);
+    if (bytes > MCP_APP_LIMITS.maxViewStateBytes) throw new McpAppError('state_too_large', `The view state is ${bytes} bytes; the limit is ${MCP_APP_LIMITS.maxViewStateBytes}`);
+    const kept: McpAppViewState = { conversationId: record.conversationId, toolCallId: record.toolCallId, app: record.app, resourceUri: record.resourceUri, state: JSON.parse(json), bytes, at: new Date().toISOString() };
+    let next = [...this.states.filter(s => !(s.toolCallId === kept.toolCallId && s.conversationId === kept.conversationId)), kept].slice(-MCP_APP_LIMITS.maxViewStates);
+    let total = next.reduce((sum, s) => sum + s.bytes, 0);
+    while (total > MCP_APP_LIMITS.maxViewStateTotalBytes && next.length > 1) { total -= next[0]!.bytes; next = next.slice(1); }
+    this.states = next;
+    this.save_();
+    return { bytes };
+  }
+  /**
+   * The state a call's view starts with: its own, else (inherited) the
+   * latest saved by a view of the same app and resource in its conversation,
+   * so a board survives across calls.
+   */
+  restore(record: Pick<McpAppRecord, 'conversationId' | 'toolCallId' | 'app' | 'resourceUri'>): { state: unknown; inherited?: string } | undefined {
+    const own = this.states.find(s => s.toolCallId === record.toolCallId && s.conversationId === record.conversationId);
+    if (own) return { state: structuredClone(own.state) };
+    const latest = [...this.states].reverse().find(s => s.conversationId === record.conversationId && s.app === record.app && s.resourceUri === record.resourceUri);
+    return latest ? { state: structuredClone(latest.state), inherited: latest.toolCallId } : undefined;
+  }
+  get size(): number { return this.states.length; }
+  private save_() {
+    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify({ version: 1, states: this.states }), { mode: 0o600 });
+    renameSync(temp, this.file);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* The apps of an agent                                                */
 /* ------------------------------------------------------------------ */
@@ -690,7 +745,7 @@ const VIEW_ACTION_KEYS = new Set(Object.values(VIEW_ACTION_GRANT));
 /** A failure with a fixed code (refused calls, unavailable apps). */
 export class McpAppError extends Error {
   override readonly name = 'McpAppError';
-  constructor(readonly code: 'app_unknown' | 'app_unavailable' | 'app_disabled' | 'tool_unknown' | 'not_app_visible' | 'not_model_visible' | 'tool_denied' | 'resource_refused' | 'resource_invalid' | 'call_failed', message: string) { super(message); }
+  constructor(readonly code: 'app_unknown' | 'app_unavailable' | 'app_disabled' | 'tool_unknown' | 'not_app_visible' | 'not_model_visible' | 'tool_denied' | 'resource_refused' | 'resource_invalid' | 'call_failed' | 'state_too_large', message: string) { super(message); }
 }
 
 type Live = { prepared?: PreparedMcpApp; runtime?: McpAppRuntime; client?: McpAppClient; tunnel?: { mux: FrameMux; child: ChildProcess }; tools: McpToolDefinition[]; views: Map<string, McpAppView>; status: McpAppStatus['status']; error?: string; serverInfo?: McpAppClient['serverInfo']; dev?: DevApp };
@@ -759,6 +814,8 @@ export class McpApps {
   private starting?: Promise<void>;
   private closed = false;
   readonly records: McpAppRecords;
+  /** Saved view states (`ui/state/save`), never shown to the agent. */
+  readonly viewStates: McpAppViewStates;
   private readonly settingsFile: string;
   private disabled = new Set<string>();
   /** "Allow always" grants for calls from views: app → tools (`*`: every tool of the app that asks). */
@@ -769,6 +826,7 @@ export class McpApps {
   private readonly connector: McpAppConnector;
   constructor(readonly configs: readonly ResolvedMcpAppConfig[], private readonly options: McpAppsOptions) {
     this.records = new McpAppRecords(join(options.directory, 'records.json'));
+    this.viewStates = new McpAppViewStates(join(options.directory, 'view-state.json'));
     this.settingsFile = join(options.directory, 'settings.json');
     try {
       const saved = JSON.parse(readFileSync(this.settingsFile, 'utf8')) as { disabled?: unknown; grants?: unknown; devAsk?: unknown };
@@ -794,7 +852,7 @@ export class McpApps {
     const deadline = AbortSignal.timeout(MCP_APP_LIMITS.startTimeoutMs);
     const started = Date.now();
     try {
-      const prepared = live.prepared = await prepareMcpApp(config, join(this.options.directory, 'packages'));
+      const prepared = live.prepared = { ...await prepareMcpApp(config, join(this.options.directory, 'packages')), stateDir: this.stateDir(config.id) };
       const runtime = live.runtime = await this.launcher(prepared, deadline);
       if (this.closed) { await runtime.stop(); return; }
       if (runtime.tunnel) live.tunnel = this.egress(config, runtime.tunnel);
@@ -815,6 +873,17 @@ export class McpApps {
       await this.stopOne(live);
       live.status = 'failed';
     } finally { this.changed(); }
+  }
+  /**
+   * An installed app's persistent state folder on the host (created, private):
+   * `<directory>/state/<app>`, mounted at `/state` (`STATE_DIR`). Per agent
+   * and app; kept across restarts and upgrades, and when the app is removed
+   * from the definition (delete it to clear).
+   */
+  stateDir(appId: string): string {
+    const dir = join(this.options.directory, 'state', appId);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
   }
   private egress(config: ResolvedMcpAppConfig, line: CommandLine) {
     const child = spawn(line.command, line.args, { stdio: ['pipe', 'pipe', 'ignore'] });

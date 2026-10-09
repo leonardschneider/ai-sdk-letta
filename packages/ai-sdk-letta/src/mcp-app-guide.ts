@@ -21,8 +21,7 @@ export const MCP_APP_DEV_NOTE = 'MCP Apps: you can build MCP Apps (MCP servers w
 /** The guide, returned by `mcp_app_guide` (about 1.5k tokens). */
 export const MCP_APP_GUIDE = `# Building MCP Apps here
 
-Adapted from the official ext-apps skill "create-mcp-app" (v2.0.3,
-github.com/modelcontextprotocol/ext-apps; code Apache-2.0, docs CC-BY-4.0).
+Adapted from ext-apps skill "create-mcp-app" v2.0.3 (Apache-2.0/CC-BY-4.0).
 
 An MCP App is an MCP server whose tool declares a view: an HTML resource
 rendered in a sandboxed iframe when the tool is called.
@@ -30,50 +29,47 @@ rendered in a sandboxed iframe when the tool is called.
 ## Versions (pin them)
 
 @modelcontextprotocol/ext-apps@2.0.3, @modelcontextprotocol/server@2.0.0,
-zod@^4.2.0, esbuild@^0.25 (bundles the view). Not the old
-@modelcontextprotocol/sdk 1.x imports.
+zod@^4.2.0, esbuild@^0.25 (bundles the view). Not @modelcontextprotocol/sdk.
 
 ## How this host runs your app
 
 - mcp_app_dev_start runs your server in the services container (no
-  network; the command must not build or install). It serves **Streamable
-  HTTP** on 127.0.0.1:$PORT (PORT=3000, HOST=127.0.0.1 set; "port" to
-  change, not 5173/3128) at /mcp ("path" to change). Output:
-  mcp_app_dev_logs. Legacy stdio: "transport": "stdio".
-- Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`
-  (or \`mcp.http_app()\` under uvicorn); assumed at /mcp, else pass "path".
-- Install with run_command_online (the user approves) in the app folder:
-  \`npm install\`. Then build with run_command (no network).
+  network; no build or install). It serves **Streamable HTTP** on
+  127.0.0.1:$PORT (PORT=3000, HOST set; "port" to change, not 5173/3128)
+  at /mcp ("path"). Output: mcp_app_dev_logs. Or "transport":"stdio".
+- Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`.
+- Install with run_command_online (the user approves): \`npm install\`.
+  Then build with run_command (no network).
 - Tool visibility (\`_meta.ui.visibility\`): "model" tools become yours as
-  dev_<name>__<tool> next turn (calling one renders its view, Dev badge);
-  "app" tools only the view may call. Default: both.
-- A view call (app.callServerTool) may ask the user first: expect a delay.
+  dev_<name>__<tool> next turn (calling one renders its view); "app" tools
+  only the view may call. Default: both.
+- A view's app.callServerTool may ask the user first (a delay).
 - View CSP: no network unless granted (declared \`_meta.ui.csp\` domains
-  the user approved; for dev apps, none).
-  Inline scripts and styles work; no eval, workers, form submission
+  the user approved; dev apps: none). No eval, workers, form submission
   (preventDefault) or external scripts/fonts: inline everything.
-- Support light and dark (\`color-scheme: light dark\`) and narrow widths.
+- Support light/dark (\`color-scheme: light dark\`) and narrow widths.
+- Persist server state (games, documents) as files under $STATE_DIR and
+  reload them on start; memory is lost on restart or reload.
 
 ## API cheat-sheet
 
 Server (\`@modelcontextprotocol/ext-apps/server\`):
 - \`registerAppTool(server, name, { title, description, inputSchema: z.object({...}), _meta: { ui: { resourceUri, visibility? } } }, handler)\`
-  The URI is nested (\`_meta.ui.resourceUri\`, "ui://..."), not a flat key
-  (the helper adds the legacy one).
+  The URI is nested (\`_meta.ui.resourceUri\`, "ui://...").
 - \`registerAppResource(server, name, uri, { mimeType: RESOURCE_MIME_TYPE }, read)\`
   \`RESOURCE_MIME_TYPE\` is "text/html;profile=mcp-app"; \`read\` returns
   \`{ contents: [{ uri, mimeType: RESOURCE_MIME_TYPE, text: html }] }\`.
-- Return \`{ content: [{ type: 'text', text }], structuredContent }\`.
+- Return \`{ content: [{ type: 'text', text }], structuredContent }\`
 
 View (\`@modelcontextprotocol/ext-apps\`):
 - \`const app = new App({ name, version })\`; set handlers, then
   \`app.connect()\` (no argument: it talks to the host via postMessage).
 - \`app.ontoolresult = result => ...\`: the result of the call that opened
-  the view (\`app.ontoolinput\`: its arguments).
+  the view.
 - \`await app.callServerTool({ name: 'add_note', arguments: { text } })\`:
   object form, one argument; resolves to the tool result.
-- ui/message (app.sendMessage): short, human ("I played e2e4."); IDs and
-  state in structuredContent; the agent fetches state with tools.
+- ui/message (app.sendMessage): short, human ("I played e2e4."); the
+  agent fetches state with tools.
 
 ## Minimal example (notes/)
 
@@ -144,18 +140,27 @@ document.getElementById('f').addEventListener('submit', async e => {
 app.connect();
 \`\`\`
 
-State lives in the server until the next reload, not in the view.
+## Restoring the view
+
+The host keeps a view's state (never seen by the agent: use
+ui/update-model-context for that), also for later calls:
+\`\`\`js
+const K = 'io.ai-sdk-letta/viewState';
+await app.connect();
+const on = !!app.getHostCapabilities()?.experimental?.[K];
+let s = app.getHostContext()?.[K]?.state ?? { n: 0 };
+const save = () => on && app.request({ method: 'ui/state/save', params: { state: s } }, z.object({})); // ≤ 64 KB
+\`\`\`
 
 ## The loop
 
 1. Scaffold the folder (above), run_command_online \`npm install\`,
    run_command \`npm run build\`.
 2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
-   It waits for the port, then checks the contract: fix every error
-   (mcp_app_dev_check again). Failed to start: read mcp_app_dev_logs.
+   It checks the contract: fix every error (mcp_app_dev_check again).
+   Failed to start: read mcp_app_dev_logs.
 3. mcp_app_dev_call tests any tool (also "app" ones) without the user.
 4. Call your dev_<name>__<tool> (next turn): the view renders in the chat;
    the user can open it in the side panel.
-5. Change, rebuild, mcp_app_dev_reload: open views render again
-   ("updated"). Tool-list changes reach you next turn.
+5. Change, rebuild, mcp_app_dev_reload: open views render again.
 `;

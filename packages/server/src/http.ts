@@ -32,6 +32,8 @@ export function tokenApiApp(runtime: ThreadRuntime, token: string, owner: string
 
 /** JSON body limit for every route except `POST /v1/runs`. */
 export const BODY_LIMIT_BYTES = 24 * 1024;
+/** Largest `ui/state/save` request body (the state itself is limited to 64 KB serialized by the gate). */
+export const VIEW_STATE_BODY_LIMIT_BYTES = 160 * 1024;
 /**
  * JSON body limit for `POST /v1/runs` only: base64 of the largest allowed
  * image payload plus room for text and JSON. Still bounded; image limits are
@@ -111,9 +113,11 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   };
   const small = express.json({ limit: BODY_LIMIT_BYTES });
   const runs = express.json({ limit: RUN_BODY_LIMIT_BYTES });
+  // `ui/state/save`: a view's state up to 64 KB (checked by the gate), with room for the envelope and JSON escapes.
+  const viewState = express.json({ limit: VIEW_STATE_BODY_LIMIT_BYTES });
   // Raw bytes, only on the upload route, only as application/octet-stream, bounded by the per-file limit.
   const upload = express.raw({ limit: UPLOAD_BODY_LIMIT_BYTES, type: 'application/octet-stream' });
-  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && (req.path === '/v1/uploads' || req.path === '/v1/resources/upload') ? upload : small)(req, res, next));
+  app.use((req, res, next) => (req.method === 'POST' && req.path === '/v1/runs' ? runs : req.method === 'POST' && (req.path === '/v1/uploads' || req.path === '/v1/resources/upload') ? upload : req.method === 'POST' && /^\/v1\/apps\/instances\/[^/]+\/state$/.test(req.path) ? viewState : small)(req, res, next));
   app.get('/v1/capabilities', (_req, res) => res.json({ version: 1, stateful: true, tools: 'observed-only', interactions: ['approval', 'question'], history: true, replay: true, concurrency: runtime.parallel ? Runtime.MAX_PARALLEL_TURNS : 1, queue: runtime.queueing, edits: false, rewind: true,
     ...(runtime.replyMode !== undefined ? { replyModes: { agent: runtime.replyMode, batching: true } } : {}),
     images: { mediaTypes: [...IMAGE_MEDIA_TYPES], maxImageBytes: IMAGE_LIMITS.maxImageBytes, maxImages: IMAGE_LIMITS.maxImages, maxTotalBytes: IMAGE_LIMITS.maxTotalBytes },
@@ -270,7 +274,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     const approval = await gate().approval(owner, req.params.approval, req.query.wait === '1', control.signal);
     if (!res.writableEnded && !res.destroyed) res.json(approval);
   });
-  /** What a view asked for, relayed by the app page: `tools/call`, `resources/read`, `ui/message`, `ui/update-model-context`, log messages; and its teardown. */
+  /** What a view asked for, relayed by the app page: `tools/call`, `resources/read`, `ui/message`, `ui/update-model-context`, `ui/state/save` (host extension), log messages; and its teardown. */
   app.post('/v1/apps/instances/:instance/:action', async (req, res) => {
     const g = gate(); const id = req.params.instance;
     switch (req.params.action) {
@@ -278,6 +282,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
       case 'read': return res.json(await g.read(owner, id, req.body));
       case 'message': return res.json(await g.message(owner, id, req.body, author(req)));
       case 'context': return res.json(g.context(owner, id, req.body, author(req)));
+      case 'state': return res.json(g.saveState(owner, id, req.body, author(req)));
       case 'log': g.log(owner, id, req.body, author(req)); return res.json({ ok: true });
       case 'close': g.closeInstance(owner, id); return res.json({ ok: true });
       default: throw new RuntimeFault('not_found', 404);

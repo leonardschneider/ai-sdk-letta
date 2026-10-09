@@ -29,6 +29,24 @@ export type AppInstance = {
   status: 'running' | 'done' | 'cancelled';
   result?: { content?: unknown[]; structuredContent?: Record<string, unknown>; isError?: boolean; [key: string]: unknown };
   reason?: string; at: string; truncated?: boolean; changed?: boolean;
+  /** The view's saved state (`ui/state/save`): its own, or inherited from the latest call of the same app and view (`viewStateFrom`). */
+  viewState?: unknown; viewStateFrom?: string;
+};
+/**
+ * The host extension for view state: views feature-detect it in the host
+ * capabilities (`experimental`), read their saved state from the host context
+ * under this key (`{ state }`), and save it with the `ui/state/save` request.
+ */
+export const VIEW_STATE_EXTENSION = 'io.ai-sdk-letta/viewState';
+export const VIEW_STATE_SAVE = 'ui/state/save';
+/** The host context entry with a view's saved state (none when nothing was saved). */
+export const viewStateContext = (instance: Pick<AppInstance, 'viewState'>) => 'viewState' in instance && instance.viewState !== undefined ? { [VIEW_STATE_EXTENSION]: { state: instance.viewState } } : {};
+/** `ui/state/save` params: `{ state }` with any JSON value (checked again, and limited, by the server). Standard Schema, so the bridge validates it without a schema library. */
+export const viewStateParams = {
+  '~standard': {
+    version: 1 as const, vendor: 'ai-sdk-letta', types: undefined as unknown as { input: unknown; output: { state: unknown } },
+    validate: (value: unknown) => value && typeof value === 'object' && 'state' in value ? { value: value as { state: unknown } } : { issues: [{ message: 'ui/state/save needs { state }' }] },
+  },
 };
 /** The instance route's answer when the call is not recorded (yet). */
 export type NoInstance = { status: 'none' };

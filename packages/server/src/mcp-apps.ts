@@ -21,7 +21,9 @@ import { RuntimeFault, type RunAuthor, type RunApp, type ThreadRuntime } from '.
  *   deny), `resources/read` (`ui://` of the same app), `ui/message` (asks,
  *   then becomes a queued user message), `ui/update-model-context` (asks on
  *   first use per view, then the latest value is given to the agent at the
- *   next turn) and log messages. Every decision is audited with who acted
+ *   next turn), log messages, and `ui/state/save` (a host extension: the
+ *   view's own state, kept per call and given back on `ui/initialize`;
+ *   never shown to the agent, so never asked). Every decision is audited with who acted
  *   (the person viewing), `via app:<id>`, and the originating tool call.
  * - **Out-of-turn approvals.** App actions happen outside a turn: an "ask"
  *   creates an approval the app shows as a card; the person allows or denies
@@ -45,9 +47,14 @@ export const APP_GATE_LIMITS = Object.freeze({
   /** Longest message (`ui/message`) and context (`ui/update-model-context`) text. */
   maxMessageChars: 4000,
   maxContextChars: 1500,
+  /** `ui/state/save`: saves per view instance within one second (more are refused). */
+  stateSavesPerSecond: 10,
   /** Long poll of an approval. */
   waitMs: 25_000,
 });
+
+/** The host extension a view uses to save its state (`ui/state/save`); its capability key and host context key. */
+export const VIEW_STATE_EXTENSION = 'io.ai-sdk-letta/viewState';
 
 /** The origin of a view instance. */
 export const sandboxOrigin = (token: string, port: number) => `http://s-${token}.localhost:${port}`;
@@ -97,7 +104,9 @@ export function sandboxProxyHtml(hostOrigin: string): string {
 }
 
 /** One rendered view: an iframe of the app page, bound to a thread, an app and the tool call it shows. */
-export type AppInstance = { id: string; token: string; owner: string; threadId: string; conversationId: string; toolCallId: string; app: string; resourceUri: string; csp: string; createdAt: number; served: boolean; closed?: boolean; placement: 'inline' | 'panel' | 'fullscreen' };
+export type AppInstance = { id: string; token: string; owner: string; threadId: string; conversationId: string; toolCallId: string; app: string; resourceUri: string; csp: string; createdAt: number; served: boolean; closed?: boolean; placement: 'inline' | 'panel' | 'fullscreen';
+  /** `ui/state/save` times in the last second (rate limit). */
+  saves?: number[] };
 /** What an approval is for. */
 export type AppApprovalKind = 'call' | 'message' | 'context';
 /** An app action waiting for (or given) a person's decision. */
@@ -196,6 +205,7 @@ export class AppGate {
     this.prune();
     const definition = this.apps.toolDefinition(record.app, record.tool);
     this.audit({ event: 'view', app: record.app, threadId, toolCallId, detail: `${record.resourceUri} · ${where} · ${view.fingerprint.slice(0, 12)}${record.fingerprint && record.fingerprint !== view.fingerprint ? ' (changed since the call)' : ''}` });
+    const saved = this.apps.viewStates.restore(record);
     return {
       instance: id, sandboxUrl: `${sandboxOrigin(token, this.options.sandboxPort())}/`, sandboxOrigin: sandboxOrigin(token, this.options.sandboxPort()),
       html: view.html, csp: granted, ...(typeof view.meta.prefersBorder === 'boolean' ? { prefersBorder: view.meta.prefersBorder } : {}),
@@ -203,6 +213,8 @@ export class AppGate {
       tool: { name: record.tool, ...(definition?.title ? { title: definition.title } : {}), ...(definition?.description ? { description: String(definition.description).slice(0, 500) } : {}), inputSchema: definition?.inputSchema ?? { type: 'object' } },
       input: record.input, status: record.status, ...(record.result ? { result: record.result } : {}), ...(record.reason ? { reason: record.reason } : {}), at: record.at, ...(record.truncated ? { truncated: true } : {}),
       ...(record.fingerprint && record.fingerprint !== view.fingerprint ? { changed: true } : {}),
+      // The view's saved state (its own, else the latest of the same app and view in the conversation), for `ui/initialize`.
+      ...(saved ? { viewState: saved.state, ...(saved.inherited ? { viewStateFrom: saved.inherited } : {}) } : {}),
     };
   }
   /** Drop instances beyond the limit (oldest first) and expired unserved ones. */
@@ -352,6 +364,31 @@ export class AppGate {
     const approval = this.ask(instance, 'context', { text });
     this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_context', outcome: 'asked', detail: approval.id }, author);
     return { pending: approval.id };
+  }
+  /**
+   * `ui/state/save` (host extension {@link VIEW_STATE_EXTENSION}): keep the
+   * view's state (any JSON value) for its call, given back on
+   * `ui/initialize`. Always allowed, never asked: it never reaches the agent
+   * (untrusted data, like the view). Refused over 64 KB and over
+   * {@link APP_GATE_LIMITS}.stateSavesPerSecond per instance. Audited
+   * (`state_saved`, the size only).
+   */
+  saveState(owner: string, instanceId: string, input: unknown, author?: RunAuthor): { result: Record<string, never> } | { error: { code: number; message: string } } {
+    const instance = this.live(owner, instanceId);
+    const params = (input ?? {}) as { state?: unknown };
+    if (!input || typeof input !== 'object' || !('state' in params)) return { error: { code: -32602, message: 'ui/state/save needs { state }' } };
+    const now = Date.now();
+    instance.saves = (instance.saves ?? []).filter(t => now - t < 1000);
+    if (instance.saves.length >= APP_GATE_LIMITS.stateSavesPerSecond) return { error: { code: -32000, message: `Too many state saves (at most ${APP_GATE_LIMITS.stateSavesPerSecond} per second)` } };
+    instance.saves.push(now);
+    try {
+      const { bytes } = this.apps.viewStates.save(instance, params.state);
+      this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'state_saved', detail: `${bytes} bytes` }, author);
+      return { result: {} };
+    } catch (error) {
+      if (error instanceof McpAppError) { this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'state_saved', outcome: `refused:${error.code}` }, author); return { error: { code: -32602, message: error.message } }; }
+      throw error;
+    }
   }
   /** Log messages of a view (`notifications/message`): audited (bounded), never shown to the agent. */
   log(owner: string, instanceId: string, input: unknown, author?: RunAuthor) {
