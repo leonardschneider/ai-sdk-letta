@@ -72,7 +72,9 @@ export async function uploadResource(folder: string, file: File): Promise<{ path
 /** A person as the team server shows them. */
 export type Person = { id?: string; login: string; name: string; avatar?: string };
 /** An agent as the browser knows it (team servers add the viewer's role). */
-export type AgentInfo = { id: string; name: string; approvalTools: string[]; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
+export type AgentInfo = { id: string; name: string; approvalTools: string[];
+  /** The agent's Letta model handle (the agent menu shows it). */
+  model?: string; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
   /** The agent has resources (a Resources panel) without accepting attachments. */
   resources?: boolean;
   /** Integrations whose accounts each person connects (`'atlassian'`). */

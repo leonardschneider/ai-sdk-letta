@@ -4,7 +4,7 @@ import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, Mes
 import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
-import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
+import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -123,6 +123,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [instructionsOf, setInstructionsOf] = useState<AgentInfo>();
   const [projectOf, setProjectOf] = useState<AgentInfo>();
   const [toolsOf, setToolsOf] = useState<AgentInfo>();
+  const [modelOf, setModelOf] = useState<AgentInfo>();
   const isAdmin = agent.role === 'admin';
   const [queue, setQueue] = useState<QueuedTurn[]>([]);
   const [liveAuthor, setLiveAuthor] = useState<Author>();
@@ -862,7 +863,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} {...(viewOnly ? { newHidden: true } : {})} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onModel={setModelOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
@@ -976,6 +977,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {removing && local && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(undefined)} onRemoved={() => { setRemoving(undefined); local.reload(); }}/>}
         {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
         {toolsOf && local && <ToolsDialog agent={toolsOf} onClose={() => setToolsOf(undefined)} onSaved={() => { setToolsOf(undefined); local.reload(toolsOf.id); }}/>}
+        {modelOf && local && <ModelDialog agent={modelOf} onClose={() => setModelOf(undefined)} onSaved={() => { setModelOf(undefined); local.reload(modelOf.id); }}/>}
         {projectOf && local && <ProjectDialog agent={projectOf} onClose={() => setProjectOf(undefined)} onSaved={() => { setProjectOf(undefined); local.reload(projectOf.id); }}/>}
         {memoryOpen && <MemoryDialog agentName={agent.name} admin={!viewOnly && (!team || isAdmin)} viewOnly={viewOnly} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
         {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)}/>}
