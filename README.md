@@ -1129,7 +1129,10 @@ MCP_APPS=./clock-1.0.0.tgz npm run gui        # the example agent; `id=path args
   state folder (entries outside `package/` and links out of it are refused)
   and must be self-contained: nothing is installed. The server is reached
   over the stdio of `docker exec -i` / `container exec -i` with
-  `@ai-sdk/mcp`, advertising the `io.modelcontextprotocol/ui` extension.
+  `@ai-sdk/mcp`, advertising the `io.modelcontextprotocol/ui` extension;
+  with `transport: "http"` (optional `port` and `endpoint`), it is a
+  Streamable HTTP server reached through a byte tunnel over the same `exec`
+  (no published port, still no network).
   Apps start with the server (about 2 s each) and stop with it; the `exec`
   process is killed explicitly and the container removed. An app that fails
   to start is reported in **Apps**; the others work.
@@ -1216,13 +1219,20 @@ MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
 - **The loop.** The agent scaffolds the app, installs its packages with
   `run_command_online` (you approve it; the services container has no
   network and nothing is vendored), builds it with `run_command`, then
-  `mcp_app_dev_start` runs it **over stdio in the services container** as
-  the dev app `dev_<name>` of this conversation, and checks it against the
+  `mcp_app_dev_start` runs it **in the services container** as the dev app
+  `dev_<name>` of this conversation, and checks it against the
   MCP Apps contract (`mcp_app_dev_check`: tool `_meta.ui`, resources and
   their MIME type, CSP metadata, how views call tools). `mcp_app_dev_call`
   calls any tool, also app-only ones; `mcp_app_dev_logs` shows its stderr;
   `mcp_app_dev_reload` restarts it and reports what changed;
   `mcp_app_dev_stop` stops it.
+- **Transport.** Dev apps are **Streamable HTTP** servers by default
+  (`transport: "http"`, port 3000, path `/mcp`; `PORT` and
+  `HOST=127.0.0.1` are set): the command runs detached, its output goes to
+  the dev app log, and the host connects through a byte tunnel once the
+  port accepts connections, so no port is published and the container keeps
+  no network. Ports 5173 and 3128, and a port another dev app uses, are
+  refused. `transport: "stdio"` runs a stdio server instead.
 - **Its tools.** From the next turn, the dev app's model-visible tools are
   the agent's, as `dev_<name>__<tool>` (the session reopens when they
   change). Calling one renders its view in the tool line with a **Dev**
@@ -1479,7 +1489,26 @@ Letta agents with their model, last activity and number of conversations
 (Letta Code's own subagents, reflection agents and the app's temporary
 agents are never listed). Pick one and the tools it gets here (files,
 decisions and questions by default; the sandbox and web search when the
-server has them), then **Add**. The same menu switches between agents.
+server has them), then **Add**. The same menu switches between agents, and
+**Tools…** changes an added agent's tools later (its runtime restarts; open
+conversations get them on their next message).
+
+- **Web and MCP App development.** With a `docker` or `apple-container`
+  sandbox on the server, two more tool sets are offered (never by
+  default): **Web development** (`web_dev`: `webDevTools`, the Preview
+  pane and the headless browser; it needs **Shell commands**) and **MCP
+  App development** (`mcp_app_dev`: `mcpAppDevTools`; it needs web
+  development, and checking it checks both). The agent's sandbox then uses
+  `WEBDEV_IMAGE`, unless the server's sandbox names another image. Each
+  adopted agent gets its own web development services and dev apps; their
+  previews and app views share the server's one preview listener (started
+  whenever such a sandbox is configured, so tools turned on later work
+  without a restart). Removing the agent or changing its tools stops them.
+  Run **Update instructions…** afterwards: the section tells the agent to
+  call `web_dev_guide` / `mcp_app_guide` first. From code: `PUT
+  /api/adoption/agents/<id>/tools` with `{ "tools": ["files", "sandbox",
+  "web_dev", "mcp_app_dev"] }` (refusals: `sandbox_unavailable`,
+  `web_dev_needs_sandbox`, `mcp_app_dev_needs_web_dev`).
 
 - **Conversations.** All its conversations show in the sidebar, including
   `default`, titled by their summary or first message; new ones made in
@@ -2169,7 +2198,8 @@ Letta never got is not resent.
   `mcpApps` (each view needs its own `*.localhost` origin, which `tailscale
   serve` cannot publish), and the TUI shows app tools as plain tool lines.
   Local packages and folders only; a package must be self-contained (bundled
-  or with its `node_modules`), and servers run over stdio. Policies and
+  or with its `node_modules`), and servers run over stdio or Streamable
+  HTTP (`transport: "http"`). Policies and
   origins come from the definition (the Apps list shows them and can
   disable an app). A view's own storage (cookies, `localStorage`) lives on a
   fresh origin per view, so it does not persist. Not yet: sampling
