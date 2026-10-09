@@ -382,7 +382,7 @@ export interface GuiAgentInfo {
   /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model, tool sets, project folder (as given), and whether the server has a sandbox. */
-  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number };
+  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
   /** The agent has MCP Apps (`mcpApps`): tool lines of app tools render their views. */

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { ListMessagesResult } from '@letta-ai/letta-agent-sdk';
 import {
   acquireIdentity, forgetIdentity, claimsOf, defineAgent, AdoptionStore, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity,
-  adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate, projectHistory, adoptedDefinition, checkAdoptedProject, withProjectDescriptions, sandboxTools, SandboxError, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
+  adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate, projectHistory, adoptedDefinition, checkAdoptedProject, withProjectDescriptions, sandboxTools, SandboxError, adoptedToolsRefusal, defaultAdoptedTools, webDevEnabled, mcpAppDevEnabled, WEBDEV_IMAGE, SANDBOX_IMAGE, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
   type JiminyVerdict, type MemoryReviewer,
 } from '../src/index.js';
 
@@ -148,6 +148,34 @@ test('an adopted agent\'s project folder is persisted and merged into its sandbo
   const section = adoptedInstructionsSection(['run_command'], 'Memory policy.', 'blog');
   assert.match(section, /"blog" is at \/project/);
   assert.equal(adoptedInstructionsSection(['run_command'], 'Memory policy.').includes('/project'), false);
+});
+
+test('web_dev and mcp_app_dev: off by default, need a docker or apple-container sandbox and their dependencies, and switch the image to the web development one', () => {
+  const docker = { sandbox: { provider: 'docker' as const, git: { name: 'A', email: 'a@example.com' } } };
+  const custom = { sandbox: { provider: (() => { throw new Error('unused'); }) as never, git: { name: 'A', email: 'a@example.com' } } };
+  assert.deepEqual(defaultAdoptedTools(docker), ['files', 'sandbox', 'decisions', 'ask_user']);
+  assert.equal(adoptedToolsRefusal(['sandbox', 'web_dev'], {}), 'sandbox_unavailable');
+  assert.equal(adoptedToolsRefusal(['sandbox', 'web_dev'], custom), 'sandbox_unavailable', 'a custom sandbox factory has no services container');
+  assert.equal(adoptedToolsRefusal(['sandbox', 'mcp_app_dev'], docker), 'mcp_app_dev_needs_web_dev');
+  assert.equal(adoptedToolsRefusal(['web_dev'], docker), 'web_dev_needs_sandbox');
+  assert.equal(adoptedToolsRefusal(['sandbox', 'web_dev', 'mcp_app_dev'], docker), undefined);
+  assert.equal(adoptedToolsRefusal(['files', 'sandbox'], {}), undefined);
+  const record = { definitionId: 'chess-1', agentId: AGENT, name: 'chess', model: 'm/x', tools: ['files' as const, 'sandbox' as const, 'web_dev' as const, 'mcp_app_dev' as const], adoptedAt: new Date().toISOString() };
+  const both = adoptedDefinition(record, docker);
+  assert.equal(both.sandbox?.image, WEBDEV_IMAGE);
+  assert.ok(webDevEnabled(both)); assert.ok(mcpAppDevEnabled(both, true));
+  assert.equal(both.permissions.allow_web_origin, 'ask'); assert.equal(both.permissions.dev_server_start, 'allow'); assert.equal(both.permissions.mcp_app_dev_start, 'allow');
+  const web = adoptedDefinition({ ...record, tools: ['sandbox', 'web_dev'] }, docker);
+  assert.ok(webDevEnabled(web)); assert.equal(mcpAppDevEnabled(web, true), false); assert.equal('mcp_app_guide' in web.tools, false);
+  const plain = adoptedDefinition({ ...record, tools: ['sandbox'] }, docker);
+  assert.equal(plain.sandbox?.image, SANDBOX_IMAGE); assert.equal('dev_server_start' in plain.tools, false);
+  assert.equal(adoptedDefinition(record, { sandbox: { ...docker.sandbox, image: 'mine:1' } }).sandbox?.image, 'mine:1', 'an image the host names stays');
+  assert.equal('dev_server_start' in adoptedDefinition(record, {}).tools, false, 'no sandbox on the host: no web development');
+  assert.equal('dev_server_start' in adoptedDefinition({ ...record, tools: ['web_dev', 'mcp_app_dev'] }, docker).tools, false, 'without the sandbox set: none');
+  // The instructions section points at the guides.
+  const section = adoptedInstructionsSection(Object.keys(both.tools), 'Memory policy.');
+  assert.match(section, /Call web_dev_guide once/); assert.match(section, /Call mcp_app_guide once/);
+  assert.equal(adoptedInstructionsSection(Object.keys(plain.tools), 'Memory policy.').includes('web_dev_guide once'), false);
 });
 
 /* ---------------- Letta Code activity ---------------- */
