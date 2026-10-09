@@ -209,7 +209,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [appOverlay, setAppOverlay] = useState<AppsState['overlay']>();
   const appTabs = appsEnabled ? appsOf(side, current.draft ? undefined : current.id) : [];
   const [appsVersion, setAppsVersion] = useState(0);
-  const viewTools = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
+  const { viewTools, generations: devGenerations } = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
   const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
   useEffect(() => { setAppOverlay(undefined); }, [current.id]);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
@@ -828,7 +828,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Team mode: someone else's approval or question is shown, but only they (or an admin) can answer it.
   const waitingFor = team && !mayAct ? liveAuthor?.name ?? 'the person who sent it' : undefined;
   const appsState: AppsState = {
-    enabled: appsEnabled, ...(current.draft ? {} : { threadId: current.id }), viewTools, panel: appTabs.map(t => t.id), ...(appOverlay ? { overlay: appOverlay } : {}),
+    enabled: appsEnabled, ...(current.draft ? {} : { threadId: current.id }), viewTools, generations: devGenerations, panel: appTabs.map(t => t.id), ...(appOverlay ? { overlay: appOverlay } : {}),
     openPanel: (id, tool) => { if (current.draft) return; const thread = current.id; setAppOverlay(undefined); updateSide(s => openApp(s, thread, { id, tool })); },
     closePanel: id => { if (!current.draft) { const thread = current.id; updateSide(s => closeApp(s, thread, id)); } },
     setOverlay: value => { if (value && !current.draft && hasApp(side, current.id, value.toolCallId)) { const thread = current.id; updateSide(s => closeApp(s, thread, value.toolCallId)); } setAppOverlay(value); },
@@ -952,7 +952,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
           </div>}
           {/* Like Preview, an app view runs only while its tab shows (switching back starts it again, as reopening the former panel did). */}
           {sideOpen && sideTab && appTabId(sideTab) && <div key={sideTab} className="side-tabpanel" role="tabpanel" id={tabPanelId(sideTab)} aria-labelledby={tabId(sideTab)}>
-            <AppPanel toolCallId={appTabId(sideTab)!} onClose={() => appsState.closePanel(appTabId(sideTab)!)}/>
+            <AppPanel toolCallId={appTabId(sideTab)!} {...(appTabs.find(t => t.id === appTabId(sideTab))?.tool ? { toolName: appTabs.find(t => t.id === appTabId(sideTab))!.tool } : {})} onClose={() => appsState.closePanel(appTabId(sideTab)!)}/>
           </div>}
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}

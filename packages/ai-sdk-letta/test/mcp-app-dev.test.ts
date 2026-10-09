@@ -124,6 +124,7 @@ test('dev tools: reload reports changes; status; stop removes the tools', async 
   const reloaded = await run('mcp_app_dev_reload', { name: 'clock' });
   assert.equal(reloaded.isError, undefined, reloaded.text);
   assert.match(reloaded.text, /generation 2/);
+  assert.deepEqual(apps.devGenerations(), { dev_clock: 2 }, 'the browser remounts open views on this');
   assert.match(reloaded.text, /added set_alarm; removed refresh; changed show_time; views changed ui:\/\/clock\/view\.html/);
   assert.match(reloaded.text, /reach you at your next turn/);
   assert.deepEqual([...apps.agentTools('conv-a').names.keys()].sort(), ['dev_clock__set_alarm', 'dev_clock__show_time']);
@@ -136,6 +137,7 @@ test('dev tools: reload reports changes; status; stop removes the tools', async 
   assert.ok(execs.slice(before).some(argv => argv.join(' ').includes('AI_SDK_LETTA_DEV_APP=clock') && argv.join(' ').includes('kill')), 'its processes are killed in the container');
   assert.deepEqual([...apps.agentTools('conv-a').names.keys()], []);
   assert.match((await run('mcp_app_dev_status', {})).text, /No dev apps/);
+  assert.deepEqual(apps.devGenerations(), {});
   assert.equal((await run('mcp_app_dev_reload', { name: 'clock' })).isError, true);
   await apps.close();
 });

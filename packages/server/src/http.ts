@@ -226,7 +226,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   // Views never call these themselves: the app page relays what a view asks for, bound to its instance.
   const gate = () => { if (!runtime.apps) throw new RuntimeFault('not_found', 404); return runtime.apps; };
   /** The agent's apps (admins: their tools, policies, declared and granted CSP domains). */
-  app.get('/v1/apps', (req, res) => { const status = gate().apps.status(); res.json({ apps: access && !access.mayAct(req, {}) ? status.map(({ id, name, status: state, enabled }) => ({ id, name, status: state, enabled })) : status, viewTools: gate().apps.viewTools() }); });
+  app.get('/v1/apps', (req, res) => { const status = gate().apps.status(); res.json({ apps: access && !access.mayAct(req, {}) ? status.map(({ id, name, status: state, enabled }) => ({ id, name, status: state, enabled })) : status, viewTools: gate().apps.viewTools(), devGenerations: gate().apps.devGenerations() }); });
   /** Enable or disable an app: `{ enabled }` (admins). */
   app.patch('/v1/apps/:app', (req, res) => {
     if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);

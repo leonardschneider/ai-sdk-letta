@@ -3,6 +3,19 @@
 /** An app tool of the agent whose calls show a view (`GET /v1/apps` → `viewTools`). */
 /** `dev`: a dev app of this conversation (MCP Apps dev mode). */
 export type ViewTool = { app: string; appName: string; tool: string; title?: string; dev?: true };
+/** `GET /v1/apps` → `devGenerations`: each running dev app's generation (it grows with every `mcp_app_dev_reload`). */
+export type DevGenerations = Readonly<Record<string, number>>;
+/**
+ * The key of a view of `toolName`: its dev app's generation, so a reload
+ * remounts open views (they render again, with the "updated" note). `0` for
+ * an installed app, or a tool without a view.
+ */
+export function viewGeneration(viewTools: Readonly<Record<string, ViewTool>>, generations: DevGenerations, toolName: string | undefined): number {
+  const view = toolName ? viewTools[toolName] : undefined;
+  return view?.dev ? generations[view.app] ?? 0 : 0;
+}
+/** All dev generations as one key (an overlay does not know its tool: any dev reload remounts it). */
+export const devGenerationsKey = (generations: DevGenerations): string => Object.keys(generations).sort().map(id => `${id}:${generations[id]}`).join(',');
 /** `POST /v1/threads/:id/apps/instances`: one view instance. */
 export type AppInstance = {
   instance: string; sandboxUrl: string; sandboxOrigin: string; html: string;
