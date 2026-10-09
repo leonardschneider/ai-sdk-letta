@@ -16,7 +16,7 @@
  */
 
 /** Added to the instructions of agents with the dev app tools (the example app adds it with MCP_APP_DEV=1). */
-export const MCP_APP_DEV_NOTE = 'MCP Apps: you can build MCP Apps (MCP servers whose tools show interactive views in the chat). Call mcp_app_guide once before you build or change one, and follow it.';
+export const MCP_APP_DEV_NOTE = 'MCP Apps: you can build MCP Apps (MCP servers whose tools show interactive views in the chat). Call mcp_app_guide once before you build or change one, and follow it. Persist app server state (games, documents) as files under $STATE_DIR and reload it on start, since memory is lost on restart; in views, save small UI state with ui/state/save when the host advertises io.ai-sdk-letta/viewState. Keep ui/message text short and human-readable.';
 
 /** The guide, returned by `mcp_app_guide` (about 1.5k tokens). */
 export const MCP_APP_GUIDE = `# Building MCP Apps here
