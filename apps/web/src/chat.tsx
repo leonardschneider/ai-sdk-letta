@@ -67,7 +67,7 @@ function AppMessageLine({ app, text, time }: { app: MessageApp; text: string; ti
   const [open, setOpen] = useState(false);
   const { summary, truncated } = appMessageSummary(text);
   const allowed = `Sent by the app “${app.name}” from its view; ${app.approvedBy.name === 'You' ? 'you' : app.approvedBy.name} allowed it. The agent was told it is the app’s content.`;
-  const label = <><Blocks size={13} className="line-icon" aria-hidden="true"/><span className="app-msg-name">{appShortName(app)}</span><span className="app-msg-sep" aria-hidden="true">:</span> <span className="app-msg-text">{summary}</span></>;
+  const label = <><Blocks size={13} className="line-icon" aria-hidden="true"/><span className="app-msg-text"><span className="app-msg-name">{appShortName(app)}:</span> {summary}</span></>;
   return <div className="line app-msg-line" title={allowed}>
     {truncated
       ? <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`Message from ${app.name}: ${summary}. ${open ? 'Hide' : 'Show'} the full text`}>
