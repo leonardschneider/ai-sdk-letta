@@ -213,3 +213,20 @@ test('mcp_app_guide: bounded, attributed, the object form of callServerTool, and
   assert.match((mcpAppDevTools.mcp_app_dev_start as { description: string }).description, /mcp_app_guide/);
   await apps.close();
 });
+
+test('dev apps: calls from their views run without asking by default; asking can be turned back on per conversation (kept)', async () => {
+  const { run, apps } = setup();
+  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  assert.equal(apps.policy('dev_clock', 'refresh'), 'allow', 'the agent\'s own code: runs, like run_command');
+  assert.equal(apps.policy('dev_clock', 'show_time', 'agent'), 'allow');
+  apps.setDevViewsAsk('dev_clock', true);
+  assert.equal(apps.policy('dev_clock', 'refresh'), 'ask', 'back to asking');
+  assert.equal(apps.policy('dev_clock', 'show_time', 'agent'), 'allow', 'the agent\'s calls are unchanged');
+  assert.equal(apps.status().find(a => a.id === 'dev_clock')!.viewsAsk, true);
+  apps.setDevViewsAsk('dev_clock', false);
+  assert.equal(apps.policy('dev_clock', 'refresh'), 'allow');
+  assert.equal(apps.status().find(a => a.id === 'dev_clock')!.viewsAsk, undefined);
+  assert.throws(() => apps.grant('dev_clock', 'refresh'), 'dev apps have no grants (no "Allow always")');
+  assert.throws(() => apps.setDevViewsAsk('nope', true));
+  await apps.close();
+});
