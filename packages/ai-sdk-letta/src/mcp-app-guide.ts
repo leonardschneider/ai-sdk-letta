@@ -38,28 +38,28 @@ zod@^4.2.0, esbuild@^0.25 (bundles the view). Not the old
 - mcp_app_dev_start runs your server in the services container (no
   network; the command must not build or install). It serves **Streamable
   HTTP** on 127.0.0.1:$PORT (PORT=3000, HOST=127.0.0.1 set; "port" to
-  change, not 5173/3128), endpoint /mcp ("path" to change). Its output goes
-  to mcp_app_dev_logs. Legacy stdio: "transport": "stdio".
+  change, not 5173/3128) at /mcp ("path" to change). Output:
+  mcp_app_dev_logs. Legacy stdio: "transport": "stdio".
 - Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`
   (or \`mcp.http_app()\` under uvicorn); assumed at /mcp, else pass "path".
-- Install with run_command_online (the user approves; run_command has no
-  network) in the app folder: \`npm install\`. Then build with run_command.
+- Install with run_command_online (the user approves) in the app folder:
+  \`npm install\`. Then build with run_command (no network).
 - Tool visibility (\`_meta.ui.visibility\`): "model" tools become yours as
   dev_<name>__<tool> next turn (calling one renders its view, Dev badge);
   "app" tools only the view may call. Default: both.
-- Each view call (app.callServerTool) asks the user first: expect a delay.
+- A view call (app.callServerTool) may ask the user first: expect a delay.
 - View CSP: no network unless granted (declared \`_meta.ui.csp\` domains
-  intersected with the origins the user approved; for dev apps, none).
+  the user approved; for dev apps, none).
   Inline scripts and styles work; no eval, workers, form submission
-  (call preventDefault), external scripts or fonts: inline everything.
+  (preventDefault) or external scripts/fonts: inline everything.
 - Support light and dark (\`color-scheme: light dark\`) and narrow widths.
 
 ## API cheat-sheet
 
 Server (\`@modelcontextprotocol/ext-apps/server\`):
 - \`registerAppTool(server, name, { title, description, inputSchema: z.object({...}), _meta: { ui: { resourceUri, visibility? } } }, handler)\`
-  The resource URI is nested: \`_meta.ui.resourceUri\` ("ui://..."), not a
-  flat key (the helper adds the legacy one itself).
+  The URI is nested (\`_meta.ui.resourceUri\`, "ui://..."), not a flat key
+  (the helper adds the legacy one).
 - \`registerAppResource(server, name, uri, { mimeType: RESOURCE_MIME_TYPE }, read)\`
   \`RESOURCE_MIME_TYPE\` is "text/html;profile=mcp-app"; \`read\` returns
   \`{ contents: [{ uri, mimeType: RESOURCE_MIME_TYPE, text: html }] }\`.
@@ -69,12 +69,11 @@ View (\`@modelcontextprotocol/ext-apps\`):
 - \`const app = new App({ name, version })\`; set handlers, then
   \`app.connect()\` (no argument: it talks to the host via postMessage).
 - \`app.ontoolresult = result => ...\`: the result of the call that opened
-  the view (also \`app.ontoolinput\` for its arguments).
+  the view (\`app.ontoolinput\`: its arguments).
 - \`await app.callServerTool({ name: 'add_note', arguments: { text } })\`:
   object form, one argument; resolves to the tool result.
-- \`app.sendMessage(...)\` (ui/message) shows in the chat: keep it short and
-  human ("I played e2e4."); put IDs and state in structuredContent or
-  tool calls, and let the agent fetch state with its tools.
+- ui/message (app.sendMessage): short, human ("I played e2e4."); IDs and
+  state in structuredContent; the agent fetches state with tools.
 
 ## Minimal example (notes/)
 
@@ -152,11 +151,11 @@ State lives in the server until the next reload, not in the view.
 1. Scaffold the folder (above), run_command_online \`npm install\`,
    run_command \`npm run build\`.
 2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
-   It waits for the port, then runs the contract check: fix every error
-   (mcp_app_dev_check again). If it fails to start, read mcp_app_dev_logs.
+   It waits for the port, then checks the contract: fix every error
+   (mcp_app_dev_check again). Failed to start: read mcp_app_dev_logs.
 3. mcp_app_dev_call tests any tool (also "app" ones) without the user.
 4. Call your dev_<name>__<tool> (next turn): the view renders in the chat;
    the user can open it in the side panel.
-5. Change, rebuild, mcp_app_dev_reload: open views render again (marked
-   "updated"). Tool-list changes reach you at your next turn.
+5. Change, rebuild, mcp_app_dev_reload: open views render again
+   ("updated"). Tool-list changes reach you next turn.
 `;
