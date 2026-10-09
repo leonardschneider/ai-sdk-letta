@@ -1,6 +1,6 @@
 {
   "name": "@ai-sdk-letta/server",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Local HTTP runtime for ai-sdk-letta agents: durable threads and runs, NDJSON events, a token API and a loopback browser app.",
   "license": "Apache-2.0",
   "author": "Leonard Schneider",
@@ -55,7 +55,7 @@
   },
   "dependencies": {
     "@types/express": "^5.0.6",
-    "ai-sdk-letta": "^0.21.0",
+    "ai-sdk-letta": "^0.21.1",
     "express": "^5.2.1"
   },
   "peerDependencies": {

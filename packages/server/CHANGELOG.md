@@ -1,5 +1,12 @@
 # @ai-sdk-letta/server
 
+## 0.21.1
+
+### Patch Changes
+
+- c61457d: Tests only: the project listing test disables git's automatic background maintenance, which made its no-write check flaky in CI.
+- ai-sdk-letta@0.21.1
+
 ## 0.21.0
 
 ### Minor Changes
