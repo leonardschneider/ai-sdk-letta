@@ -2,14 +2,16 @@ import { tool, jsonSchema, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import { SandboxError } from './sandbox.js';
 import { WEBDEV_CONTEXT, WEBDEV_LIMITS, WebDevServices } from './webdev.js';
-import { DEV_APP_NAME, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevStart, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
+import { DEV_APP_NAME, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevStart, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
 import { lintMcpApp, type McpAppLintFinding } from './mcp-app-lint.js';
 import { MCP_APP_GUIDE } from './mcp-app-guide.js';
 
 /**
  * MCP Apps dev mode: the agent writes an MCP server (with views) in its
- * sandbox and runs it as a **dev app** of its conversation, over stdio in the
- * conversation's services container (see `WebDevServices.devAppLine`). Its
+ * sandbox and runs it as a **dev app** of its conversation in the
+ * conversation's services container: over Streamable HTTP by default
+ * (`WebDevServices.devAppHttpStart`, reached through a tunnel), or over stdio
+ * (`WebDevServices.devAppLine`). Its
  * model-visible tools join the conversation from the next turn
  * (`dev_<name>__<tool>`), its views render in the side panel with a "Dev"
  * badge, and the agent checks the app against the MCP Apps contract
@@ -112,7 +114,7 @@ export function formatCallResult(result: McpCallResult): string {
   return cap(out.join('\n'), MCP_APP_DEV_LIMITS.maxText);
 }
 
-type StartInput = { name: string; command: string; cwd?: string };
+type StartInput = { name: string; command: string; cwd?: string; transport?: 'http' | 'stdio'; port?: number; path?: string };
 type NameInput = { name: string };
 type LogsInput = { name: string; lines?: number };
 type CallInput = { name: string; tool: string; args?: Record<string, unknown> };
@@ -135,13 +137,16 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     toModelOutput: textModelOutput,
   }),
   mcp_app_dev_start: tool({
-    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation: it runs over stdio (stdout is MCP; stderr goes to its log) in the services container, without network. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js --stdio"}. Build first (run_command); the command must not build or install anything. Read mcp_app_guide first.',
+    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation, in the services container without network. By default it serves Streamable HTTP: the command listens on 127.0.0.1:<port> (default 3000; PORT and HOST are set) with the MCP endpoint at <path> (default /mcp); its output goes to its log. With transport "stdio", stdout is MCP and stderr the log. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js"}. Build first (run_command); the command must not build or install anything. Read mcp_app_guide first.',
     inputSchema: jsonSchema<StartInput>({ type: 'object', properties: {
       name: nameSchema,
-      command: { type: 'string', minLength: 1, maxLength: WEBDEV_LIMITS.maxCommandChars, description: 'Shell command that runs the MCP server on stdio, in the foreground.' },
+      command: { type: 'string', minLength: 1, maxLength: WEBDEV_LIMITS.maxCommandChars, description: 'Shell command that runs the MCP server in the foreground (it listens on 127.0.0.1:<port>, or speaks stdio with transport "stdio").' },
       cwd: { type: 'string', maxLength: 500, description: 'The server\'s folder, relative to this conversation\'s folder or absolute under /workspace.' },
+      transport: { type: 'string', enum: ['http', 'stdio'], description: 'How the server speaks MCP: "http" (Streamable HTTP, the default) or "stdio".' },
+      port: { type: 'integer', minimum: 1024, maximum: 65535, description: 'Port the server listens on inside the container (http only; default 3000; not 5173 or 3128).' },
+      path: { type: 'string', maxLength: 200, pattern: MCP_APP_HTTP_PATH.source, description: 'Path of the MCP endpoint (http only; default "/mcp").' },
     }, required: ['name', 'command'], additionalProperties: false }),
-    execute: async ({ name, command, cwd }, options) => {
+    execute: async ({ name, command, cwd, transport = 'http', port, path }, options) => {
       const ctx = contextOf(options.context);
       if (isFailure(ctx)) return ctx;
       const { services, apps, conversationId } = ctx;
@@ -149,6 +154,26 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
       try {
         const known = apps.devSpec(devAppId(name));
         if (known && known.conversationId !== conversationId) return { text: `Error (app_unknown): the name "${name}" is used by another conversation; choose another name.`, isError: true };
+        if (transport !== 'http' && transport !== 'stdio') return { text: 'Error (command_invalid): transport is "http" or "stdio".', isError: true };
+        if (transport === 'http') {
+          const http = { port: port ?? MCP_APP_HTTP_DEFAULTS.port, path: path ?? MCP_APP_HTTP_DEFAULTS.path };
+          if (!MCP_APP_HTTP_PATH.test(http.path)) return { text: 'Error (command_invalid): path must be a URL path such as "/mcp".', isError: true };
+          let folder = cwd;
+          const result = await apps.startDev({
+            name, conversationId, folder: services.resolveFolder(cwd), command,
+            // Every launch (re)starts the server and opens a new tunnel; reloads use the folder found first.
+            launch: async signal => {
+              const launched = await services.devAppHttpStart(name, { command, ...(folder !== undefined ? { cwd: folder } : {}), ...http }, signal);
+              if (!launched.ok) throw new Error(launched.text);
+              folder = launched.folder;
+              return { http: launched.endpoint, stop: () => services.stopDevApp(name) };
+            },
+            touch: () => services.touch(),
+          }, options.abortSignal);
+          const findings = result.status === 'running' ? await lint(apps, result.app, options.abortSignal) : undefined;
+          return { text: `${formatDevStart(result, findings)}\nFolder: ${services.resolveFolder(folder)}\nCommand: ${command}\nTransport: Streamable HTTP at http://127.0.0.1:${http.port}${http.path} (in the services container)`, ...(result.status === 'running' ? {} : { isError: true }) };
+        }
+        if (port !== undefined || path !== undefined) return { text: 'Error (command_invalid): port and path are for transport "http".', isError: true };
         // The folder is checked once, now; reloads launch the same line again.
         const first = await services.devAppLine(name, { command, ...(cwd !== undefined ? { cwd } : {}) }, options.abortSignal);
         if (!first.ok) return { text: first.text, isError: true };
@@ -165,7 +190,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
           touch: () => services.touch(),
         }, options.abortSignal);
         const findings = result.status === 'running' ? await lint(apps, result.app, options.abortSignal) : undefined;
-        return { text: `${formatDevStart(result, findings)}\nFolder: ${first.folder}\nCommand: ${command}`, ...(result.status === 'running' ? {} : { isError: true }) };
+        return { text: `${formatDevStart(result, findings)}\nFolder: ${first.folder}\nCommand: ${command}\nTransport: stdio`, ...(result.status === 'running' ? {} : { isError: true }) };
       } catch (error) { return failure(error); }
     },
     toModelOutput: textModelOutput,

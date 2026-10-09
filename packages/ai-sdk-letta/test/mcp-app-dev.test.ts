@@ -79,7 +79,7 @@ test('dev tools: names, permissions (all allow)', () => {
 
 test('dev tools: start → tools for that conversation only, linter output, stderr to the log file', async () => {
   const { apps, run, lines } = setup();
-  const started = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
+  const started = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   assert.equal(started.isError, undefined, started.text);
   assert.match(started.text, /Dev app "clock" running \(generation 1\): 2 tool\(s\), 1 view\(s\)/);
   assert.match(started.text, /show_time \[visibility: model, app\] → you call it as dev_clock__show_time/);
@@ -99,7 +99,7 @@ test('dev tools: start → tools for that conversation only, linter output, stde
   assert.deepEqual([...apps.agentTools('conv-b').names.keys()], []);
   assert.deepEqual([...apps.agentTools().names.keys()], []);
   // Another conversation cannot take the name, nor see the app.
-  const taken = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'x' }, setupContext(apps, 'conv-b'));
+  const taken = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'x', transport: 'stdio' }, setupContext(apps, 'conv-b'));
   assert.equal(taken.isError, true); assert.match(taken.text, /another conversation/);
   const foreign = await run('mcp_app_dev_call', { name: 'clock', tool: 'show_time' }, setupContext(apps, 'conv-b'));
   assert.equal(foreign.isError, true); assert.match(foreign.text, /no dev app "clock" in this conversation/);
@@ -110,7 +110,7 @@ const setupContext = (apps: McpApps, conversationId: string) => ({ [WEBDEV_CONTE
 
 test('dev tools: a missing folder is refused with a listing', async () => {
   const { run, apps } = setup();
-  const result = await run('mcp_app_dev_start', { name: 'clock', cwd: 'nope', command: 'node server.js' });
+  const result = await run('mcp_app_dev_start', { name: 'clock', cwd: 'nope', command: 'node server.js', transport: 'stdio' });
   assert.equal(result.isError, true);
   assert.match(result.text, /folder \/workspace\/Chat\/nope does not exist[\s\S]*clock\//);
   assert.deepEqual(apps.devApps('conv-a'), []);
@@ -118,7 +118,7 @@ test('dev tools: a missing folder is refused with a listing', async () => {
 
 test('dev tools: reload reports changes; status; stop removes the tools', async () => {
   const { run, apps, state, execs } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
+  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   state.tools = [{ ...viewTool, description: 'Show the time, now with zones' }, { name: 'set_alarm', inputSchema: { type: 'object' } }];
   state.html = `${HTML}<!-- v2 -->`;
   const reloading = run('mcp_app_dev_reload', { name: 'clock' });
@@ -146,7 +146,7 @@ test('dev tools: reload reports changes; status; stop removes the tools', async 
 
 test('dev tools: call returns content, structuredContent and _meta (also app-only tools)', async () => {
   const { run, apps, state } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
+  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   const called = await run('mcp_app_dev_call', { name: 'clock', tool: 'refresh', args: { zone: 'CET' } });
   assert.equal(called.isError, undefined, called.text);
   assert.match(called.text, /It is noon \(refresh\)/);
@@ -161,7 +161,7 @@ test('dev tools: call returns content, structuredContent and _meta (also app-onl
 test('dev tools: check lists findings with rule, level and fix', async () => {
   const { run, apps, state } = setup();
   state.tools = [{ name: 'show', inputSchema: { type: 'object' }, _meta: { 'ui/resourceUri': URI } }];
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
+  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   const checked = await run('mcp_app_dev_check', { name: 'clock' });
   assert.match(checked.text, /Check: \d+ error\(s\)/);
   assert.match(checked.text, /\[error\] flat-resource-uri \(tool show\): .*\n {4}fix: /);
@@ -170,7 +170,7 @@ test('dev tools: check lists findings with rule, level and fix', async () => {
 
 test('dev tools: logs tail the dev app\'s stderr file', async () => {
   const { run, apps, execs } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
+  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   const logs = await run('mcp_app_dev_logs', { name: 'clock', lines: 10 });
   assert.match(logs.text, /The dev app "clock" server is running\.\nstderr \(\/tmp\/devapp-clock\.log\):\nlistening on stdio\nwarning: yellow/);
   assert.ok(execs.some(argv => argv[0] === 'tail' && argv[2] === '10' && argv[3] === '/tmp/devapp-clock.log'));
@@ -186,7 +186,7 @@ test('dev tools: unavailable without web development or MCP Apps, or for a faile
   assert.match((await run('mcp_app_dev_start', { name: 'Bad Name', command: 'x' })).text, /dev app name/);
   // A server that does not speak MCP: the start fails with the error, nothing joins the tools.
   const failing = new McpApps([], { directory: join(tmp('mcpdev-state'), 'apps'), connector: async () => { throw new Error('Connection closed'); } });
-  const failed = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'echo hi' }, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT], [MCP_APPS_CONTEXT]: { apps: failing, conversationId: 'conv-a' } });
+  const failed = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'echo hi', transport: 'stdio' }, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT], [MCP_APPS_CONTEXT]: { apps: failing, conversationId: 'conv-a' } });
   assert.equal(failed.isError, true);
   assert.match(failed.text, /did not start \(generation 1\): Connection closed[\s\S]*mcp_app_dev_logs/);
   assert.deepEqual([...failing.agentTools('conv-a').names.keys()], []);

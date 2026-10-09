@@ -13,6 +13,7 @@ import {
 import { BROWSER_TOOL_BASE_NAMES, BROWSER_TOOL_SPECS, CHROME_DEVTOOLS_MCP_VERSION, type BrowserToolBaseName, type BrowserToolSpec } from './webdev-browser-tools.js';
 import { FrameMux, TUNNEL_SCRIPT, handleEgress, type TunnelStream } from './webdev-tunnel.js';
 import { WEB_DEV_GUIDE } from './webdev-guide.js';
+import { PORT_WAIT_SCRIPT, RESERVED_HTTP_PORTS, openHttpTunnel, type McpAppHttpEndpoint } from './mcp-app-http.js';
 
 /**
  * Web app development: a dev server with a live preview, and a headless
@@ -249,6 +250,8 @@ const DEV_ALIVE_FN = `alive() { for p in /proc/[0-9]*; do n=\${p#/proc/}; [ "$n"
 const DEV_APP_MARK_KEY = 'AI_SDK_LETTA_DEV_APP';
 const devAppMark = (name: string) => `${DEV_APP_MARK_KEY}=${name}`;
 const DEV_APP_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
+/** How long a Streamable HTTP dev app may take to listen. */
+const MCP_APP_HTTP_READY_MS = 60_000;
 /** Where a dev app's stderr goes inside the services container (stdout carries MCP). */
 export const devAppLogFile = (name: string) => `/tmp/devapp-${name}.log`;
 const aliveFn = (mark: string) => `alive() { for p in /proc/[0-9]*; do n=\${p#/proc/}; [ "$n" = "$$" ] && continue; if tr '\\0' '\\n' <"$p/environ" 2>/dev/null | grep -qx '${mark}'; then return 0; fi; done; return 1; }`;
@@ -307,6 +310,8 @@ export class WebDevServices {
   private browser?: Promise<BrowserClient>;
   private egress?: { mux: FrameMux; child: ChildProcess; streams: Map<TunnelStream, string> };
   private preview?: { mux: FrameMux; child: ChildProcess };
+  /** Streamable HTTP dev apps: their port and their tunnel (one per app). */
+  private readonly devAppHttp = new Map<string, { port: number; mux: FrameMux; close(): Promise<void> }>();
   private dev?: { folder: string; command: string; startedAt: string };
   private approved: string[] = [];
   private idle?: ReturnType<typeof setTimeout>;
@@ -394,6 +399,8 @@ export class WebDevServices {
   private closeTunnels() {
     for (const tunnel of [this.egress, this.preview]) { tunnel?.mux.close(); tunnel?.child.kill('SIGKILL'); }
     this.egress = undefined; this.preview = undefined;
+    for (const app of this.devAppHttp.values()) void app.close();
+    this.devAppHttp.clear();
   }
   /** Stop and refuse further work. Idempotent. */
   async close(): Promise<void> {
@@ -579,8 +586,67 @@ export class WebDevServices {
       return { ok: true as const, line, folder };
     });
   }
-  /** Stop a dev app's server processes inside the container (closing its `exec -i` client does not). */
+  /**
+   * Start a dev app's Streamable HTTP MCP server (`mcp_app_dev_start` with
+   * transport "http"): `command` runs detached in `cwd` with `PORT=<port>`
+   * and `HOST=127.0.0.1`, stdout and stderr appended to
+   * {@link devAppLogFile}, its processes marked (see {@link stopDevApp}).
+   * Once `127.0.0.1:<port>` accepts connections inside the container, the
+   * endpoint is reached through a `connect <port>` tunnel (one per dev app,
+   * closed by {@link stopDevApp}); no port is published. Refused: the dev
+   * server's port (5173), the egress proxy's (3128), another dev app's port,
+   * and a port something else already listens on.
+   */
+  async devAppHttpStart(name: string, input: { cwd?: string; command: string; port: number; path: string }, signal?: AbortSignal): Promise<{ ok: true; endpoint: McpAppHttpEndpoint; folder: string } | { ok: false; text: string }> {
+    if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'A dev app name is 1–20 lowercase letters, digits or "-", starting with a letter');
+    if (!input.command.trim() || input.command.length > WEBDEV_LIMITS.maxCommandChars) throw new SandboxError('command_invalid', `The command must have 1–${WEBDEV_LIMITS.maxCommandChars} characters`);
+    if (!Number.isInteger(input.port) || input.port < 1024 || input.port > 65535) throw new SandboxError('command_invalid', 'The port must be an integer from 1024 to 65535');
+    const reserved = RESERVED_HTTP_PORTS[input.port];
+    if (reserved) return { ok: false, text: `Not started: port ${input.port} is used by ${reserved}; choose another port (the default is 3000) and make the server listen there.` };
+    const other = [...this.devAppHttp.entries()].find(([n, app]) => n !== name && app.port === input.port);
+    if (other) return { ok: false, text: `Not started: the dev app "${other[0]}" uses port ${input.port}; choose another port for "${name}".` };
+    const folder = this.resolveFolder(input.cwd);
+    const base = this.sandbox.workingDirectory;
+    return this.hold(async () => {
+      const container = await this.ready(signal);
+      const check = await container.exec(['sh', '-c', `if [ -d "$1" ]; then echo dir; else echo missing; ls -1Ap "$2" 2>/dev/null | head -40; fi`, 'sh', folder, base]);
+      const lines = check.stdout.split('\n').filter(Boolean);
+      if (lines[0] !== 'dir') {
+        const listing = lines.slice(1);
+        return { ok: false as const, text: `Not started: the folder ${folder} does not exist.\ncwd ${JSON.stringify(input.cwd ?? '')} is resolved from this conversation's folder, ${base}${listing.length ? `, which contains:\n${listing.map(l => `  ${l}`).join('\n')}` : ' (empty)'}.\nPass the server's folder relative to ${base}, or an absolute path under /workspace.` };
+      }
+      // A server of the same name left from an earlier start is stopped first (and its tunnel closed).
+      await this.devAppHttp.get(name)?.close(); this.devAppHttp.delete(name);
+      await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
+      const free = (await container.exec(['node', '-e', PORT_WAIT_SCRIPT, 'free', String(input.port)], { timeoutMs: 15_000 })).stdout.trim();
+      if (free === 'busy') return { ok: false as const, text: `Not started: something already listens on 127.0.0.1:${input.port} in the services container (another server you started?). Stop it, or choose another port.` };
+      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', PORT: String(input.port), HOST: '127.0.0.1', [DEV_APP_MARK_KEY]: name };
+      const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+      const log = devAppLogFile(name);
+      const started = await container.exec(['env', '-i', ...assignments, '/bin/sh', '-c', 'exec >>"$3" 2>&1 </dev/null; echo "--- $(date -u +%FT%TZ) start (http :$4): $2"; cd "$1" || exit 1; exec /bin/bash -c "$2"', 'sh', folder, input.command, log, String(input.port)], { detach: true, timeoutMs: 15_000 });
+      if (started.code !== 0) return { ok: false as const, text: `Not started: ${started.stderr.trim().slice(0, 300) || 'the container refused the command'}.` };
+      const seconds = Math.round(MCP_APP_HTTP_READY_MS / 1000);
+      const waited = (await container.exec(['node', '-e', PORT_WAIT_SCRIPT, 'wait', String(input.port), String(seconds), devAppMark(name)], { timeoutMs: MCP_APP_HTTP_READY_MS + 15_000 })).stdout.trim().split('\n').at(-1) ?? '';
+      if (waited !== 'ready') {
+        await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
+        const tail = await this.logTail(container, 25, log);
+        const reason = waited === 'exited' ? 'the command exited' : `nothing accepted connections on 127.0.0.1:${input.port} within ${seconds} s (the server must listen there: use the PORT and HOST environment variables, or the port you passed)`;
+        return { ok: false as const, text: `Not started: ${reason}. It was stopped.\nCommand: ${input.command}\nLog (${log}):\n${tail || '(empty)'}` };
+      }
+      const tunnel = openHttpTunnel(container.interactive(['node', '-e', TUNNEL_SCRIPT, 'connect', String(input.port)]), `http://127.0.0.1:${input.port}${input.path}`);
+      const entry = { port: input.port, mux: tunnel.mux, close: tunnel.close };
+      this.devAppHttp.set(name, entry);
+      tunnel.mux.onClose(() => { if (this.devAppHttp.get(name) === entry) this.devAppHttp.delete(name); });
+      return { ok: true as const, endpoint: tunnel.endpoint, folder };
+    });
+  }
+  /** The port of a running Streamable HTTP dev app (tests and status). */
+  devAppPort(name: string): number | undefined { return this.devAppHttp.get(name)?.port; }
+  /** Stop a dev app's server processes inside the container (closing its `exec -i` client does not), and close its HTTP tunnel. */
   async stopDevApp(name: string): Promise<void> {
+    const http = this.devAppHttp.get(name);
+    this.devAppHttp.delete(name);
+    await http?.close();
     const container = this.resolved;
     if (!container || !DEV_APP_NAME_RE.test(name)) return;
     await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
