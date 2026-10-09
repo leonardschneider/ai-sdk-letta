@@ -19,4 +19,4 @@ export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, vi
 export { LiveConversations, LIVE_LIMITS, type LiveFs, type LiveOptions } from './live.js';
 export { AppGate, APP_GATE_LIMITS, sandboxProxyHtml, sandboxOrigin, contentText, publicApproval, type AppGateOptions, type AppInstance, type AppApproval, type AppApprovalKind, type AppAuditEvent } from './mcp-apps.js';
 export { ProjectFolder, PROJECT_LIMITS, PROJECT_DEFAULT_IGNORES, type ProjectEntry, type ProjectListing, type ProjectStatus } from './project.js';
-export { localModels, modelOptions, modelSettings, providerLabel, anthropicOAuth, publicModel, MODEL_HANDLE, MODEL_CACHE_MS, type ModelOption, type PublicModel } from './models.js';
+export { localModels, modelOptions, modelSettings, providerLabel, anthropicOAuth, publicModel, effortOf, EFFORT_ORDER, EFFORT_VALUE, MODEL_HANDLE, MODEL_CACHE_MS, type ModelOption, type ModelEffort, type PublicModel } from './models.js';

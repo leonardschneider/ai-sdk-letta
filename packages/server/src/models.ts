@@ -13,10 +13,38 @@ export const MODEL_CACHE_MS = 5 * 60_000;
  * its provider (with a friendly label), context window, and the Letta
  * `model_settings` to send when an agent switches to it.
  */
-export type ModelOption = { handle: string; label: string; provider: string; providerLabel: string; contextWindow?: number; settings: Record<string, unknown> };
-/** What the browser gets (no settings). */
-export type PublicModel = Omit<ModelOption, 'settings'>;
-export const publicModel = ({ settings: _settings, ...rest }: ModelOption): PublicModel => rest;
+export type ModelOption = {
+  handle: string; label: string; provider: string; providerLabel: string; contextWindow?: number;
+  /** The settings of its default tier. */
+  settings: Record<string, unknown>;
+  /** The reasoning efforts it offers (one per catalog tier, in {@link EFFORT_ORDER}); empty when it has no effort setting. */
+  efforts: ModelEffort[];
+  /** Its catalog tiers by effort (server only): the `updateArgs` to build the settings of a chosen effort. */
+  tiers: { effort: string; updateArgs: Record<string, unknown> }[];
+};
+/** One reasoning effort of a model: its value (`none` … `max`), a label, the tier's context window, and whether it is the default tier. */
+export type ModelEffort = { value: string; label: string; contextWindow?: number; default?: boolean };
+/** What the browser gets (no settings or tier arguments). */
+export type PublicModel = Omit<ModelOption, 'settings' | 'tiers'>;
+export const publicModel = ({ settings: _settings, tiers: _tiers, ...rest }: ModelOption): PublicModel => rest;
+
+/** Reasoning efforts, lowest first (the order the app shows them in). */
+export const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const EFFORT_LABELS: Record<string, string> = { none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
+/** A reasoning effort value the app accepts. */
+export const EFFORT_VALUE = /^[a-z]{1,20}$/;
+
+/**
+ * The reasoning effort in a Letta agent's `model_settings`: OpenAI and the
+ * ChatGPT subscription keep it in `reasoning.reasoning_effort`, Anthropic in
+ * `effort`. `undefined` when there is none.
+ */
+export function effortOf(settings: unknown): string | undefined {
+  if (!settings || typeof settings !== 'object') return undefined;
+  const s = settings as { reasoning?: { reasoning_effort?: unknown }; effort?: unknown };
+  const effort = s.reasoning?.reasoning_effort ?? s.effort;
+  return typeof effort === 'string' && EFFORT_VALUE.test(effort) ? effort : undefined;
+}
 
 /** A catalog entry as `client.models.list()` returns it. */
 type Entry = { handle?: unknown; label?: unknown; isDefault?: unknown; updateArgs?: Record<string, unknown> };
@@ -65,8 +93,9 @@ export function modelSettings(handle: string, args: Record<string, unknown> = {}
 
 /**
  * The models of a catalog (one per handle, in catalog order): the providers
- * the app knows, available to this user. Each handle's tier is the default
- * one, else "medium", else the first.
+ * the app knows, available to this user. Each handle's default tier is the
+ * catalog's default, else "medium", else the first; every tier with a
+ * `reasoning_effort` becomes one of its {@link ModelOption.efforts}.
  */
 export function modelOptions(entries: readonly Entry[], options: { available?: readonly string[] | null; anthropicOAuth?: boolean } = {}): ModelOption[] {
   const available = options.available ? new Set(options.available) : undefined;
@@ -75,11 +104,22 @@ export function modelOptions(entries: readonly Entry[], options: { available?: r
     if (typeof entry.handle !== 'string' || !MODEL_HANDLE.test(entry.handle) || (available && !available.has(entry.handle))) continue;
     byHandle.set(entry.handle, [...(byHandle.get(entry.handle) ?? []), entry]);
   }
+  const windowOf = (entry: Entry) => { const window = entry.updateArgs?.context_window; return typeof window === 'number' && window > 0 ? window : undefined; };
+  const rank = (effort: string) => { const i = (EFFORT_ORDER as readonly string[]).indexOf(effort); return i < 0 ? EFFORT_ORDER.length : i; };
   return [...byHandle].map(([handle, tiers]) => {
     const tier = tiers.find(t => t.isDefault === true) ?? tiers.find(t => t.updateArgs?.reasoning_effort === 'medium') ?? tiers[0]!;
-    const window = tier.updateArgs?.context_window;
+    const window = windowOf(tier);
+    const byEffort = new Map<string, Entry>();
+    for (const t of tiers) {
+      const effort = t.updateArgs?.reasoning_effort;
+      if (typeof effort === 'string' && EFFORT_VALUE.test(effort) && (!byEffort.has(effort) || t === tier)) byEffort.set(effort, t);
+    }
+    const ordered = [...byEffort].sort(([a], [b]) => rank(a) - rank(b));
+    const defaultEffort = typeof tier.updateArgs?.reasoning_effort === 'string' ? tier.updateArgs.reasoning_effort : undefined;
     return { handle, label: typeof tier.label === 'string' && tier.label ? tier.label : handle.split('/').slice(1).join('/'), provider: handle.split('/')[0]!, providerLabel: providerLabel(handle, options),
-      ...(typeof window === 'number' && window > 0 ? { contextWindow: window } : {}), settings: modelSettings(handle, tier.updateArgs) };
+      ...(window ? { contextWindow: window } : {}), settings: modelSettings(handle, tier.updateArgs),
+      efforts: ordered.map(([value, t]) => { const w = windowOf(t); return { value, label: EFFORT_LABELS[value] ?? value, ...(w ? { contextWindow: w } : {}), ...(value === defaultEffort ? { default: true } : {}) }; }),
+      tiers: ordered.map(([effort, t]) => ({ effort, updateArgs: { ...(t.updateArgs ?? {}) } })) };
   }).slice(0, 120);
 }
 

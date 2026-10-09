@@ -51,6 +51,8 @@ export type AdoptionRecord = {
   /** The agent's name and model when it was adopted. */
   name: string;
   model: string;
+  /** Its reasoning effort (`none` … `max`) when set from the app's model picker; Letta's `model_settings` stay the source of truth. */
+  effort?: string;
   /** Tool sets it gets in this app. */
   tools: AdoptedToolSet[];
   adoptedAt: string;
