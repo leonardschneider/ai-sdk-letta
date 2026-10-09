@@ -111,8 +111,45 @@ export const viewIdentity = (view: ViewTool): string => `${view.app}\u0000${view
 export type ViewPolicy = 'single' | 'every';
 export const viewPolicyKey = (agentId: string, appId: string) => `ai-sdk-letta-app-views:${agentId}:${appId}`;
 export const readViewPolicy = (raw: string | null | undefined): ViewPolicy => raw === 'every' ? 'every' : 'single';
-/** A call of a tool with a view, in conversation order. */
-export type ViewCall = { id: string; tool: string };
+/** Long IDs (UUIDs, hex or base64-like tokens of 20+ characters) shortened to their first 8 characters and an ellipsis. */
+export function shortenIds(text: string): string {
+  return text
+    .replace(/\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '$1…')
+    .replace(/\b(?=[A-Za-z0-9_-]{20,}\b)(?=[A-Za-z_-]*[0-9])(?=[0-9_-]*[A-Za-z])([A-Za-z0-9]{8})[A-Za-z0-9_-]{12,}\b/g, '$1…');
+}
+/**
+ * What a message from an app's view (\`ui/message\`) shows by default: its
+ * first sentence or line, IDs shortened, at most \`max\` characters. The
+ * agent still gets the full text; \`truncated\` says there is more to see.
+ */
+export function appMessageSummary(text: string, max = 80): { summary: string; truncated: boolean } {
+  const full = text.trim().replace(/\r\n?/g, '\n');
+  const line = full.split('\n').find(l => l.trim())?.trim() ?? '';
+  // The first sentence: up to a period, ! or ? followed by a space and a capital (not "e.g. this" or "1.5").
+  const sentence = /^(.+?[.!?])(?=\s+\p{Lu})/u.exec(line)?.[1] ?? line;
+  let summary = shortenIds(sentence).replace(/\s+/g, ' ');
+  let cut = false;
+  if (summary.length > max) {
+    const room = summary.slice(0, max - 1);
+    const space = room.lastIndexOf(' ');
+    summary = `${(space > max * 0.6 ? room.slice(0, space) : room).replace(/[\s,;:.-]+$/, '')}…`;
+    cut = true;
+  }
+  return { summary, truncated: cut || summary !== full.replace(/\s+/g, ' ') };
+}
+/** A call of a tool with a view, in conversation order; `phase`: running until its result arrives. */
+export type ViewCall = { id: string; tool: string; phase?: 'running' | 'done' };
+/**
+ * Should a view ask for its instance again after \`{ status: 'none' }\`?
+ * While its call runs (it is recorded a moment after the agent streams it),
+ * and briefly when the phase is unknown (a panel or full-screen view that
+ * was just retargeted to a new call): a call that is streaming is not
+ * recorded yet, and one answer of "none" must not leave "No view" for good.
+ */
+export function retryInstance(version: string | undefined, attempt: number): boolean {
+  if (version === 'running') return attempt < 40;
+  return version === undefined && attempt < 12;
+}
 /** "Show this one": the call chosen for a view, while `newest` is still its newest call. */
 export type ViewPins = Readonly<Record<string, { id: string; newest: string }>>;
 /**

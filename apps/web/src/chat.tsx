@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
-import { Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
+import { Blocks, Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
 import { COMMAND_TOOLS, lineDiff, toolErrorText, answerLine, commandOutput, commandStatus, describeArguments, failureReason, failureText, friendlyName, metricsLine, parseArgs, toolLabel, toolSummary, type ToolPhase } from './presentation.js';
 import { Markdown } from './markdown.js';
@@ -9,7 +9,7 @@ import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
 import type { Listened, MessageApp, MessageAuthor as Author, MessageSource } from './messages.js';
 import { AppToolLine } from './apps.js';
-import { isAppToolName } from './apps-model.js';
+import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
@@ -59,15 +59,39 @@ function MessageAuthor({ role }: { role: string }) {
   </div>;
 }
 
+/** The short name of an app in a message line: its dev name without `dev_` ("chessos"), else its name. */
+const appShortName = (app: MessageApp) => app.id.startsWith('dev_') ? app.id.slice(4) : app.name;
+
+/** A message an MCP App's view sent (allowed by a person): compact, with the full text (what the agent got) on demand. */
+function AppMessageLine({ app, text, time }: { app: MessageApp; text: string; time?: string | undefined }) {
+  const [open, setOpen] = useState(false);
+  const { summary, truncated } = appMessageSummary(text);
+  const allowed = `Sent by the app “${app.name}” from its view; ${app.approvedBy.name === 'You' ? 'you' : app.approvedBy.name} allowed it. The agent was told it is the app’s content.`;
+  const label = <><Blocks size={13} className="line-icon" aria-hidden="true"/><span className="app-msg-text"><span className="app-msg-name">{appShortName(app)}:</span> {summary}</span></>;
+  return <div className="line app-msg-line" title={allowed}>
+    {truncated
+      ? <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`Message from ${app.name}: ${summary}. ${open ? 'Hide' : 'Show'} the full text`}>
+        {label}<ChevronRight size={13} className="chev" aria-hidden="true"/>
+      </button>
+      : <div className="line-summary" role="note" aria-label={`Message from ${app.name}: ${summary}`}>{label}</div>}
+    {time && <time dateTime={time} className="app-msg-time" title={fullFormat.format(new Date(time))}>{formatTime(time)}</time>}
+    {open && truncated && <pre className="app-msg-full">{text}</pre>}
+  </div>;
+}
+
 export function Message() {
   const role = useAuiState(s => s.message.role);
   const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
   const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text.trim()));
   const listened = useAuiState(s => (s.message.metadata.custom as { listened?: Listened } | undefined)?.listened);
   const outcome = useAuiState(s => !!(s.message.metadata.custom as { decision?: unknown } | undefined)?.decision);
+  const app = useAuiState(s => (s.message.metadata.custom as { app?: MessageApp } | undefined)?.app);
+  const appText = useAuiState(s => s.message.parts.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n'));
   // A decision's outcome reached the agent here: one compact line, not a message bubble.
   if (role === 'user' && outcome) return <MessagePrimitive.Root className="msg decision-outcome-msg" data-role={role}><OutcomeMessage/></MessagePrimitive.Root>;
   if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} time={time}/></MessagePrimitive.Root>;
+  // A message an MCP App's view sent: one muted line ("chessos: I played e2e4."), the full text behind a chevron. The agent got all of it.
+  if (role === 'user' && app) return <MessagePrimitive.Root className="msg app-msg" data-role={role}><AppMessageLine app={app} text={appText} time={time}/></MessagePrimitive.Root>;
   const runId = useAuiState(s => (s.message.metadata.custom as { runId?: string } | undefined)?.runId);
   const text = useAuiState(s => s.message.parts.filter(p => p.type === 'text' && p.text !== IMAGE_PLACEHOLDER).map(p => (p as { text: string }).text).join('\n'));
   const rewind = useContext(RewindContext);

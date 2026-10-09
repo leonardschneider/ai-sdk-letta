@@ -223,7 +223,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const viewPolicy = useCallback((app: string): ViewPolicy => viewPolicies[app] ?? readViewPolicy(localStorage.getItem(viewPolicyKey(agent.id, app))), [viewPolicies, agent.id]);
   const setViewPolicy = (app: string, value: ViewPolicy) => { localStorage.setItem(viewPolicyKey(agent.id, app), value); setViewPolicies(p => ({ ...p, [app]: value })); };
   const [viewPins, setViewPins] = useState<ViewPins>({});
-  const viewCalls = useMemo<ViewCall[]>(() => messages.flatMap(m => typeof m.content === 'string' ? [] : m.content.flatMap(part => part.type === 'tool-call' && part.toolCallId && viewTools[part.toolName] && !part.isError ? [{ id: part.toolCallId, tool: part.toolName }] : [])), [messages, viewTools]);
+  const viewCalls = useMemo<ViewCall[]>(() => messages.flatMap(m => typeof m.content === 'string' ? [] : m.content.flatMap(part => part.type === 'tool-call' && part.toolCallId && viewTools[part.toolName] && !part.isError ? [{ id: part.toolCallId, tool: part.toolName, phase: part.result === undefined ? 'running' as const : 'done' as const }] : [])), [messages, viewTools]);
   const liveCalls = useMemo(() => liveViews(viewCalls, viewTools, viewPolicy, viewPins), [viewCalls, viewTools, viewPolicy, viewPins]);
   // A newer (or chosen) call of a view open in the panel, full screen or picture-in-picture takes its place there.
   useEffect(() => {
@@ -874,6 +874,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     refreshApprovals: refreshAppApprovals,
     liveCall: (tool, id) => { const view = viewTools[tool]; return (view && liveCalls[viewIdentity(view)]) ?? id; },
     callOrder: id => viewCalls.findIndex(c => c.id === id),
+    phaseOf: id => viewCalls.find(c => c.id === id)?.phase,
     showCall: (tool, id) => {
       const view = viewTools[tool];
       if (!view) return;

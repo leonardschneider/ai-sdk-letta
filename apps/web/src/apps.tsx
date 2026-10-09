@@ -29,6 +29,8 @@ export type AppsState = {
   callOrder?(toolCallId: string): number;
   /** "Show this one": an earlier call becomes its view's live one. */
   showCall?(toolName: string, toolCallId: string): void;
+  /** A call's phase in the conversation (running until its result arrives): the panel and full screen follow it like the inline view does. */
+  phaseOf?(toolCallId: string): 'running' | 'done' | undefined;
 };
 export const AppsContext = createContext<AppsState>({ enabled: false, viewTools: {}, openPanel: () => {}, closePanel: () => {}, setOverlay: () => {}, refreshApprovals: () => {}, onSent: () => {} });
 
@@ -110,11 +112,14 @@ export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'pane
   </Suspense>;
 }
 
+/** A view's `version` from its call's phase (the panel and full screen retarget to a new call while it still streams). */
+const withPhase = (phase: 'running' | 'done' | undefined) => phase ? { version: phase } : {};
+
 /** An app tab of the side panel: one app view at full height. */
 export function AppPanel({ toolCallId, toolName, onClose }: { toolCallId: string; toolName?: string; onClose(): void }) {
   const apps = useContext(AppsContext);
   return <div className="app-panel">
-    <AppSlot key={viewKey(apps, 'panel', toolCallId, toolName)} toolCallId={toolCallId} placement="panel" mode="inline" onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onClose={onClose}/>
+    <AppSlot key={viewKey(apps, 'panel', toolCallId, toolName)} toolCallId={toolCallId} placement="panel" mode="inline" {...withPhase(apps.phaseOf?.(toolCallId))} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onClose={onClose}/>
   </div>;
 }
 
@@ -130,7 +135,7 @@ export function AppOverlay() {
   }, [overlay, apps]);
   if (!overlay) return null;
   return <div className={`app-overlay ${overlay.mode}`} role={overlay.mode === 'fullscreen' ? 'dialog' : 'complementary'} aria-label="App">
-    <AppSlot key={`${overlay.mode}-${overlay.toolCallId}-${devGenerationsKey(apps.generations ?? {})}`} toolCallId={overlay.toolCallId} placement="inline" mode={overlay.mode} onMode={mode => apps.setOverlay(mode === 'inline' ? undefined : { toolCallId: overlay.toolCallId, mode })} onClose={() => apps.setOverlay(undefined)}/>
+    <AppSlot key={`${overlay.mode}-${overlay.toolCallId}-${devGenerationsKey(apps.generations ?? {})}`} toolCallId={overlay.toolCallId} placement="inline" mode={overlay.mode} {...withPhase(apps.phaseOf?.(overlay.toolCallId))} onMode={mode => apps.setOverlay(mode === 'inline' ? undefined : { toolCallId: overlay.toolCallId, mode })} onClose={() => apps.setOverlay(undefined)}/>
   </div>;
 }
 
