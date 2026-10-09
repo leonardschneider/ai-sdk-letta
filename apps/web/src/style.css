@@ -448,10 +448,14 @@ button.line-summary:hover { color: var(--text); background: var(--hover); }
 /* ---------- Side panel: one column right of the chat, with tabs (Resources, Preview, app views) ---------- */
 .side-pane { position: relative; width: var(--side-width, 360px); max-width: 60vw; flex-shrink: 0; background: var(--sidebar); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .side-pane[hidden] { display: none; }
-.side-tabs { display: flex; align-items: stretch; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; scrollbar-width: none; }
+.side-tabs { display: flex; align-items: stretch; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; overscroll-behavior-x: contain; scroll-padding-inline: 24px; }
 .side-tabs::-webkit-scrollbar { display: none; }
+/* Tabs hidden past an edge fade out there (the strip scrolls; the selected tab scrolls into view). */
+.side-tabs[data-fade-start] { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px); mask-image: linear-gradient(to right, transparent 0, #000 24px); }
+.side-tabs[data-fade-end] { -webkit-mask-image: linear-gradient(to left, transparent 0, #000 24px); mask-image: linear-gradient(to left, transparent 0, #000 24px); }
+.side-tabs[data-fade-start][data-fade-end] { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); }
 .side-tab-wrap { position: relative; display: flex; align-items: center; min-width: 0; max-width: 220px; flex-shrink: 0; border-radius: 8px 8px 0 0; margin-bottom: -1px; border: 1px solid transparent; border-bottom: 0; }
-.side-tab-wrap[data-app] { flex-shrink: 1; min-width: 104px; }
+.side-tab-wrap[data-app] { flex-shrink: 1; min-width: 112px; max-width: 200px; }
 .side-tab-wrap:hover { background: var(--hover); }
 .side-tab-wrap[data-selected] { background: var(--bg); border-color: var(--border); }
 .side-tab-wrap[data-selected]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--bg); }

@@ -989,6 +989,33 @@ const TAB_NAMES: Record<string, string> = { resources: 'Resources', preview: 'Pr
  */
 function SideTabs({ tabs, active, live, labelOf, onSelect, onCloseApp }: { tabs: readonly SideTab[]; active: SideTab | undefined; live: boolean; labelOf(tab: SideTab): { label: string; dev: boolean }; onSelect(tab: SideTab): void; onCloseApp(toolCallId: string): void }) {
   const strip = useRef<HTMLDivElement>(null);
+  // Overflow: the strip scrolls horizontally, with a fade on each edge that hides tabs.
+  const [overflow, setOverflow] = useState<{ start: boolean; end: boolean }>({ start: false, end: false });
+  const measure = useCallback(() => {
+    const el = strip.current;
+    if (!el) return;
+    const start = el.scrollLeft > 1, end = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setOverflow(previous => previous.start === start && previous.end === end ? previous : { start, end });
+  }, []);
+  useEffect(() => {
+    const el = strip.current;
+    if (!el) return;
+    measure();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : undefined;
+    observer?.observe(el);
+    return () => observer?.disconnect();
+  }, [measure, tabs.length]);
+  // The selected tab scrolls into view (clear of the fades).
+  useEffect(() => {
+    const el = strip.current;
+    const tab = active ? el?.querySelector<HTMLElement>(`#${tabId(active)}`)?.closest<HTMLElement>('.side-tab-wrap') : undefined;
+    if (!el || !tab) return;
+    const fade = 24;
+    const box = el.getBoundingClientRect(), rect = tab.getBoundingClientRect();
+    const left = rect.left - box.left + el.scrollLeft, right = left + rect.width;
+    if (left - fade < el.scrollLeft) el.scrollTo({ left: Math.max(0, left - fade), behavior: 'smooth' });
+    else if (right + fade > el.scrollLeft + el.clientWidth) el.scrollTo({ left: right + fade - el.clientWidth, behavior: 'smooth' });
+  }, [active, tabs.length]);
   const onKeyDown = (event: React.KeyboardEvent, tab: SideTab) => {
     const id = appTabId(tab);
     if (id && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); onCloseApp(id); return; }
@@ -998,7 +1025,8 @@ function SideTabs({ tabs, active, live, labelOf, onSelect, onCloseApp }: { tabs:
     onSelect(next);
     requestAnimationFrame(() => strip.current?.querySelector<HTMLElement>(`#${tabId(next)}`)?.focus());
   };
-  return <div className="side-tabs" role="tablist" aria-label="Side panel" ref={strip}>
+  return <div className="side-tabs" role="tablist" aria-label="Side panel" ref={strip} onScroll={measure} data-fade-start={overflow.start || undefined} data-fade-end={overflow.end || undefined}
+    onWheel={event => { const el = strip.current; if (el && Math.abs(event.deltaY) > Math.abs(event.deltaX) && el.scrollWidth > el.clientWidth) el.scrollLeft += event.deltaY; }}>
     {tabs.map(tab => {
       const id = appTabId(tab);
       const { label, dev } = id ? labelOf(tab) : { label: TAB_NAMES[tab] ?? tab, dev: false };
