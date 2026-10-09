@@ -37,11 +37,11 @@ import { PreviewPanel, usePreviewStatus } from './preview.js';
 import { PREVIEW_LAYOUT_KEY, devServerRunning, readPreviewLayout, type PreviewLayout } from './preview-model.js';
 import { AtlassianDialog, AtlassianRow, useAtlassianStatus } from './integrations.js';
 import { LAYOUT_KEY, readLayout, type Layout } from './resources-model.js';
-import { SIDE_PANEL_KEY, SIDE_WIDTH, activeTab, announce, appTab, appTabId, appsOf, clampSideWidth, closeApp, close as closeSide, hasApp, isShown, openApp, readSidePanel, select as selectSide, tabKey, toggle as toggleSide, visibleTabs, type Announced, type SidePanel, type SideTab } from './side-panel-model.js';
+import { SIDE_PANEL_KEY, SIDE_WIDTH, activeTab, announce, appTab, appTabId, appsOf, clampSideWidth, closeApp, retargetApp, close as closeSide, hasApp, isShown, openApp, readSidePanel, select as selectSide, tabKey, toggle as toggleSide, visibleTabs, type Announced, type SidePanel, type SideTab } from './side-panel-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
 import { AppApprovalCards, AppOverlay, AppPanel, AppsContext, AppsDialog, AppsRow, useAppApprovals, useViewTools, type AppsState } from './apps.js';
-import { appToolLabel } from './apps-model.js';
+import { appToolLabel, liveViews, readViewPolicy, viewIdentity, viewPolicyKey, type ViewCall, type ViewPins, type ViewPolicy } from './apps-model.js';
 import './style.css';
 import './markdown.css';
 
@@ -217,7 +217,32 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [appsVersion, setAppsVersion] = useState(0);
   const { viewTools, generations: devGenerations } = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
   const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
-  useEffect(() => { setAppOverlay(undefined); }, [current.id]);
+  useEffect(() => { setAppOverlay(undefined); setViewPins({}); }, [current.id]);
+  // One live view per app view (default): the newest call of each view renders, in its place (inline, panel, full screen); earlier ones collapse.
+  const [viewPolicies, setViewPolicies] = useState<Record<string, ViewPolicy>>({});
+  const viewPolicy = useCallback((app: string): ViewPolicy => viewPolicies[app] ?? readViewPolicy(localStorage.getItem(viewPolicyKey(agent.id, app))), [viewPolicies, agent.id]);
+  const setViewPolicy = (app: string, value: ViewPolicy) => { localStorage.setItem(viewPolicyKey(agent.id, app), value); setViewPolicies(p => ({ ...p, [app]: value })); };
+  const [viewPins, setViewPins] = useState<ViewPins>({});
+  const viewCalls = useMemo<ViewCall[]>(() => messages.flatMap(m => typeof m.content === 'string' ? [] : m.content.flatMap(part => part.type === 'tool-call' && part.toolCallId && viewTools[part.toolName] && !part.isError ? [{ id: part.toolCallId, tool: part.toolName }] : [])), [messages, viewTools]);
+  const liveCalls = useMemo(() => liveViews(viewCalls, viewTools, viewPolicy, viewPins), [viewCalls, viewTools, viewPolicy, viewPins]);
+  // A newer (or chosen) call of a view open in the panel, full screen or picture-in-picture takes its place there.
+  useEffect(() => {
+    if (current.draft) return;
+    const thread = current.id;
+    for (const tab of appTabs) {
+      const view = viewTools[tab.tool];
+      const live = view ? liveCalls[viewIdentity(view)] : undefined;
+      const call = live ? viewCalls.find(c => c.id === live) : undefined;
+      if (call && live !== tab.id) updateSide(s => retargetApp(s, thread, tab.id, { id: call.id, tool: call.tool }));
+    }
+    if (appOverlay) {
+      const tool = viewCalls.find(c => c.id === appOverlay.toolCallId)?.tool;
+      const view = tool ? viewTools[tool] : undefined;
+      const live = view ? liveCalls[viewIdentity(view)] : undefined;
+      if (live && live !== appOverlay.toolCallId) setAppOverlay({ ...appOverlay, toolCallId: live });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveCalls, current.id]);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
@@ -847,6 +872,15 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     closePanel: id => { if (!current.draft) { const thread = current.id; updateSide(s => closeApp(s, thread, id)); } },
     setOverlay: value => { if (value && !current.draft && hasApp(side, current.id, value.toolCallId)) { const thread = current.id; updateSide(s => closeApp(s, thread, value.toolCallId)); } setAppOverlay(value); },
     refreshApprovals: refreshAppApprovals,
+    liveCall: (tool, id) => { const view = viewTools[tool]; return (view && liveCalls[viewIdentity(view)]) ?? id; },
+    callOrder: id => viewCalls.findIndex(c => c.id === id),
+    showCall: (tool, id) => {
+      const view = viewTools[tool];
+      if (!view) return;
+      const key = viewIdentity(view);
+      const newest = [...viewCalls].reverse().find(c => viewTools[c.tool] && viewIdentity(viewTools[c.tool]!) === key)?.id;
+      if (newest) setViewPins(p => ({ ...p, [key]: { id, newest } }));
+    },
     // A message the view sent (allowed) starts a turn here: the long poll follows it (a refresh here could hold the runtime while you send).
     onSent: () => {},
   };
@@ -980,7 +1014,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {modelOf && local && <ModelDialog agent={modelOf} onClose={() => setModelOf(undefined)} onSaved={() => { setModelOf(undefined); local.reload(modelOf.id); }}/>}
         {projectOf && local && <ProjectDialog agent={projectOf} onClose={() => setProjectOf(undefined)} onSaved={() => { setProjectOf(undefined); local.reload(projectOf.id); }}/>}
         {memoryOpen && <MemoryDialog agentName={agent.name} admin={!viewOnly && (!team || isAdmin)} viewOnly={viewOnly} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
-        {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)}/>}
+        {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)} viewPolicy={viewPolicy} onViewPolicy={setViewPolicy}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
