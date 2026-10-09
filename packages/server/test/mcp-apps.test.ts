@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
 import type { SDKMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
-import { LettaAgent, McpApps, ToolInteractions, defineAgent, resolveMcpApps, type ContentSource } from 'ai-sdk-letta';
+import { LettaAgent, McpApps, ToolInteractions, defineAgent, mcpAppsDirectory, resolveMcpApps, statePaths, type ContentSource } from 'ai-sdk-letta';
 import { AppGate, ThreadRuntime, agentInfo, sandboxProxyHtml, startPreviewServer, startTeamServer, type RuntimeHost } from '../src/index.js';
 import { tools } from './fixtures.js';
 
@@ -354,4 +354,56 @@ test('gate: a dev app\'s view calls run without a card (audited); asking can be 
     assert.equal(f.gate.pending('owner', f.thread)[0]!.grantable, undefined, 'no "Allow always" for dev apps (the toggle is the way)');
     await assert.rejects(f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }), /invalid_input/);
   } finally { await f.cleanup(); }
+});
+
+test('views of an adopted agent\'s dev app after a restart: the records and threads of its own state answer, also for a call recorded after the view first asked', async () => {
+  // Laid out as the GUI lays out an adopted agent: records under mcp-apps/<definition>, threads under server/<definition>/gui.
+  const root = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-adopted-'));
+  const definitionId = 'chess-bdd86e14';
+  const folder = join(statePaths(root).server(definitionId), 'gui');
+  const conversations: string[] = [];
+  const host: RuntimeHost = { async close() {}, async open(options) {
+    const conversationId = 'conversationId' in options ? options.conversationId : `local-conv-${conversations.length + 30}`;
+    conversations.push(conversationId);
+    const agent = new LettaAgent({ id: 'fixture', tools, lettaAgentId: 'agent-local-1', interactions: new ToolInteractions(), open: () => ({ async send() {}, async abort() {}, close() {}, async *stream() { yield { type: 'result', success: true, uuid: 'r', durationMs: 1, conversationId } as SDKMessage; } }) });
+    return { agent, agentId: 'agent-local-1', conversationId, history: [] };
+  } };
+  mkdirSync(folder, { recursive: true });
+  const boot = async () => {
+    const apps = new McpApps([], { directory: mcpAppsDirectory(statePaths(root).root, definitionId) });
+    const runtime = new ThreadRuntime(host, join(folder, 'state.json'), 'local-gui');
+    const gate = new AppGate({ apps, runtime, owner: 'local-gui', appOrigin: () => 'http://127.0.0.1:4999', sandboxPort: () => 5999, auditFile: join(folder, 'app-audit.ndjson'), person: () => ({ id: 'local', name: 'You' }) });
+    runtime.apps = gate;
+    return { apps, runtime, gate };
+  };
+  const startDev = (apps: McpApps, conversationId: string) => apps.startDev({ name: 'chessos', conversationId, folder: '/project', command: 'python -m src.server_app', launch: async () => ({ line: { command: process.execPath, args: [SERVER] }, stop: async () => {} }) });
+  const ids = ['call_JudY0fvET3XnWXaEFiRzKQWr|fc_0e3cf518923c64a7016ac94bccd90c819aa6984027a2d40ba4', 'call_4ab491676bde45b089b5dcc496353f30|fc_0e3cf518', 'call_f7ff1c6ea79d43439a1a5559f0b9deaa|fc_0e3cf5189'];
+  try {
+    const first = await boot();
+    const thread = randomUUID();
+    await first.runtime.create('local-gui', thread, 'MCP App');
+    const conversationId = first.runtime.conversationOf('local-gui', thread)!;
+    await startDev(first.apps, conversationId);
+    for (const id of ids) await first.apps.callAsAgent('dev_chessos__show', { label: id.slice(5, 9) }, { conversationId, toolCallId: id });
+    for (const id of ids) assert.ok('instance' in await first.gate.instance('local-gui', thread, { toolCallId: id }), 'before the restart');
+    await first.runtime.close(); await first.apps.close();
+
+    // The GUI restarts: new runtime, gate and apps on the same state; the agent starts its dev app again (generation 1).
+    const second = await boot();
+    assert.equal(second.apps.records.size, ids.length, 'the records are read back');
+    // Before the dev app runs again: the call is known; its view waits for the app (not "no view").
+    await assert.rejects(second.gate.instance('local-gui', thread, { toolCallId: ids[0] }), /app_unknown|app_unavailable/);
+    await startDev(second.apps, conversationId);
+    for (const [index, id] of ids.entries()) {
+      const answer = await second.gate.instance('local-gui', thread, { toolCallId: id, placement: index ? 'inline' : 'panel' }) as { instance?: string; status: string; input: { label: string } };
+      assert.ok(answer.instance, `the view of ${id.slice(0, 12)} after the restart`);
+      assert.equal(answer.status, 'done');
+    }
+    // A view that asked while its call was still streaming: "none" first, then the instance once the call is recorded.
+    const late = 'call_539997077ae149f78aca8fe2a7549268|fc_0e3cf518923c64a7016ac95870d74c819aa115b500772a67b1';
+    assert.deepEqual(await second.gate.instance('local-gui', thread, { toolCallId: late }), { status: 'none' });
+    await second.apps.callAsAgent('dev_chessos__show', { label: 'late' }, { conversationId, toolCallId: late });
+    assert.ok('instance' in await second.gate.instance('local-gui', thread, { toolCallId: late }), 'asking again finds it');
+    await second.runtime.close(); await second.apps.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

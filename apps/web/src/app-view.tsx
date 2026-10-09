@@ -3,7 +3,7 @@ import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client';
 import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
-import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
+import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, retryInstance, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
 
 /**
  * One MCP App view (spec 2026-01-26): the view's HTML in a sandbox proxy
@@ -69,7 +69,9 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
   const frame = useRef<HTMLIFrameElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number>(INLINE_HEIGHT.initial);
-  const [state, setState] = useState<{ phase: 'loading' | 'ready' | 'failed'; error?: string; instance?: AppInstance }>({ phase: 'loading' });
+  // `missing`: the server had no record of the call (yet); a later phase of the call asks again.
+  const [state, setState] = useState<{ phase: 'loading' | 'ready' | 'failed'; error?: string; instance?: AppInstance; missing?: boolean }>({ phase: 'loading' });
+  const [attempt, setAttempt] = useState(0);
   const [declared, setDeclared] = useState<string[] | undefined>();
   const bridgeRef = useRef<AppBridge | undefined>(undefined);
   const modeRef = useRef(mode); modeRef.current = mode;
@@ -92,11 +94,11 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
         let answer: AppInstance | NoInstance;
         for (let attempt = 0; ; attempt++) {
           answer = await api<AppInstance | NoInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement });
-          if ((answer as AppInstance).instance || disposed || versionRef.current !== 'running' || attempt >= 40) break;
+          if ((answer as AppInstance).instance || disposed || !retryInstance(versionRef.current, attempt)) break;
           await new Promise(resolve => setTimeout(resolve, 250));
         }
         if (disposed) return;
-        if (!(answer as AppInstance).instance) { setState({ phase: 'failed', error: versionRef.current === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
+        if (!(answer as AppInstance).instance) { setState({ phase: 'failed', missing: true, error: versionRef.current === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
         instance = answer as AppInstance;
       }
       catch (error) {
@@ -196,8 +198,16 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       if (instanceId) void api(`/v1/apps/instances/${instanceId}/close`, {}).catch(() => {});
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, toolCallId, placement]);
+  }, [threadId, toolCallId, placement, attempt]);
   useEffect(() => { if (version !== 'running' && !pending.current.resultSent) pending.current.refresh?.(); }, [version]);
+  // Not recorded when it asked (a call still streaming when its view mounted, in the panel or full screen): its next phase asks again.
+  const missing = state.phase === 'failed' && state.missing;
+  const lastVersion = useRef(version);
+  useEffect(() => {
+    if (lastVersion.current === version) return;
+    lastVersion.current = version;
+    if (missing) { setState({ phase: 'loading' }); setAttempt(a => a + 1); }
+  }, [version, missing]);
 
   // Mode or size changes reach the view as host context.
   useEffect(() => {
