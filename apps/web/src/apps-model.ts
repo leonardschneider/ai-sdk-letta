@@ -2,7 +2,7 @@
 
 /** An app tool of the agent whose calls show a view (`GET /v1/apps` → `viewTools`). */
 /** `dev`: a dev app of this conversation (MCP Apps dev mode). */
-export type ViewTool = { app: string; appName: string; tool: string; title?: string; dev?: true };
+export type ViewTool = { app: string; appName: string; tool: string; title?: string; resourceUri?: string; dev?: true };
 /** May this be an app tool (`<app>__<tool>`, or a dev app's `dev_<name>__<tool>`)? The line then asks `viewTools` whether it has a view. */
 export const isAppToolName = (name: string): boolean => /^(?:dev_)?[a-z][a-z0-9-]{0,23}__/.test(name);
 /** `GET /v1/apps` → `devGenerations`: each running dev app's generation (it grows with every `mcp_app_dev_reload`). */
@@ -69,6 +69,74 @@ export const INLINE_HEIGHT = { min: 48, initial: 160, max: 640 } as const;
 export function inlineHeight(requested: unknown, current: number): number {
   if (typeof requested !== 'number' || !Number.isFinite(requested)) return current;
   return Math.round(Math.min(INLINE_HEIGHT.max, Math.max(INLINE_HEIGHT.min, requested)));
+}
+
+/**
+ * Damps a view's `size-changed` heights (inline). A view whose layout
+ * depends on its frame (a scrollbar that comes and goes, `100vh`, fractional
+ * sizes) can answer every height the host sets with another one: a feedback
+ * loop the person sees as jitter. Changes of `SIZE_DAMPING.slack` px or less
+ * are ignored, and a height that alternates (A → B → A within
+ * `SIZE_DAMPING.window` ms) settles on the larger one and stops shrinking
+ * for that window.
+ */
+export const SIZE_DAMPING = { slack: 2, window: 1000 } as const;
+export class SizeDamper {
+  private history: { height: number; at: number }[] = [];
+  private holdUntil = 0;
+  constructor(public current: number = INLINE_HEIGHT.initial) {}
+  /** The height to apply for a requested one, or `undefined` to keep the current one. */
+  next(requested: unknown, now: number): number | undefined {
+    const wanted = inlineHeight(requested, this.current);
+    if (Math.abs(wanted - this.current) <= SIZE_DAMPING.slack) return undefined;
+    this.history = this.history.filter(entry => now - entry.at <= SIZE_DAMPING.window);
+    // Shrinking back to a height seen just before (an oscillation): hold the larger one.
+    if (wanted < this.current && (now < this.holdUntil || this.history.some(entry => Math.abs(entry.height - wanted) <= SIZE_DAMPING.slack))) {
+      this.holdUntil = now + SIZE_DAMPING.window;
+      return undefined;
+    }
+    this.history.push({ height: this.current, at: now });
+    this.current = wanted;
+    return wanted;
+  }
+}
+
+/** One view per app and resource: calls of tools sharing a view are the same view. */
+export const viewIdentity = (view: ViewTool): string => `${view.app}\u0000${view.resourceUri ?? view.tool}`;
+/** Per app: one live view (the latest call's; default) or every call its own view. */
+export type ViewPolicy = 'single' | 'every';
+export const viewPolicyKey = (agentId: string, appId: string) => `ai-sdk-letta-app-views:${agentId}:${appId}`;
+export const readViewPolicy = (raw: string | null | undefined): ViewPolicy => raw === 'every' ? 'every' : 'single';
+/** A call of a tool with a view, in conversation order. */
+export type ViewCall = { id: string; tool: string };
+/** "Show this one": the call chosen for a view, while `newest` is still its newest call. */
+export type ViewPins = Readonly<Record<string, { id: string; newest: string }>>;
+/**
+ * The live call of each view (by `viewIdentity`): the newest call, unless
+ * the person chose an earlier one since (until a newer call comes). Views
+ * of apps whose policy is `every` are not listed: each call shows its own.
+ */
+export function liveViews(calls: readonly ViewCall[], viewTools: Readonly<Record<string, ViewTool>>, policy: (appId: string) => ViewPolicy, pins: ViewPins = {}): Record<string, string> {
+  const newest: Record<string, string> = {};
+  const known = new Set<string>();
+  for (const call of calls) {
+    const view = viewTools[call.tool];
+    if (!view || policy(view.app) === 'every') continue;
+    const key = viewIdentity(view);
+    newest[key] = call.id;
+    known.add(`${key}\u0000${call.id}`);
+  }
+  const live: Record<string, string> = {};
+  for (const [key, id] of Object.entries(newest)) {
+    const pin = pins[key];
+    live[key] = pin && pin.newest === id && known.has(`${key}\u0000${pin.id}`) ? pin.id : id;
+  }
+  return live;
+}
+/** The live call for `toolCallId`'s view (itself when every call shows its own view). */
+export function liveCallOf(live: Readonly<Record<string, string>>, viewTools: Readonly<Record<string, ViewTool>>, tool: string, toolCallId: string): string {
+  const view = viewTools[tool];
+  return (view && live[viewIdentity(view)]) ?? toolCallId;
 }
 
 /** The theme variables a view gets (spec "Theming"): `light-dark()` pairs of the app's own palette. */

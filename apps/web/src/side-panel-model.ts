@@ -106,6 +106,18 @@ export function closeApp(state: SidePanel, threadId: string, toolCallId: string)
   const neighbour = rest[Math.min(index, rest.length - 1)];
   return neighbour ? { ...state, apps, tab: appTab(neighbour.id) } : { ...state, apps, open: false, tab: 'resources' };
 }
+/**
+ * A newer call of the same view replaces an app tab (one live view): the tab
+ * keeps its place and, if it was the active one, stays active. A tab for the
+ * new call that already exists is merged into it.
+ */
+export function retargetApp(state: SidePanel, threadId: string, fromId: string, to: AppTab): SidePanel {
+  const list = state.apps[threadId] ?? [];
+  if (fromId === to.id || !list.some(t => t.id === fromId)) return state;
+  const next = list.flatMap(t => t.id === fromId ? [to] : t.id === to.id ? [] : [t]);
+  const tab = state.tab === appTab(fromId) ? appTab(to.id) : state.tab;
+  return { ...state, tab, apps: { ...state.apps, [threadId]: next } };
+}
 /** Is this call shown in the panel (a tab of the conversation)? */
 export const hasApp = (state: SidePanel, threadId: string | undefined, toolCallId: string) => !!threadId && (state.apps[threadId] ?? []).some(t => t.id === toolCallId);
 export const appsOf = (state: SidePanel, threadId: string | undefined): AppTab[] => threadId ? state.apps[threadId] ?? [] : [];

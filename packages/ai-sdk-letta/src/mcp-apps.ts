@@ -964,11 +964,12 @@ export class McpApps {
     });
   }
   /** App tools of the agent with a view: `agentTool → { app, tool, title }`, for the browser. */
-  viewTools(): Record<string, { app: string; appName: string; tool: string; title?: string; dev?: true }> {
-    const out: Record<string, { app: string; appName: string; tool: string; title?: string; dev?: true }> = {};
+  viewTools(): Record<string, { app: string; appName: string; tool: string; title?: string; resourceUri: string; dev?: true }> {
+    const out: Record<string, { app: string; appName: string; tool: string; title?: string; resourceUri: string; dev?: true }> = {};
     for (const [name, target] of this.agentTools('*').names) {
       const definition = this.toolDefinition(target.app, target.tool);
-      if (definition && toolResourceUri(definition)) out[name] = { app: target.app, appName: this.name(target.app), tool: target.tool, ...(typeof definition.title === 'string' ? { title: definition.title.slice(0, 120) } : {}), ...(this.isDev(target.app) ? { dev: true as const } : {}) };
+      const uri = definition ? toolResourceUri(definition) : undefined;
+      if (definition && uri) out[name] = { app: target.app, appName: this.name(target.app), tool: target.tool, resourceUri: uri, ...(typeof definition.title === 'string' ? { title: definition.title.slice(0, 120) } : {}), ...(this.isDev(target.app) ? { dev: true as const } : {}) };
     }
     return out;
   }

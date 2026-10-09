@@ -111,3 +111,15 @@ test('arrow keys move through the tabs, wrapping', () => {
   assert.equal(tabKey(tabs, 'preview', 'End'), 'app:c1');
   assert.equal(tabKey(tabs, 'preview', 'a'), undefined);
 });
+
+test('retargetApp: a newer call of the view takes the tab (its place, active)', async () => {
+  const { retargetApp, DEFAULT_SIDE_PANEL: base, openApp: open } = await import('../src/side-panel-model.js');
+  let state = open(open(base, 't', { id: 'x', tool: 'other__y' }), 't', { id: 'a', tool: 'chess__move' });
+  state = retargetApp(state, 't', 'a', { id: 'b', tool: 'chess__move' });
+  assert.deepEqual(state.apps.t, [{ id: 'x', tool: 'other__y' }, { id: 'b', tool: 'chess__move' }]);
+  assert.equal(state.tab, 'app:b');
+  assert.equal(retargetApp(state, 't', 'missing', { id: 'c', tool: 'chess__move' }), state, 'no tab: unchanged');
+  assert.equal(retargetApp(state, 't', 'b', { id: 'b', tool: 'chess__move' }), state);
+  const merged = retargetApp(open(state, 't', { id: 'z', tool: 'chess__move' }), 't', 'z', { id: 'x', tool: 'other__y' });
+  assert.deepEqual(merged.apps.t?.map(t => t.id), ['b', 'x'], 'an existing tab for the target is merged into the retargeted one');
+});

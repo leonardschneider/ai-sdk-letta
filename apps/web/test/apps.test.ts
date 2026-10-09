@@ -81,3 +81,42 @@ test('dev reloads: a view keys on its dev app\'s generation; installed apps and 
   assert.ok(!isAppToolName('mcp_app_dev_start'));
   assert.notEqual(devGenerationsKey({ a: 1 }), devGenerationsKey({ a: 2 }));
 });
+
+test('size-changed: small changes and oscillations are damped (no jitter)', async () => {
+  const { SizeDamper, SIZE_DAMPING } = await import('../src/apps-model.js');
+  const damper = new SizeDamper(160);
+  assert.equal(damper.next(300, 0), 300, 'a real change applies');
+  assert.equal(damper.next(301, 10), undefined, '±1px is ignored');
+  assert.equal(damper.next(298, 20), undefined, '±2px is ignored');
+  assert.equal(damper.next(320, 30), 320, 'growing applies');
+  assert.equal(damper.next(300, 40), undefined, 'shrinking back to a height just seen is an oscillation: held');
+  assert.equal(damper.next(320, 50), undefined, 'and the held height stays');
+  assert.equal(damper.next(250, 60), undefined, 'no shrinking while it oscillates');
+  assert.equal(damper.next(250, 60 + SIZE_DAMPING.window + 1), 250, 'after the window a real shrink applies');
+  assert.equal(damper.next(10_000, 3000), INLINE_HEIGHT.max, 'bounded');
+  assert.equal(damper.next(undefined, 3100), undefined);
+});
+
+test('one live view: the latest call of each app view, pins, policy', async () => {
+  const { liveViews, liveCallOf, viewIdentity, readViewPolicy, viewPolicyKey } = await import('../src/apps-model.js');
+  const viewTools = {
+    chess__move: { app: 'chess', appName: 'Chess', tool: 'move', resourceUri: 'ui://chess/board' },
+    chess__new: { app: 'chess', appName: 'Chess', tool: 'new', resourceUri: 'ui://chess/board' },
+    clock__time: { app: 'clock', appName: 'Clock', tool: 'time', resourceUri: 'ui://clock/view' },
+  };
+  const calls = [{ id: 'a', tool: 'chess__new' }, { id: 'b', tool: 'clock__time' }, { id: 'c', tool: 'chess__move' }, { id: 'd', tool: 'clock__time' }, { id: 'e', tool: 'chess__move' }];
+  const single = () => 'single' as const;
+  const live = liveViews(calls, viewTools, single);
+  assert.deepEqual(live, { [viewIdentity(viewTools.chess__move)]: 'e', [viewIdentity(viewTools.clock__time)]: 'd' }, 'tools sharing a view are one view; the latest call is live');
+  assert.equal(liveCallOf(live, viewTools, 'chess__new', 'a'), 'e');
+  assert.equal(liveCallOf(live, viewTools, 'other__x', 'z'), 'z');
+  const chess = viewIdentity(viewTools.chess__move);
+  assert.equal(liveViews(calls, viewTools, single, { [chess]: { id: 'c', newest: 'e' } })[chess], 'c', '"Show this one"');
+  assert.equal(liveViews([...calls, { id: 'f', tool: 'chess__move' }], viewTools, single, { [chess]: { id: 'c', newest: 'e' } })[chess], 'f', 'a newer call takes over from a pin');
+  assert.equal(liveViews(calls, viewTools, single, { [chess]: { id: 'gone', newest: 'e' } })[chess], 'e', 'a pin of an unknown call is ignored');
+  assert.deepEqual(Object.keys(liveViews(calls, viewTools, app => app === 'chess' ? 'every' : 'single')), [viewIdentity(viewTools.clock__time)], 'every call its own view: not collapsed');
+  assert.equal(readViewPolicy(null), 'single', 'default: one live view');
+  assert.equal(readViewPolicy('every'), 'every');
+  assert.equal(readViewPolicy('junk'), 'single');
+  assert.equal(viewPolicyKey('agent-1', 'chess'), 'ai-sdk-letta-app-views:agent-1:chess');
+});
