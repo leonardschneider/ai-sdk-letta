@@ -46,7 +46,7 @@ export type AppStatusView = {
   id: string; name: string; version?: string; packageName?: string; status: 'starting' | 'running' | 'failed' | 'stopped'; error?: string; enabled: boolean; origins?: string[];
   tools?: { name: string; agentTool?: string; title?: string; description?: string; visibility: ('model' | 'app')[]; policy: 'allow' | 'ask' | 'deny'; resourceUri?: string; granted?: 'tool' | 'app' }[];
   /** "Allow all from this app" was chosen; dev apps: whether calls from its views ask first. */
-  grantedAll?: boolean; dev?: { conversationId: string }; viewsAsk?: boolean;
+  grantedAll?: boolean; grantedMessages?: boolean; grantedContext?: boolean; dev?: { conversationId: string }; viewsAsk?: boolean;
   views?: { uri: string; declared: Record<string, string[] | undefined>; granted: Record<string, string[]>; fingerprint?: string }[];
 };
 

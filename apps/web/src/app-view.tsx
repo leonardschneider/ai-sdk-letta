@@ -121,6 +121,8 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
           if (action === 'message') callbacks.current.onSent();
           return (settled.result ?? {}) as T;
         }
+        // Sent without a card (a dev app, or "Allow always"): the conversation shows it now.
+        if (action === 'message') callbacks.current.onSent();
         return answer.result as T;
       };
       bridge = new AppBridge(null, { name: 'ai-sdk-letta', version: '1' }, {
