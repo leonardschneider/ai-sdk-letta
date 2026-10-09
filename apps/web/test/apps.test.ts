@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
+import { acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
 import { historyMessages, knownApp } from '../src/messages.js';
 
 test('display modes: only modes the view declared and the host offers; otherwise the current one', () => {
@@ -74,5 +74,10 @@ test('dev reloads: a view keys on its dev app\'s generation; installed apps and 
   assert.equal(viewGeneration(tools, { dev_notes: 3 }, 'nope'), 0);
   assert.equal(viewGeneration(tools, { dev_notes: 3 }, undefined), 0);
   assert.equal(devGenerationsKey({ b: 2, a: 1 }), 'a:1,b:2');
+  // A dev app's tools are app tools too (their line shows the view).
+  assert.ok(isAppToolName('dev_notes__show_board'));
+  assert.ok(isAppToolName('clock__show'));
+  assert.ok(!isAppToolName('run_command'));
+  assert.ok(!isAppToolName('mcp_app_dev_start'));
   assert.notEqual(devGenerationsKey({ a: 1 }), devGenerationsKey({ a: 2 }));
 });
