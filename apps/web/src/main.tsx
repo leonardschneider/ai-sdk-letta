@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert } from 'lucide-react';
+import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
 import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ProjectDialog, RemoveAgentDialog } from './adoption.js';
@@ -34,13 +34,14 @@ import { ToastProvider, useToast } from './toasts.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
 import { PreviewPanel, usePreviewStatus } from './preview.js';
-import { PREVIEW_LAYOUT_KEY, PREVIEW_WIDTH, clampPreviewWidth, devServerRunning, readPreviewLayout, type PreviewLayout } from './preview-model.js';
+import { PREVIEW_LAYOUT_KEY, devServerRunning, readPreviewLayout, type PreviewLayout } from './preview-model.js';
 import { AtlassianDialog, AtlassianRow, useAtlassianStatus } from './integrations.js';
-import { LAYOUT_KEY, RESOURCES_WIDTH, clampWidth, readLayout, type Layout } from './resources-model.js';
+import { LAYOUT_KEY, readLayout, type Layout } from './resources-model.js';
+import { SIDE_PANEL_KEY, SIDE_WIDTH, activeTab, announce, appTab, appTabId, appsOf, clampSideWidth, closeApp, close as closeSide, hasApp, isShown, openApp, readSidePanel, select as selectSide, tabKey, toggle as toggleSide, visibleTabs, type Announced, type SidePanel, type SideTab } from './side-panel-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
 import { AppApprovalCards, AppOverlay, AppPanel, AppsContext, AppsDialog, AppsRow, useAppApprovals, useViewTools, type AppsState } from './apps.js';
-import { APP_PANEL_KEY, APP_PANEL_WIDTH, clampAppPanelWidth } from './apps-model.js';
+import { appToolLabel } from './apps-model.js';
 import './style.css';
 import './markdown.css';
 
@@ -157,18 +158,34 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const setLayout = useCallback((update: (previous: Layout) => Layout) => setLayoutState(previous => { const next = update(previous); localStorage.setItem(LAYOUT_KEY, JSON.stringify(next)); return next; }), []);
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
   useEffect(() => { const query = window.matchMedia('(max-width: 760px)'); const on = () => setNarrow(query.matches); query.addEventListener('change', on); return () => query.removeEventListener('change', on); }, []);
-  // On a phone, the Resources panel is a drawer like the sidebar (never persisted open).
-  const [resourcesDrawer, setResourcesDrawer] = useState(false);
-  const resourcesOpen = narrow ? resourcesDrawer : layout.resources;
-  const toggleSidebar = useCallback(() => { if (narrow) { setResourcesDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
-  const toggleResources = useCallback(() => { if (narrow) { setDrawer(false); setPreviewDrawer(false); setResourcesDrawer(open => !open); } else setLayout(l => ({ ...l, resources: !l.resources })); }, [narrow, setLayout]);
-  // Web app development: the Preview pane (right of the chat, before Resources), a drawer on a phone. It opens by itself when a dev server starts.
+  // The right side panel: one column with tabs (Resources, Preview, the conversation's app views). One width and open state (persisted);
+  // on a phone it is a drawer like the sidebar (never persisted open).
   const webDevEnabled = !!agent.webDev;
+  const appsEnabled = !!agent.apps;
+  const [side, setSideState] = useState<SidePanel>(() => readSidePanel(localStorage.getItem(SIDE_PANEL_KEY), { layout: localStorage.getItem(LAYOUT_KEY), preview: localStorage.getItem(PREVIEW_LAYOUT_KEY) }));
+  const setSide = useCallback((update: (previous: SidePanel) => SidePanel) => setSideState(previous => { const next = update(previous); if (next !== previous) localStorage.setItem(SIDE_PANEL_KEY, JSON.stringify(next)); return next; }), []);
+  const [sideDrawer, setSideDrawer] = useState(false);
+  const sideContext = { ...(current.draft ? {} : { threadId: current.id }), resources: resourcesEnabled, preview: webDevEnabled, apps: appsEnabled };
+  const sideView: SidePanel = narrow ? { ...side, open: sideDrawer } : side;
+  const sideTabs = visibleTabs(sideView, sideContext);
+  const sideTab = activeTab(sideView, sideContext);
+  const sideOpen = isShown(sideView, sideContext);
+  const resourcesOpen = sideOpen && sideTab === 'resources';
+  const previewOpen = sideOpen && sideTab === 'preview';
+  // Every change goes through the model; on a phone "open" is the drawer (and opening it closes the sidebar drawer).
+  const updateSide = (update: (previous: SidePanel) => SidePanel) => {
+    if (!narrow) { setSide(update); return; }
+    const next = update(sideView);
+    setSide(previous => ({ ...next, open: previous.open }));
+    setSideDrawer(next.open);
+    if (next.open) setDrawer(false);
+  };
+  const toggleSidebar = useCallback(() => { if (narrow) { setSideDrawer(false); setDrawer(open => !open); } else setLayout(l => ({ ...l, sidebar: !l.sidebar })); }, [narrow, setLayout]);
+  const toggleTab = (tab: SideTab) => updateSide(s => toggleSide(s, tab, sideContext));
+  const toggleResources = () => toggleTab('resources');
+  // Web app development: the Preview tab. It opens by itself when a dev server starts. Its device toggle is kept here.
   const [previewLayout, setPreviewLayoutState] = useState<PreviewLayout>(() => readPreviewLayout(localStorage.getItem(PREVIEW_LAYOUT_KEY)));
   const setPreviewLayout = useCallback((update: (previous: PreviewLayout) => PreviewLayout) => setPreviewLayoutState(previous => { const next = update(previous); localStorage.setItem(PREVIEW_LAYOUT_KEY, JSON.stringify(next)); return next; }), []);
-  const [previewDrawer, setPreviewDrawer] = useState(false);
-  const previewOpen = webDevEnabled && (narrow ? previewDrawer : previewLayout.open);
-  const togglePreview = useCallback(() => { if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(open => !open); } else setPreviewLayout(l => ({ ...l, open: !l.open })); }, [narrow, setPreviewLayout]);
   const [turns, setTurns] = useState(0);
   const [archives, setArchives] = useState(0);
   // Bumped whenever the server reports a change (long poll): memory reviews and toasts follow it.
@@ -176,30 +193,25 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const memoryPending = useMemoryToasts(memoryEnabled && !connecting && !unreachable, serverChanges + turns);
   // While a turn runs (or the pane is open) the status is polled, so a dev server started mid-turn shows up.
   const [previewStatus, reloadPreview] = usePreviewStatus(current.draft ? undefined : current.id, webDevEnabled && !connecting && !unreachable, serverChanges + turns, webDevEnabled && (previewOpen || running));
-  // A dev server that starts (or restarts) in the open conversation opens the pane, once per start; closing it again is respected.
-  // The first status of a conversation is only remembered: opening a conversation whose server still runs does not pop the pane open.
-  const announced = useRef<{ thread?: string; started?: string }>({});
+  // A dev server that starts (or restarts) in the open conversation opens the Preview tab, once per start; closing it again is respected.
+  // The first status of a conversation is only remembered: opening a conversation whose server still runs does not pop the panel open.
+  const announced = useRef<Announced>({});
   useEffect(() => {
     if (!previewStatus || current.draft) return;
-    const started = devServerRunning(previewStatus) ? previewStatus.devServer.startedAt : undefined;
-    const previous = announced.current;
-    announced.current = { thread: current.id, started };
-    if (previous.thread !== current.id || !started || started === previous.started) return;
-    if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(true); } else setPreviewLayout(l => l.open ? l : { ...l, open: true });
+    const { next, open } = announce(announced.current, current.id, devServerRunning(previewStatus) ? previewStatus.devServer.startedAt : undefined);
+    announced.current = next;
+    if (open) updateSide(s => selectSide(s, 'preview'));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewStatus]);
   const [atlassianStatus, setAtlassianStatus] = useAtlassianStatus(atlassianEnabled, turns);
   // MCP Apps: tool lines of app tools show their views; one can open in the right panel, or full screen / picture-in-picture.
-  const appsEnabled = !!agent.apps;
   const [appsOpen, setAppsOpen] = useState(false);
-  const [appPanel, setAppPanel] = useState<string>();
   const [appOverlay, setAppOverlay] = useState<AppsState['overlay']>();
-  const [appPanelWidth, setAppPanelWidthState] = useState(() => clampAppPanelWidth(Number(localStorage.getItem(APP_PANEL_KEY) ?? APP_PANEL_WIDTH.initial)));
-  const setAppPanelWidth = useCallback((width: number) => { setAppPanelWidthState(width); localStorage.setItem(APP_PANEL_KEY, String(width)); }, []);
+  const appTabs = appsEnabled ? appsOf(side, current.draft ? undefined : current.id) : [];
   const [appsVersion, setAppsVersion] = useState(0);
   const viewTools = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
   const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
-  useEffect(() => { setAppPanel(undefined); setAppOverlay(undefined); }, [current.id]);
+  useEffect(() => { setAppOverlay(undefined); }, [current.id]);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
@@ -732,10 +744,10 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (event.key === 'Escape' && !event.defaultPrevented) {
         if (document.querySelector('[role="menu"], [role="dialog"]')) return;
         if (drawer) { setDrawer(false); return; }
-        if (narrow && resourcesDrawer) { setResourcesDrawer(false); return; }
-        if (narrow && previewDrawer) { setPreviewDrawer(false); return; }
+        // A full-screen view handles its own Escape (it is above everything); picture-in-picture does not hold it.
+        if (appOverlay?.mode === 'fullscreen') return;
+        if (narrow && sideDrawer) { setSideDrawer(false); return; }
         if (appOverlay) return;
-        if (narrow && appPanel) { setAppPanel(undefined); return; }
         const target = event.target as HTMLElement | null;
         if (!running || !mayAct || target?.closest('.dock, input, .composer')) return;
         event.preventDefault(); void cancel();
@@ -816,10 +828,10 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Team mode: someone else's approval or question is shown, but only they (or an admin) can answer it.
   const waitingFor = team && !mayAct ? liveAuthor?.name ?? 'the person who sent it' : undefined;
   const appsState: AppsState = {
-    enabled: appsEnabled, ...(current.draft ? {} : { threadId: current.id }), viewTools, ...(appPanel ? { panel: appPanel } : {}), ...(appOverlay ? { overlay: appOverlay } : {}),
-    openPanel: id => { setAppOverlay(undefined); setAppPanel(id); if (narrow) { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); } },
-    closePanel: () => setAppPanel(undefined),
-    setOverlay: value => { if (value && appPanel === value.toolCallId) setAppPanel(undefined); setAppOverlay(value); },
+    enabled: appsEnabled, ...(current.draft ? {} : { threadId: current.id }), viewTools, panel: appTabs.map(t => t.id), ...(appOverlay ? { overlay: appOverlay } : {}),
+    openPanel: (id, tool) => { if (current.draft) return; const thread = current.id; setAppOverlay(undefined); updateSide(s => openApp(s, thread, { id, tool })); },
+    closePanel: id => { if (!current.draft) { const thread = current.id; updateSide(s => closeApp(s, thread, id)); } },
+    setOverlay: value => { if (value && !current.draft && hasApp(side, current.id, value.toolCallId)) { const thread = current.id; updateSide(s => closeApp(s, thread, value.toolCallId)); } setAppOverlay(value); },
     refreshApprovals: refreshAppApprovals,
     // A message the view sent (allowed) starts a turn here: the long poll follows it (a refresh here could hold the runtime while you send).
     onSent: () => {},
@@ -832,15 +844,15 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     <LatexContext.Provider value={latex}>
     <RewindContext.Provider value={rewindState}>
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="layout" data-drawer={drawer || undefined} data-resources-drawer={(narrow && (resourcesDrawer || previewDrawer)) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-resources-open={(!narrow && layout.resources && resourcesEnabled) || undefined}
-        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} data-app-panel={(appPanel && !current.draft) || undefined} style={{ '--resources-width': `${layout.resourcesWidth}px`, '--preview-width': `${previewLayout.width}px`, '--app-panel-width': `${appPanelWidth}px` } as React.CSSProperties}>
+      <div className="layout" data-drawer={drawer || undefined} data-side-drawer={(narrow && sideOpen) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-side-open={(!narrow && sideOpen) || undefined}
+        data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--side-width': `${side.width}px` } as React.CSSProperties}>
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf}/> } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
-        <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setResourcesDrawer(false); setPreviewDrawer(false); }}/>
+        <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
         <main className="main">
           <header className="topbar">
             <button type="button" className="icon-btn menu-btn" aria-label={feed.decisions.length ? `Open sidebar (${feed.decisions.length === 1 ? '1 decision' : `${feed.decisions.length} decisions`} waiting)` : 'Open sidebar'} aria-controls="sidebar" aria-expanded={drawer} data-dot={feed.decisions.length > 0 || undefined} onClick={() => setDrawer(true)}><Menu size={18}/></button>
@@ -853,8 +865,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {memoryEnabled && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
             {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
-            {webDevEnabled && !current.draft && <button type="button" className="icon-btn preview-btn" aria-label={previewOpen ? 'Hide preview' : 'Show preview'} aria-controls="preview" aria-expanded={previewOpen} data-active={previewOpen || undefined} data-live={devServerRunning(previewStatus) || undefined} title={devServerRunning(previewStatus) ? 'Preview (dev server running)' : 'Preview'} onClick={togglePreview}><AppWindow size={18}/></button>}
-            {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="resources" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
+            {webDevEnabled && !current.draft && <button type="button" className="icon-btn preview-btn" aria-label={previewOpen ? 'Hide preview' : 'Show preview'} aria-controls="side-panel" aria-expanded={previewOpen} data-active={previewOpen || undefined} data-live={devServerRunning(previewStatus) || undefined} title={devServerRunning(previewStatus) ? 'Preview (dev server running)' : 'Preview'} onClick={() => toggleTab('preview')}><AppWindow size={18}/></button>}
+            {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="side-panel" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
           <ThreadPrimitive.Root className="thread">
@@ -924,21 +936,24 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
         </main>
-        {appsEnabled && appPanel && !current.draft && <aside id="app-panel" className="app-pane" aria-label="App">
-          {!narrow && <Resizer label="Resize app panel" min={APP_PANEL_WIDTH.min} max={APP_PANEL_WIDTH.max} width={appPanelWidth} clamp={clampAppPanelWidth} reset={APP_PANEL_WIDTH.initial} onWidth={setAppPanelWidth}/>}
-          <AppPanel toolCallId={appPanel} onClose={() => setAppPanel(undefined)}/>
-        </aside>}
         {appsEnabled && !current.draft && <AppOverlay/>}
-        {webDevEnabled && !current.draft && <aside id="preview" className="webprev-pane" aria-label="Preview" hidden={!previewOpen}>
-          {!narrow && <Resizer label="Resize preview" min={PREVIEW_WIDTH.min} max={PREVIEW_WIDTH.max} width={previewLayout.width} clamp={clampPreviewWidth} reset={PREVIEW_WIDTH.initial} onWidth={width => setPreviewLayout(l => ({ ...l, width }))}/>}
-          {previewOpen && <PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
-            onClose={() => { if (narrow) setPreviewDrawer(false); else setPreviewLayout(l => ({ ...l, open: false })); }} onChanged={() => void reloadPreview()}/>}
-        </aside>}
-        {resourcesEnabled && <aside id="resources" className="resources-pane" aria-label="Resources" hidden={!resourcesOpen}>
-          {!narrow && <Resizer label="Resize resources" min={RESOURCES_WIDTH.min} max={RESOURCES_WIDTH.max} width={layout.resourcesWidth} clamp={clampWidth} reset={320} onWidth={width => setLayout(l => ({ ...l, resourcesWidth: width }))}/>}
-          <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => { if (narrow) setResourcesDrawer(false); else setLayout(l => ({ ...l, resources: false })); }}
-            onOpenThread={id => { if (narrow) setResourcesDrawer(false); void select(id); }}
-            onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
+        {sideTabs.length > 0 && <aside id="side-panel" className="side-pane" aria-label="Side panel" data-tab={sideTab && appTabId(sideTab) ? 'app' : sideTab} hidden={!sideOpen}>
+          {!narrow && <Resizer label="Resize side panel" min={SIDE_WIDTH.min} max={SIDE_WIDTH.max} width={side.width} clamp={clampSideWidth} reset={SIDE_WIDTH.initial} onWidth={width => setSide(s => ({ ...s, width }))}/>}
+          <SideTabs tabs={sideTabs} active={sideTab} live={devServerRunning(previewStatus)} labelOf={tab => { const id = appTabId(tab); const app = id ? appTabs.find(t => t.id === id) : undefined; const view = app ? viewTools[app.tool] : undefined; return { label: view ? appToolLabel(view, 'done') : app?.tool ?? 'App', dev: !!view?.dev }; }}
+            onSelect={tab => updateSide(s => selectSide(s, tab))} onCloseApp={id => appsState.closePanel(id)}/>
+          {resourcesEnabled && <div className="side-tabpanel" role="tabpanel" id={tabPanelId('resources')} aria-labelledby={tabId('resources')} hidden={sideTab !== 'resources'}>
+            <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => updateSide(closeSide)}
+              onOpenThread={id => { if (narrow) setSideDrawer(false); void select(id); }}
+              onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
+          </div>}
+          {previewOpen && !current.draft && <div className="side-tabpanel" role="tabpanel" id={tabPanelId('preview')} aria-labelledby={tabId('preview')}>
+            <PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
+              onClose={() => updateSide(closeSide)} onChanged={() => void reloadPreview()}/>
+          </div>}
+          {/* Like Preview, an app view runs only while its tab shows (switching back starts it again, as reopening the former panel did). */}
+          {sideOpen && sideTab && appTabId(sideTab) && <div key={sideTab} className="side-tabpanel" role="tabpanel" id={tabPanelId(sideTab)} aria-labelledby={tabId(sideTab)}>
+            <AppPanel toolCallId={appTabId(sideTab)!} onClose={() => appsState.closePanel(appTabId(sideTab)!)}/>
+          </div>}
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
         {adoptOpen && local && <AddAgentDialog onClose={() => setAdoptOpen(false)} onAdded={id => { setAdoptOpen(false); local.reload(id); }}/>}
@@ -961,7 +976,48 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   </AppsContext.Provider>;
 }
 
-/** Drag handle on a right panel's left edge (Resources, Preview); arrow keys resize too. The width is kept between visits. */
+/** DOM ids of a side panel tab and its panel (tool call ids may hold any character). */
+const domId = (tab: SideTab) => tab.replace(/[^A-Za-z0-9_-]/g, '_');
+const tabId = (tab: SideTab) => `side-tab-${domId(tab)}`;
+const tabPanelId = (tab: SideTab) => `side-tabpanel-${domId(tab)}`;
+const TAB_NAMES: Record<string, string> = { resources: 'Resources', preview: 'Preview' };
+
+/**
+ * The side panel's tab strip (a tablist: arrow keys, Home and End move and
+ * select; Delete closes an app tab). App tabs carry the app's name and tool,
+ * a "Dev" chip for a dev app, and a close button.
+ */
+function SideTabs({ tabs, active, live, labelOf, onSelect, onCloseApp }: { tabs: readonly SideTab[]; active: SideTab | undefined; live: boolean; labelOf(tab: SideTab): { label: string; dev: boolean }; onSelect(tab: SideTab): void; onCloseApp(toolCallId: string): void }) {
+  const strip = useRef<HTMLDivElement>(null);
+  const onKeyDown = (event: React.KeyboardEvent, tab: SideTab) => {
+    const id = appTabId(tab);
+    if (id && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); onCloseApp(id); return; }
+    const next = tabKey(tabs, tab, event.key);
+    if (!next) return;
+    event.preventDefault();
+    onSelect(next);
+    requestAnimationFrame(() => strip.current?.querySelector<HTMLElement>(`#${tabId(next)}`)?.focus());
+  };
+  return <div className="side-tabs" role="tablist" aria-label="Side panel" ref={strip}>
+    {tabs.map(tab => {
+      const id = appTabId(tab);
+      const { label, dev } = id ? labelOf(tab) : { label: TAB_NAMES[tab] ?? tab, dev: false };
+      const selected = tab === active;
+      return <div key={tab} className="side-tab-wrap" data-selected={selected || undefined} data-app={id ? true : undefined}>
+        <button type="button" role="tab" id={tabId(tab)} className="side-tab" aria-selected={selected} aria-controls={tabPanelId(tab)} tabIndex={selected ? 0 : -1} title={label}
+          onClick={() => onSelect(tab)} onKeyDown={event => onKeyDown(event, tab)}>
+          {tab === 'resources' ? <FolderTree size={14} aria-hidden="true"/> : tab === 'preview' ? <AppWindow size={14} aria-hidden="true"/> : <Blocks size={14} aria-hidden="true"/>}
+          <span className="side-tab-label">{label}</span>
+          {tab === 'preview' && live && <span className="side-tab-live" role="img" aria-label="dev server running"/>}
+          {dev && <span className="side-tab-dev">Dev</span>}
+        </button>
+        {id && <button type="button" className="side-tab-close" tabIndex={-1} aria-label={`Close ${label}`} title="Close tab" onClick={() => onCloseApp(id)}><X size={13}/></button>}
+      </div>;
+    })}
+  </div>;
+}
+
+/** Drag handle on the side panel's left edge; arrow keys resize too. The width is kept between visits. */
 function Resizer({ width, onWidth, label, min, max, clamp, reset }: { width: number; onWidth(width: number): void; label: string; min: number; max: number; clamp(width: number): number; reset: number }) {
   const start = useRef<{ x: number; width: number } | undefined>(undefined);
   return <div className="resizer" role="separator" aria-orientation="vertical" aria-label={label} aria-valuemin={min} aria-valuemax={max} aria-valuenow={width} tabIndex={0}

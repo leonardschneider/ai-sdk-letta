@@ -12,10 +12,10 @@ const AppFrame = lazy(() => import('./app-view.js'));
 export type AppsState = {
   enabled: boolean; threadId?: string;
   viewTools: Readonly<Record<string, ViewTool>>;
-  /** The call shown in the panel, if any. */
-  panel?: string;
-  openPanel(toolCallId: string): void;
-  closePanel(): void;
+  /** The calls with a tab in the side panel (this conversation). */
+  panel?: readonly string[];
+  openPanel(toolCallId: string, toolName: string): void;
+  closePanel(toolCallId: string): void;
   /** The call shown full screen or in picture-in-picture, if any. */
   overlay?: { toolCallId: string; mode: Exclude<DisplayMode, 'inline'> };
   setOverlay(value: AppsState['overlay']): void;
@@ -61,7 +61,7 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
   // A call that failed (refused, denied, or the app failed) reads like any failed tool: no view.
   if (phase === 'error') return <>{fallback}</>;
   const overlay = apps.overlay?.toolCallId === toolCallId ? apps.overlay.mode : undefined;
-  const inPanel = apps.panel === toolCallId;
+  const inPanel = !!apps.panel?.includes(toolCallId);
   const label = appToolLabel(view, phase);
   return <div className="line app-line" data-tone={phase} data-tool-call-id={toolCallId}>
     <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`${label}. ${open ? 'Hide' : 'Show'} the app`}>
@@ -72,8 +72,8 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
     </button>
     {open && <div className="app-line-body">
       {inPanel || overlay
-        ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(); else apps.setOverlay(undefined); }}>Show here</button></p>
-        : <AppSlot toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId)}/>}
+        ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(toolCallId); else apps.setOverlay(undefined); }}>Show here</button></p>
+        : <AppSlot toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId, toolName)}/>}
       {fallback}
     </div>}
   </div>;
@@ -89,7 +89,7 @@ export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'pane
   </Suspense>;
 }
 
-/** The right panel: one app view at full height. */
+/** An app tab of the side panel: one app view at full height. */
 export function AppPanel({ toolCallId, onClose }: { toolCallId: string; onClose(): void }) {
   const apps = useContext(AppsContext);
   return <div className="app-panel">

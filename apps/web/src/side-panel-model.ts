@@ -53,14 +53,14 @@ export function readSidePanel(raw: string | null, legacy: { layout?: string | nu
 }
 
 /** What the open conversation offers: Resources and Preview when enabled; app tabs of this conversation. */
-export type SideContext = { threadId?: string; resources: boolean; preview: boolean };
+export type SideContext = { threadId?: string; resources: boolean; preview: boolean; apps?: boolean };
 
 /** The tabs shown, in order: Resources, Preview, then the conversation's apps in the order they were opened. */
 export function visibleTabs(state: SidePanel, context: SideContext): SideTab[] {
   const tabs: SideTab[] = [];
   if (context.resources) tabs.push('resources');
   if (context.preview && context.threadId) tabs.push('preview');
-  if (context.threadId) for (const app of state.apps[context.threadId] ?? []) tabs.push(appTab(app.id));
+  if (context.threadId && context.apps !== false) for (const app of state.apps[context.threadId] ?? []) tabs.push(appTab(app.id));
   return tabs;
 }
 /** The tab that shows: the chosen one if it is there, else the first non-app tab, else none. */

@@ -1,7 +1,8 @@
 /** Pure model of MCP App views in the browser app: names, host context, display modes, sizes, message filtering. No I/O. */
 
 /** An app tool of the agent whose calls show a view (`GET /v1/apps` → `viewTools`). */
-export type ViewTool = { app: string; appName: string; tool: string; title?: string };
+/** `dev`: a dev app of this conversation (MCP Apps dev mode). */
+export type ViewTool = { app: string; appName: string; tool: string; title?: string; dev?: true };
 /** `POST /v1/threads/:id/apps/instances`: one view instance. */
 export type AppInstance = {
   instance: string; sandboxUrl: string; sandboxOrigin: string; html: string;
