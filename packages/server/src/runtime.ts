@@ -1032,7 +1032,10 @@ export class ThreadRuntime {
     if (!thread) return false;
     const lane = this.lane(thread.id);
     if (lane.active || (lane.current && lane.current.conversationId === conversationId)) return true;
-    if (Number.isFinite(Date.parse(at)) && (!thread.lastActivityAt || at > thread.lastActivityAt)) { thread.lastActivityAt = at; this.save(); }
+    // The activity time always moves (the app refreshes an open conversation when its summary changed).
+    const when = Number.isFinite(Date.parse(at)) ? at : new Date().toISOString();
+    thread.lastActivityAt = !thread.lastActivityAt || when > thread.lastActivityAt ? when : new Date(Date.parse(thread.lastActivityAt) + 1).toISOString();
+    this.save();
     this.changed();
     return true;
   }

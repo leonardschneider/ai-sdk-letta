@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
+import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
-import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ProjectDialog, RemoveAgentDialog, ToolsDialog } from './adoption.js';
+import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -134,7 +134,10 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Memory review (Jiminy): the Memory view, toasts when a change is reverted, and held changes as decisions.
   const memoryEnabled = !!agent.memory;
   const [memoryOpen, setMemoryOpen] = useState(false);
-  const follow = !!team || !!agent.automations || !!agent.decisions || memoryEnabled || !!agent.apps;
+  // View only (an adopted agent that works in Letta Code): no composer, edits or decisions; its conversations update live.
+  const viewOnly = !!agent.viewOnly;
+  // Adopted agents are followed too: the server tells when Letta Code changed a conversation.
+  const follow = !!team || !!agent.automations || !!agent.decisions || memoryEnabled || !!agent.apps || !!agent.adopted;
   const mayManageAutomations = !!agent.automations && (!team || agent.role === 'admin');
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [listLoading, setListLoading] = useState(!unreachable);
@@ -490,6 +493,14 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     } catch (e) { toast(metadataError(e), { tone: 'error' }); }
     finally { setArchiving(set => { const copy = new Set(set); copy.delete(id); return copy; }); }
   }
+  /** View only on or off (off is refused while Letta Code uses the agent). The session reloads with the agent's new settings. */
+  async function setViewOnly(target: AgentInfo, value: boolean) {
+    try {
+      await saveViewOnly(target.id, value);
+      toast(value ? `${target.name} is view only: its conversations update live as it works in Letta Code.` : `${target.name} can be used here again.`);
+      local?.reload(target.id);
+    } catch (error) { toast(adoptionMessage(error), { tone: 'error' }); }
+  }
   async function restore(id: string) {
     try { const updated = await patch(id, { archived: false }); toast(`Restored “${titleText(updated.title)}”`); if (currentRef.current.id === id) focusComposer(); }
     catch (e) { toast(metadataError(e), { tone: 'error' }); }
@@ -688,7 +699,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (currentRef.current.id === threadId) setEditable({ thread: threadId, runIds: new Set(result.runIds), ...(result.refusal ? { refusal: result.refusal } : {}) });
     } catch { if (currentRef.current.id === threadId) setEditable(undefined); }
   }
-  useEffect(() => { setEditing(undefined); setConfirm(undefined); if (current.draft || running) { setEditable(undefined); return; } void loadEditable(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [current.id, current.draft, running, turns, messages.length]);
+  useEffect(() => { setEditing(undefined); setConfirm(undefined); if (current.draft || running || viewOnly) { setEditable(undefined); return; } void loadEditable(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [current.id, current.draft, running, turns, messages.length]);
   async function previewRewind(runId: string, text: string) {
     const threadId = currentRef.current.id;
     setRewindPending(true);
@@ -850,7 +861,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf}/> } : {})}
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
@@ -859,16 +870,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             <button type="button" className="icon-btn menu-btn" aria-label={feed.decisions.length ? `Open sidebar (${feed.decisions.length === 1 ? '1 decision' : `${feed.decisions.length} decisions`} waiting)` : 'Open sidebar'} aria-controls="sidebar" aria-expanded={drawer} data-dot={feed.decisions.length > 0 || undefined} onClick={() => setDrawer(true)}><Menu size={18}/></button>
             {!narrow && !layout.sidebar && <>
               <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
-              <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
+              <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy || viewOnly} onClick={startDraft}><SquarePen size={18}/></button>
             </>}
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
-            {memoryEnabled && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
-            {!current.draft && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
+            {viewOnly && <span className="live-badge" role="status" title="View only: changes made in Letta Code appear here live"><span className="live-dot" aria-hidden="true"/>Live</span>}
+            {memoryEnabled && !viewOnly && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
+            {!current.draft && !viewOnly && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {webDevEnabled && !current.draft && <button type="button" className="icon-btn preview-btn" aria-label={previewOpen ? 'Hide preview' : 'Show preview'} aria-controls="side-panel" aria-expanded={previewOpen} data-active={previewOpen || undefined} data-live={devServerRunning(previewStatus) || undefined} title={devServerRunning(previewStatus) ? 'Preview (dev server running)' : 'Preview'} onClick={() => toggleTab('preview')}><AppWindow size={18}/></button>}
             {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="side-panel" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
-            <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>
+            <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy || viewOnly} onClick={startDraft}><SquarePen size={18}/></button>
           </header>
           <ThreadPrimitive.Root className="thread">
             <ThreadPrimitive.Viewport className="viewport">
@@ -876,8 +888,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                 {!messages.length && (loading
                   ? <div className="welcome"><p className="muted" role="status">Loading conversation…</p></div>
                   : <div className="welcome">
-                      <h2>{readOnly ? 'This archived conversation is empty' : 'What’s on your mind?'}</h2>
-                      {!readOnly && !blocked && <Starters/>}
+                      <h2>{readOnly ? 'This archived conversation is empty' : viewOnly ? 'Pick a conversation to view' : 'What’s on your mind?'}</h2>
+                      {!readOnly && !viewOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
                 <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals}/>
@@ -894,7 +906,9 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                   {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}{checkNote && <><br/><em className="check-note">{checkNote}</em></>}</span>
                     {checkable && !current.draft && <button type="button" className="btn small primary" disabled={running || checking} onClick={() => void checkAndUnlock()}>{checking ? 'Checking…' : 'Check and unlock'}</button>}
                     <button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
-                  {readOnly
+                  {viewOnly
+                    ? <div className="readonly-bar viewonly-bar" role="note"><span><Eye size={15} aria-hidden="true"/> View only — this agent works in Letta Code. Updates appear here live.</span></div>
+                    : readOnly
                     ? <div className="readonly-bar"><span>This conversation is archived and read-only.</span><button type="button" className="btn primary small" onClick={() => void restore(current.id)}><ArchiveRestore size={15} aria-hidden="true"/>Restore</button></div>
                     : <ComposerPrimitive.Root className="composer" data-disabled={(!!blocked || loading) || undefined}>
                         {mention && <div className="menu mentions" role="listbox" aria-label="Mention">
@@ -962,7 +976,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
         {toolsOf && local && <ToolsDialog agent={toolsOf} onClose={() => setToolsOf(undefined)} onSaved={() => { setToolsOf(undefined); local.reload(toolsOf.id); }}/>}
         {projectOf && local && <ProjectDialog agent={projectOf} onClose={() => setProjectOf(undefined)} onSaved={() => { setProjectOf(undefined); local.reload(projectOf.id); }}/>}
-        {memoryOpen && <MemoryDialog agentName={agent.name} admin={!team || isAdmin} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
+        {memoryOpen && <MemoryDialog agentName={agent.name} admin={!viewOnly && (!team || isAdmin)} onClose={() => setMemoryOpen(false)} onOpenThread={id => { setMemoryOpen(false); void select(id); }}/>}
         {appsOpen && <AppsDialog onClose={() => setAppsOpen(false)} onChanged={() => setAppsVersion(v => v + 1)}/>}
         {automationsOpen && <AutomationsDialog agentName={agent.name} onClose={() => setAutomationsOpen(false)} onOpenThread={id => { setDrawer(false); void select(id); }}/>}
         {confirm && <RewindDialog summary={confirm.summary} text={confirm.text} busy={rewinding} {...(confirm.error ? { error: confirm.error } : {})} onConfirm={() => void confirmRewind()} onClose={() => { if (!rewinding) setConfirm(undefined); }}/>}
