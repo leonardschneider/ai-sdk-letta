@@ -97,3 +97,4 @@ export {
   type McpAppConfig, type ResolvedMcpAppConfig, type McpAppToolPolicy, type McpToolDefinition, type McpToolVisibility, type McpAppCspDomains, type McpCallResult, type McpAppClient, type McpAppConnector,
   type McpAppRuntime, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppsOptions, type McpAppsContext,
 } from './mcp-apps.js';
+export { lintMcpApp, MCP_APP_SCHEMA_VERSION, type McpAppLintFinding } from './mcp-app-lint.js';
