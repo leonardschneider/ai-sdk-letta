@@ -23,6 +23,8 @@ function fakeBackend() {
     agent: async id => systems.has(id) ? { id, name: id === BLOG ? 'blog' : 'general', model: 'openai-codex/gpt-6', tags: ['origin:letta-code', 'git-memory-enabled'], system: systems.get(id)! } : id === 'agent-local-sub' ? { id, name: 'Letta Code', model: 'x/y', tags: ['role:subagent'], system: '' } : undefined,
     conversations: async id => conversations[id] ?? [],
     setSystem: async (id, system) => { systems.set(id, system); },
+    setModel: async () => {},
+    models: async () => [],
     activity: id => busy.has(id) ? { active: true, recent: true, reason: 'running' } : { active: false, recent: false },
   };
   return { backend, systems, busy, deleted, conversations };

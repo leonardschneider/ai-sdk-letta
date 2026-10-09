@@ -18,6 +18,8 @@ function fixture(directory?: string) {
     agent: async id => id === BLOG ? { id, name: 'blog', model: 'openai-codex/gpt-6', tags: ['git-memory-enabled'], system: 'You are blog.\n' } : undefined,
     conversations: async () => conversations,
     setSystem: async () => { throw new Error('never in view only'); },
+    setModel: async () => { throw new Error('never in view only'); },
+    models: async () => [],
     activity: id => busy.has(id) ? { active: true, recent: true } : { active: false, recent: false },
     ...(directory ? { directory } : {}),
   };

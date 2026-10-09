@@ -11,6 +11,7 @@ import {
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
 import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type GuiAgentInfo } from './http.js';
 import type { DecisionBoard } from './decisions.js';
+import { MODEL_HANDLE, localModels, publicModel, type ModelOption } from './models.js';
 import { LiveConversations, type LiveFs } from './live.js';
 
 /** What the registry needs from the Letta backend (a test fake replaces it). */
@@ -23,13 +24,21 @@ export interface AdoptionBackend {
   conversations(agentId: string): Promise<ImportedConversation[]>;
   /** Change its system prompt (an approved instructions update or its revert). */
   setSystem(agentId: string, system: string): Promise<void>;
+  /**
+   * Change its model. The model settings and context window are sent with
+   * the handle: Letta keeps the old provider's `model_settings` otherwise,
+   * which would not fit a model of another provider.
+   */
+  setModel(agentId: string, model: string, options: { modelSettings: Record<string, unknown>; contextWindowLimit?: number }): Promise<void>;
+  /** The models it may switch to (see `localModels`). */
+  models(): Promise<ModelOption[]>;
   /** Whether Letta Code is using it now. */
   activity(agentId: string): { active: boolean; recent: boolean; reason?: string; lastChange?: string };
   /** The local backend folder (live refresh watches its conversations). Without it, nothing is watched. */
   directory?: string;
 }
 
-/** The local Letta backend (read-only except {@link AdoptionBackend.setSystem}). */
+/** The local Letta backend (read-only except {@link AdoptionBackend.setSystem} and {@link AdoptionBackend.setModel}). */
 export function lettaAdoptionBackend(): AdoptionBackend {
   const client = () => new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 60_000 } });
   const using = async <T>(task: (c: LettaAgentClient) => Promise<T>) => { const c = client(); try { return await task(c); } finally { await c.close(); } };
@@ -63,6 +72,10 @@ export function lettaAdoptionBackend(): AdoptionBackend {
       return [...(fallback.lastActivityAt ? [fallback] : []), ...named];
     }),
     setSystem: (agentId, system) => using(async c => { await c.agents.update(agentId, { system }); }),
+    setModel: (agentId, model, options) => using(async c => {
+      await c.agents.update(agentId, { model, modelSettings: options.modelSettings as never, ...(options.contextWindowLimit ? { contextWindowLimit: options.contextWindowLimit } : {}) });
+    }),
+    models: () => localModels(),
     activity: agentId => lettaCodeActivity(agentId, { backendDirectory: localBackendDirectory() }),
     directory: localBackendDirectory(),
   };
@@ -99,6 +112,7 @@ const REFUSALS: Record<string, string> = {
   sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
   mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
   view_only: 'This agent is view only here: it works in Letta Code. Turn off View only to use it in the app.',
+  model_unknown: 'This model is not available on the local Letta backend.',
   agent_claimed: 'This agent is already in the app.', letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', capacity_reached: 'The app holds as many agents as it can.',
 };
 
@@ -116,6 +130,8 @@ const REFUSALS: Record<string, string> = {
  * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
  * - `PUT /api/adoption/agents/<id>/view-only` `{ viewOnly }`: view only (reads only; off is refused while Letta Code uses it);
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
+ * - `GET /api/adoption/agents/<id>/model`: its model and the models it may switch to;
+ * - `PUT /api/adoption/agents/<id>/model` `{ model }`: change its model in Letta (Letta Code uses it too);
  * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
  */
@@ -179,7 +195,7 @@ export class AdoptionRegistry {
   /** Agents for the session (the switcher). */
   agents(): GuiAgentInfo[] {
     return [...this.hosted.values()].map(({ record, definition, runtime, webDev, apps }) => ({
-      id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
+      id: definition.id, name: definition.name, model: record.model, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
       files: !record.viewOnly && record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
       ...(record.viewOnly ? { viewOnly: true } : {}),
       // Web development: the Preview pane (and the Resources panel without files); MCP App development: app views.
@@ -308,6 +324,36 @@ export class AdoptionRegistry {
     this.host(record);
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
   }
+  /** Its current model and the models it may switch to (grouped by provider in the app). */
+  async model(definitionId: string) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const models = await this.backend.models().catch(() => [] as ModelOption[]);
+    return { model: hosted.record.model, models: models.map(publicModel) };
+  }
+  /**
+   * Change an adopted agent's model in Letta (`{ model }`, a handle of
+   * {@link AdoptionBackend.models}), so Letta Code uses it too. Refused for a
+   * view-only agent (`view_only`), while it replies (`runtime_busy`) or
+   * Letta Code uses it (`letta_code_active`), and for a model the backend
+   * does not offer (`model_unknown`). Its runtime restarts, like a tools
+   * change, so the next turn uses the new model.
+   */
+  async setModel(definitionId: string, input: unknown) {
+    const hosted = this.writable(definitionId);
+    const model = (input as { model?: unknown } | undefined)?.model;
+    if (typeof model !== 'string' || !MODEL_HANDLE.test(model)) throw new RuntimeFault('invalid_input', 400);
+    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
+    if (this.backend.activity(hosted.record.agentId).active) throw new RuntimeFault('letta_code_active');
+    const option = (await this.backend.models()).find(m => m.handle === model);
+    if (!option) throw new RuntimeFault('model_unknown', 400);
+    if (model === hosted.record.model) return { model };
+    await this.backend.setModel(hosted.record.agentId, model, { modelSettings: option.settings, ...(option.contextWindow ? { contextWindowLimit: option.contextWindow } : {}) });
+    const record = this.store.update(definitionId, r => ({ ...r, model }));
+    await this.unhost(hosted);
+    this.host(record);
+    return { model };
+  }
   /** The instructions section for an adopted agent: the tools it has here, its project folder, and the memory policy. */
   private section(hosted: Hosted) {
     const project = hosted.definition.sandbox?.project && hosted.record.project ? basename(hosted.record.project) : undefined;
@@ -380,6 +426,8 @@ export class AdoptionRegistry {
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/view-only', json, wrap(async req => this.setViewOnly(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/sandbox', json, wrap(async req => this.setSandbox(String(req.params.id), req.body)));
+    app.get('/adoption/agents/:id/model', wrap(async req => this.model(String(req.params.id))));
+    app.put('/adoption/agents/:id/model', json, wrap(async req => this.setModel(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));
     app.post('/adoption/agents/:id/instructions', json, wrap(async req => this.applyInstructions(String(req.params.id))));
     app.delete('/adoption/agents/:id/instructions', wrap(async req => this.revertInstructions(String(req.params.id))));
