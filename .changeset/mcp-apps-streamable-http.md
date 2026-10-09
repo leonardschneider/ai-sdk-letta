@@ -1,5 +1,0 @@
----
-"ai-sdk-letta": minor
----
-
-MCP Apps over Streamable HTTP. `mcp_app_dev_start` now runs dev apps as Streamable HTTP servers by default (`transport: "http"`, `port` 3000, `path` "/mcp"; `PORT` and `HOST=127.0.0.1` are set). The command runs detached in the services container, its output goes to the dev app log, and the host connects once the port accepts connections. The connection goes through a byte tunnel (`connect <port>`), so no port is published and the container keeps no network. Ports 5173 and 3128, a port another dev app uses, and a port something already listens on are refused. `transport: "stdio"` keeps the old behaviour. Installed apps (`mcpApps` entries) can opt in with `transport: "http"` (with optional `port` and `endpoint`); stdio stays their default. `McpAppRuntime` is now `{ line } | { http }` and `McpAppConnector` takes a command line or an `McpAppHttpEndpoint`. New exports: `tunnelFetch`, `openHttpTunnel`, `MCP_APP_HTTP_DEFAULTS`. `mcp_app_guide` shows a Streamable HTTP server (`createMcpHandler` behind `node:http`) and notes FastMCP. Adds the dependency `undici` 7.30.0.

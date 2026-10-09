@@ -1,5 +1,20 @@
 # @ai-sdk-letta/server
 
+## 0.20.0
+
+### Minor Changes
+
+- 60d1926: Adopted agents can get web development and MCP App development. Two new tool sets, `web_dev` (`webDevTools`; needs `sandbox`) and `mcp_app_dev` (`mcpAppDevTools`; needs `web_dev`), are offered when the host sandbox is `docker` or `apple-container`, never by default. With `web_dev` the adopted sandbox uses `WEBDEV_IMAGE` unless the host names another image. New exports: `adoptedToolsRefusal`, `orderedAdoptedTools`, `webDevSandbox`. The instructions section names `web_dev_guide` / `mcp_app_guide` when those tools are on. `startGuiServer` gives each adopted agent its own `WebDevRegistry` and `McpApps` + `AppGate` (closed when it is removed or its tools change), resolves preview and view tokens across all runtimes on the shared preview listener, and starts that listener whenever adopted agents may get web development. `HostFactory` may return `close`, `webDev` and `apps`; the session reports `webDev` / `apps` for such adopted agents, and `adopted.available` lists the tool sets the host offers. The app gets a **Tools…** dialog for adopted agents (with dependent checkboxes) and labels for the new sets.
+- c9cfa1c: Model picker for adopted agents. `GET /api/adoption/agents/<id>/model` lists the local Letta backend's models (provider labels: ChatGPT subscription, Claude subscription or Anthropic, OpenAI API, Google; cached for 5 minutes) and `PUT /api/adoption/agents/<id>/model` `{ model }` changes the agent's model in Letta with matching `model_settings` and context window, so Letta Code uses it too; refused with `runtime_busy`, `letta_code_active`, `view_only` or `model_unknown`. The runtime restarts so the next turn uses it. `AdoptionBackend` gains `setModel` and `models`; the agent info carries `model` (the definition's for the app's own agent). New exports: `localModels`, `modelOptions`, `modelSettings`, `providerLabel`, `anthropicOAuth`, `publicModel`, `MODEL_HANDLE`, `MODEL_CACHE_MS`. The app shows the model in the agent menu and adds **Model…**.
+- c10a33a: View-only adopted agents, and live refresh of adopted agents' conversations. `AdoptionRecord.viewOnly` (set at adoption with `{ viewOnly: true }`, or with `PUT /api/adoption/agents/<id>/view-only`) lets the app show an agent that works in Letta Code: it may be adopted while Letta Code uses it, turning it off checks that again (`letta_code_active`), its API answers reads only (`403 view_only` otherwise, see `viewOnlyAllowed`), no session is opened, `adoptedDefinition` gives it no tools, sandbox or dreaming, and no containers or memory review are wired. `LiveConversations` watches the conversations being viewed in the Letta backend (`fs.watch` debounced, plus a poll) and new conversations of the agent, bumping the change channel through `ThreadRuntime.externalChange`; watchers stop when idle and on shutdown. New exports: `conversationDirectory`, `LiveConversations`, `LIVE_LIMITS`, `viewOnlyAllowed`, `VIEW_ONLY_READS`. The app gets a View only toggle in the agent menu and the Add agent picker, a banner instead of the message box, and a Live badge.
+
+### Patch Changes
+
+- Updated dependencies [60d1926]
+- Updated dependencies [ede948e]
+- Updated dependencies [c10a33a]
+  - ai-sdk-letta@0.20.0
+
 ## 0.19.0
 
 ### Minor Changes
