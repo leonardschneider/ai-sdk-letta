@@ -35,8 +35,9 @@ const forbidden = [
 // about 1.5 MB since the Atlassian tools, their ADF conversion and the
 // vendored ADF JSON schema, about 1.8 MB since web search, about 2 MB since
 // rewind, about 2.3 MB since memory provenance and review, about 2.5 MB since trust mode, line drops and claim confirmation, about 2.8 MB since web app development, about 3 MB since turn limits and settled stops,
-// about 3.25 MB since MCP Apps).
-const maxUnpacked = 3_400_000;
+// about 3.25 MB since MCP Apps, about 3.45 MB since MCP Apps dev mode: dev
+// app tools, the contract linter and its vendored schema, the guide).
+const maxUnpacked = 3_600_000;
 const failures = [];
 const fail = (name, message) => failures.push(`${name}: ${message}`);
 
