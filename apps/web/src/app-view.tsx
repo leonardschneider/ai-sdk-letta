@@ -3,7 +3,7 @@ import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client';
 import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
-import { acceptFrameMessage, approvalError, hostContext, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
+import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
 
 /**
  * One MCP App view (spec 2026-01-26): the view's HTML in a sandbox proxy
@@ -74,6 +74,9 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
   const bridgeRef = useRef<AppBridge | undefined>(undefined);
   const modeRef = useRef(mode); modeRef.current = mode;
   const callbacks = useRef({ onMode, onApprovals, onSent }); callbacks.current = { onMode, onApprovals, onSent };
+  // The call's phase (running → done) does not reload the view: its result is sent to the live view instead.
+  const versionRef = useRef(version); versionRef.current = version;
+  const pending = useRef<{ resultSent: boolean; refresh?: () => void }>({ resultSent: false });
 
   useEffect(() => {
     let disposed = false;
@@ -89,11 +92,11 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
         let answer: AppInstance | NoInstance;
         for (let attempt = 0; ; attempt++) {
           answer = await api<AppInstance | NoInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement });
-          if ((answer as AppInstance).instance || disposed || version !== 'running' || attempt >= 40) break;
+          if ((answer as AppInstance).instance || disposed || versionRef.current !== 'running' || attempt >= 40) break;
           await new Promise(resolve => setTimeout(resolve, 250));
         }
         if (disposed) return;
-        if (!(answer as AppInstance).instance) { setState({ phase: 'failed', error: version === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
+        if (!(answer as AppInstance).instance) { setState({ phase: 'failed', error: versionRef.current === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
         instance = answer as AppInstance;
       }
       catch (error) {
@@ -136,7 +139,15 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
         link.click();
         return {};
       };
-      bridge.onsizechange = ({ height: h }) => { if (placement === 'inline' && modeRef.current === 'inline') setHeight(current => inlineHeight(h, current)); };
+      // Heights are damped (see SizeDamper) and applied at most once per frame: a view whose layout follows its frame can't make it jitter.
+      const damper = new SizeDamper(INLINE_HEIGHT.initial);
+      let requested: unknown; let scheduled = 0;
+      bridge.onsizechange = ({ height: h }) => {
+        if (placement !== 'inline' || modeRef.current !== 'inline') return;
+        requested = h;
+        if (scheduled) return;
+        scheduled = requestAnimationFrame(() => { scheduled = 0; const next = damper.next(requested, performance.now()); if (next !== undefined && !disposed) setHeight(next); });
+      };
       bridge.onrequestdisplaymode = async ({ mode: wanted }) => {
         const next = nextDisplayMode(wanted, modeRef.current, bridge?.getAppCapabilities()?.availableDisplayModes);
         if (next !== modeRef.current) callbacks.current.onMode(next);
@@ -156,12 +167,27 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       setState({ phase: 'ready', instance });
       // Spec: complete tool input after initialization, then the result (or the cancellation).
       await bridge.sendToolInput({ arguments: instance.input });
-      if (instance.status === 'done' && instance.result) await bridge.sendToolResult(instance.result as never);
-      else if (instance.status === 'cancelled') await bridge.sendToolCancelled({ reason: instance.reason ?? 'cancelled' });
+      const finish = async (record: AppInstance) => {
+        if (pending.current.resultSent || disposed) return;
+        if (record.status === 'done' && record.result) { pending.current.resultSent = true; await bridge!.sendToolResult(record.result as never); }
+        else if (record.status === 'cancelled') { pending.current.resultSent = true; await bridge!.sendToolCancelled({ reason: record.reason ?? 'cancelled' }); }
+      };
+      pending.current = { resultSent: false };
+      await finish(instance);
+      // Still running: when the call finishes, its record is read again (a throwaway instance, closed at once) and its result sent.
+      pending.current.refresh = () => {
+        void api<AppInstance | NoInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement }).then(async answer => {
+          if (!(answer as AppInstance).instance) return;
+          void api(`/v1/apps/instances/${(answer as AppInstance).instance}/close`, {}).catch(() => {});
+          await finish(answer as AppInstance);
+        }).catch(() => {});
+      };
+      if (versionRef.current !== 'running' && !pending.current.resultSent) pending.current.refresh();
       media.addEventListener('change', onTheme);
     })().catch(error => { if (!disposed) setState(s => s.phase === 'ready' ? s : { phase: 'failed', error: error instanceof Error && error.message ? 'The app’s view failed to start.' : 'Couldn’t load the app.' }); });
     return () => {
       disposed = true;
+      pending.current = { resultSent: false };
       control.abort();
       media.removeEventListener('change', onTheme);
       const current = bridge;
@@ -170,14 +196,15 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       if (instanceId) void api(`/v1/apps/instances/${instanceId}/close`, {}).catch(() => {});
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, toolCallId, placement, version]);
+  }, [threadId, toolCallId, placement]);
+  useEffect(() => { if (version !== 'running' && !pending.current.resultSent) pending.current.refresh?.(); }, [version]);
 
   // Mode or size changes reach the view as host context.
   useEffect(() => {
     const bridge = bridgeRef.current;
     if (!bridge || state.phase !== 'ready') return;
     const node = box.current;
-    void bridge.sendHostContextChange({ displayMode: mode, containerDimensions: mode !== 'inline' || placement === 'panel' ? { width: node?.clientWidth ?? 600, height: node?.clientHeight ?? 600 } : { maxWidth: node?.clientWidth ?? 600, maxHeight: INLINE_HEIGHT.max } });
+    void bridge.sendHostContextChange({ displayMode: mode, containerDimensions: mode !== 'inline' || placement === 'panel' ? { width: node?.clientWidth ?? 600, height: node?.clientHeight ?? 600 } : { maxWidth: Math.round(node?.clientWidth ?? 600), maxHeight: INLINE_HEIGHT.max } });
   }, [mode, placement, state.phase]);
   useEffect(() => {
     const node = box.current;

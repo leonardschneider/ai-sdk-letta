@@ -3,7 +3,7 @@ import { Blocks, ChevronRight, LoaderCircle, ShieldAlert, X } from 'lucide-react
 import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
-import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
+import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewPolicy, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
 
 /** The view frame carries the MCP SDK: loaded only when a view shows. */
 const AppFrame = lazy(() => import('./app-view.js'));
@@ -23,6 +23,12 @@ export type AppsState = {
   setOverlay(value: AppsState['overlay']): void;
   refreshApprovals(): void;
   onSent(): void;
+  /** The live call of `toolCallId`'s view (one live view per app view); itself when every call shows its own view. */
+  liveCall?(toolName: string, toolCallId: string): string;
+  /** A call's place among the conversation's view calls (earlier calls say "below"). */
+  callOrder?(toolCallId: string): number;
+  /** "Show this one": an earlier call becomes its view's live one. */
+  showCall?(toolName: string, toolCallId: string): void;
 };
 export const AppsContext = createContext<AppsState>({ enabled: false, viewTools: {}, openPanel: () => {}, closePanel: () => {}, setOverlay: () => {}, refreshApprovals: () => {}, onSent: () => {} });
 
@@ -67,9 +73,18 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
   const phase = result === undefined ? 'running' : isError ? 'error' : 'done';
   // A call that failed (refused, denied, or the app failed) reads like any failed tool: no view.
   if (phase === 'error') return <>{fallback}</>;
+  const live = apps.liveCall?.(toolName, toolCallId) ?? toolCallId;
   const overlay = apps.overlay?.toolCallId === toolCallId ? apps.overlay.mode : undefined;
   const inPanel = !!apps.panel?.includes(toolCallId);
   const label = appToolLabel(view, phase);
+  // An earlier call of a view that shows elsewhere (a later call, the panel, full screen): a compact line.
+  const liveOverlay = apps.overlay?.toolCallId === live ? apps.overlay.mode : undefined;
+  const liveWhere = apps.panel?.includes(live) ? 'in the panel' : liveOverlay === 'pip' ? 'in picture-in-picture' : liveOverlay ? 'full screen' : (apps.callOrder?.(live) ?? 0) > (apps.callOrder?.(toolCallId) ?? 0) ? 'below' : 'above';
+  const elsewhere = live !== toolCallId
+    ? <p className="muted app-elsewhere" data-app-collapsed="">{`${view.appName} updated ${liveWhere}.`} <button type="button" className="link-btn" onClick={() => apps.showCall?.(toolName, toolCallId)}>Show this one</button></p>
+    : inPanel || overlay
+      ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(toolCallId); else apps.setOverlay(undefined); }}>Show here</button></p>
+      : undefined;
   return <div className="line app-line" data-tone={phase} data-tool-call-id={toolCallId}>
     <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`${label}. ${open ? 'Hide' : 'Show'} the app`}>
       {phase === 'running' ? <LoaderCircle size={14} className="line-icon spin" aria-hidden="true"/> : <Blocks size={14} className="line-icon" aria-hidden="true"/>}
@@ -79,9 +94,7 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
       <ChevronRight size={14} className="chev" aria-hidden="true"/>
     </button>
     {open && <div className="app-line-body">
-      {inPanel || overlay
-        ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(toolCallId); else apps.setOverlay(undefined); }}>Show here</button></p>
-        : <AppSlot key={viewKey(apps, 'inline', toolCallId, toolName)} toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId, toolName)}/>}
+      {elsewhere ?? <AppSlot key={viewKey(apps, 'inline', toolCallId, toolName)} toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId, toolName)}/>}
       {fallback}
     </div>}
   </div>;
@@ -164,7 +177,7 @@ const POLICY: Record<string, string> = { allow: 'runs', ask: 'asks', deny: 'deni
  * its views' declared CSP domains and those granted, and enable/disable.
  * Policies and approved origins are set in the agent's definition.
  */
-export function AppsDialog({ onClose, onChanged }: { onClose(): void; onChanged(): void }) {
+export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { onClose(): void; onChanged(): void; viewPolicy?(appId: string): ViewPolicy; onViewPolicy?(appId: string, value: ViewPolicy): void }) {
   const toast = useToast();
   const [apps, setApps] = useState<AppStatusView[]>();
   const [failed, setFailed] = useState(false);
@@ -194,6 +207,12 @@ export function AppsDialog({ onClose, onChanged }: { onClose(): void; onChanged(
             <span className="mono">{view.uri}</span>: {Object.values(view.declared).some(list => list?.length) ? <>declares {Object.entries(view.declared).filter(([, list]) => list?.length).map(([key, list]) => `${key.replace(/Domains$/, '')} ${list!.join(', ')}`).join('; ')} · granted {Object.values(view.granted).some(list => list.length) ? Object.entries(view.granted).filter(([, list]) => list.length).map(([key, list]) => `${key.replace(/Domains$/, '')} ${list.join(', ')}`).join('; ') : 'none'}</> : 'no outside sites'}
           </span>)}
           {!!app.origins?.length && <span className="member-login">Allowed sites: {app.origins.join(', ')}</span>}
+          {viewPolicy && onViewPolicy && !!app.views?.length && <label className="member-login app-view-policy">Views:{' '}
+            <select value={viewPolicy(app.id)} onChange={event => onViewPolicy(app.id, event.target.value === 'every' ? 'every' : 'single')} aria-label={`Views of ${app.name}`}>
+              <option value="single">One live view per app (recommended)</option>
+              <option value="every">Every call shows its own view</option>
+            </select>
+          </label>}
         </span>
         <button type="button" className="btn ghost small" onClick={() => void toggle(app)} disabled={app.status !== 'running' && app.enabled}>{app.enabled ? 'Disable' : 'Enable'}</button>
       </li>)}
