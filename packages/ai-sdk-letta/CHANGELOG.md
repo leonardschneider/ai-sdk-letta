@@ -1,5 +1,17 @@
 # ai-sdk-letta
 
+## 0.23.0
+
+### Minor Changes
+
+- c10b373: MCP App state persistence. App servers get a `STATE_DIR` that survives restarts: `/workspace/.app-state/<name>` for dev apps (shown by `mcp_app_dev_start`), and for installed apps a host folder `<state>/mcp-apps/<definition>/state/<app>` mounted read-write at `/state` (kept across upgrades and removal). Views can save their own state with the `ui/state/save` host extension (`io.ai-sdk-letta/viewState`, advertised under `experimental` in the host capabilities): kept per app and call in `view-state.json` (64 KB, 10 saves/s), given back in the host context on `ui/initialize`, inherited by later calls of the same view in the conversation, and never shown to the agent. `mcp_app_guide` covers both.
+
+### Patch Changes
+
+- 87ddaa6: MCP Apps: a dev app's views send messages and context updates to the agent without asking (audited, like their tool calls) unless asking was turned back on for the conversation. Installed apps' message and context cards offer "Allow always" (admins), kept across restarts, listed with a Reset in the Apps dialog; "Allow all from this app" covers them too.
+- 2bed40f: App views in the panel or full screen no longer stick on "No view for this call" when they follow a new call that is still streaming (they ask again until it is recorded, and again when the call finishes). Messages an app's view sends show as one compact line ("chessos: I played e2e4.") with the full text on demand; the MCP App guide asks for short, human `ui/message` text.
+- 7097c4b: The MCP App development note in agent instructions now says to persist app server state under $STATE_DIR, to save view state with ui/state/save, and to keep app messages short.
+
 ## 0.22.0
 
 ### Minor Changes
