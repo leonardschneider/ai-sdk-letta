@@ -120,3 +120,26 @@ test('one live view: the latest call of each app view, pins, policy', async () =
   assert.equal(readViewPolicy('junk'), 'single');
   assert.equal(viewPolicyKey('agent-1', 'chess'), 'ai-sdk-letta-app-views:agent-1:chess');
 });
+
+test('a view asks again while its call runs, and briefly when its phase is unknown (a panel retargeted to a streaming call)', async () => {
+  const { retryInstance } = await import('../src/apps-model.js');
+  assert.equal(retryInstance('running', 0), true);
+  assert.equal(retryInstance('running', 40), false, 'bounded');
+  assert.equal(retryInstance(undefined, 0), true, 'the panel and full screen: a call that streams is recorded a moment later');
+  assert.equal(retryInstance(undefined, 12), false);
+  assert.equal(retryInstance('done', 0), false, 'a finished call is recorded at once: no retry');
+});
+
+test('app messages: the first sentence, IDs shortened, at most 80 characters; the full text stays for the agent', async () => {
+  const { appMessageSummary, shortenIds } = await import('../src/apps-model.js');
+  const chess = 'I played e2e4. Play the next move on ChessOS board 86e6b101-66f8-4107-93e0-c12b90845214. Get its latest state and use make_move with expected_fen.';
+  assert.deepEqual(appMessageSummary(chess), { summary: 'I played e2e4.', truncated: true });
+  assert.deepEqual(appMessageSummary('Hello'), { summary: 'Hello', truncated: false }, 'short: nothing to expand');
+  assert.deepEqual(appMessageSummary('line one\nline two'), { summary: 'line one', truncated: true }, 'the first line');
+  assert.equal(appMessageSummary('Use e.g. 1.5 values. Next').summary, 'Use e.g. 1.5 values.', 'not split inside "e.g." or "1.5"');
+  const long = appMessageSummary(`Board 86e6b101-66f8-4107-93e0-c12b90845214 changed ${'and more words '.repeat(10)}`);
+  assert.ok(long.summary.length <= 80 && long.summary.endsWith('…') && long.summary.startsWith('Board 86e6b101… changed'), long.summary);
+  assert.equal(shortenIds('board 86E6B101-66f8-4107-93e0-c12b90845214.'), 'board 86E6B101….');
+  assert.equal(shortenIds('token abcdef0123456789abcdef!'), 'token abcdef01…!');
+  assert.equal(shortenIds('internationalization rnbqkbnr/pppppppp/8 e2e4'), 'internationalization rnbqkbnr/pppppppp/8 e2e4', 'words, FENs and moves stay');
+});
