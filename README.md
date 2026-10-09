@@ -1185,6 +1185,59 @@ MCP_APPS=./clock-1.0.0.tgz npm run gui        # the example agent; `id=path args
   `tailscale serve` cannot publish: `startTeamServer` refuses definitions
   with `mcpApps` (see [Limitations](#limitations)).
 
+### MCP Apps dev mode
+
+The agent can also **write** MCP Apps and try them in the conversation.
+Add `mcpAppDevTools` next to the web development tools (dev apps run in the
+same services container, so this needs `webDevTools` and a `docker` or
+`apple-container` sandbox):
+
+```ts
+import { mcpAppDevTools, MCP_APP_DEV_TOOL_PERMISSIONS, sandboxTools, SANDBOX_TOOL_PERMISSIONS, webDevTools, WEBDEV_TOOL_PERMISSIONS } from 'ai-sdk-letta';
+
+defineAgent({ ...,
+  sandbox: { provider: 'apple-container' },
+  tools: { ...sandboxTools, ...webDevTools, ...mcpAppDevTools },
+  permissions: { ...SANDBOX_TOOL_PERMISSIONS, ...WEBDEV_TOOL_PERMISSIONS, ...MCP_APP_DEV_TOOL_PERMISSIONS },
+});
+```
+
+```sh
+MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
+```
+
+- **`mcp_app_guide`** returns a short guide (about 1.5k tokens) adapted
+  from the official ext-apps skill `create-mcp-app` (v2.0.3; code
+  Apache-2.0, docs CC-BY-4.0): pinned SDK versions, how this host runs
+  apps, an API cheat-sheet (`registerAppTool` / `registerAppResource`,
+  nested `_meta.ui.resourceUri`, `text/html;profile=mcp-app`, `new App()` +
+  `app.connect()`, `app.callServerTool({ name, arguments })`) and a minimal
+  working example. The example agent tells the model to read it first.
+- **The loop.** The agent scaffolds the app, installs its packages with
+  `run_command_online` (you approve it; the services container has no
+  network and nothing is vendored), builds it with `run_command`, then
+  `mcp_app_dev_start` runs it **over stdio in the services container** as
+  the dev app `dev_<name>` of this conversation, and checks it against the
+  MCP Apps contract (`mcp_app_dev_check`: tool `_meta.ui`, resources and
+  their MIME type, CSP metadata, how views call tools). `mcp_app_dev_call`
+  calls any tool, also app-only ones; `mcp_app_dev_logs` shows its stderr;
+  `mcp_app_dev_reload` restarts it and reports what changed;
+  `mcp_app_dev_stop` stops it.
+- **Its tools.** From the next turn, the dev app's model-visible tools are
+  the agent's, as `dev_<name>__<tool>` (the session reopens when they
+  change). Calling one renders its view in the tool line with a **Dev**
+  badge, like an installed app's; you can open it in a side panel tab.
+- **What views may do.** As for installed apps, with one rule: every call
+  a dev app's view makes **asks** (a Permission needed card), and dev apps
+  get no outside origins.
+- **Live re-render.** After `mcp_app_dev_reload`, open views of that app
+  (inline, in side panel tabs, full screen) render again with the new
+  code and an **updated** note, without reloading the page: `GET /v1/apps`
+  carries each dev app's generation (`devGenerations`) and views are keyed
+  on it.
+- Dev apps live as long as the server: after a restart, ask the agent to
+  start them again.
+
 What a definition controls, and when:
 
 | Field | Applied |
@@ -1315,6 +1368,11 @@ or **full screen**, and picture-in-picture when the view supports it
 as a **Permission needed** card under the conversation; a message it sends
 shows with an **App · <name>** badge. **Apps** in the sidebar lists the
 installed apps (Disable / Enable).
+
+**Side panel tabs.** Resources, Preview and each app view opened in the
+panel share one **tabbed side panel**: a tab per view (a **Dev** badge marks
+a dev app's), closable, with edge fades when the tabs overflow; only the
+selected tab's view runs.
 
 **Resources.** The panel shows the agent's [resources](#resources): one
 folder per conversation (the current one is marked "this chat" and opened)
