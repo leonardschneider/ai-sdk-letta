@@ -4,7 +4,7 @@ import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
 import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
-import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
+import { localModels } from './models.js';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
@@ -121,7 +121,6 @@ function memoryWiring(definition: AgentDefinition, directory: string, members?: 
   const file = join(directory, 'memory-review.json');
   let model = definition.memory.reviewer;
   try { const saved = JSON.parse(readFileSync(file, 'utf8')) as { model?: unknown }; if (typeof saved.model === 'string' && (saved.model === 'auto' || /^[\w.-]+\/[\w.:-]+$/.test(saved.model))) model = saved.model; } catch { /* the definition's */ }
-  let available: Promise<string[]> | undefined;
   const threadOf = (review: MemoryReview) => runtime ? (review.conversationId ? runtime.threadOfConversationAny(review.conversationId) : undefined) ?? runtime.latestThread() : undefined;
   const events: MemoryGuardEvents = {
     // Team servers: the agent's members (claims are confirmed by the member they name). Single-user: none but you, so claims about others go to you as a review.
@@ -150,12 +149,7 @@ function memoryWiring(definition: AgentDefinition, directory: string, members?: 
       if (definition.memory.reviewer !== 'off') value.reviewerModel = {
         value: () => model,
         set: next => { model = next; writeFileSync(file, JSON.stringify({ model }), { mode: 0o600 }); },
-        available: () => available ??= (async () => {
-          const client = new LettaAgentClient({ backend: 'local', appServer: { harnessBackend: 'local', requestTimeoutMs: 30_000 } });
-          try { return (await client.models.list()).entries.map(e => e.handle).filter((h): h is string => typeof h === 'string' && /^(anthropic|openai|openai-codex|google[^/]*)\//.test(h)).slice(0, 60); }
-          catch { available = undefined; return []; }
-          finally { await client.close(); }
-        })(),
+        available: () => localModels().then(models => models.map(m => m.handle).slice(0, 60), () => []),
       };
     },
   };
@@ -417,7 +411,7 @@ function devServices(definition: AgentDefinition, stateDirectory: string, log: (
 /** What the browser may know about a definition. */
 /** Does the agent have MCP Apps: installed ones, or dev mode (`mcpAppDevTools` with web development)? */
 const appsEnabled = (definition: AgentDefinition) => !!definition.mcpApps?.length || mcpAppDevEnabled(definition, webDevEnabled(definition));
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, ...(appsEnabled(definition) ? { apps: true } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, model: definition.model, ...(appsEnabled(definition) ? { apps: true } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.

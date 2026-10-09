@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, ChevronDown, Eye, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
+import { Check, ChevronDown, Cpu, Eye, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
 import { ApiError, serverApi, type AgentInfo } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
@@ -25,6 +25,7 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
       sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
       view_only: 'This agent is view only here. Turn off View only (agent menu) to use it in the app.',
+      model_unknown: 'This model is not available on the local Letta backend.',
       mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
     };
     // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
@@ -45,17 +46,19 @@ const when = (value?: string) => {
  * adopted agents: switch agents, add one, remove the current one, or update
  * its instructions.
  */
-export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void }) {
+export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly, onModel }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void; onModel?(agent: AgentInfo): void }) {
   const viewOnly = !!current.viewOnly;
+  const model = current.adopted?.model ?? current.model;
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
-      <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`}>
+      <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`} title={model ? `${current.name} · ${model}` : undefined}>
         <span className="brand-mark" aria-hidden="true">✳︎</span><span className="agent-switch-name">{current.name}</span><ChevronDown size={15} className="agent-switch-chev" aria-hidden="true"/>
       </button>
     </DropdownMenu.Trigger>
     <DropdownMenu.Portal>
       <DropdownMenu.Content className="menu agent-menu" align="start" side="bottom" sideOffset={4} collisionPadding={8}>
         <DropdownMenu.Label className="menu-label">Agents</DropdownMenu.Label>
+        {model && <div className="agent-menu-model" title={`${current.name} uses ${model}`}><Cpu size={13} aria-hidden="true"/><span>{model}</span></div>}
         <DropdownMenu.RadioGroup value={current.id} onValueChange={id => { if (id !== current.id) onSwitch(id); }}>
           {agents.map(agent => <DropdownMenu.RadioItem key={agent.id} value={agent.id} className="menu-item">
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
@@ -68,6 +71,7 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
           <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
           <span className="viewonly-text"><span><Eye size={15} aria-hidden="true"/> View only</span><span className="menu-hint">Watch it work in Letta Code: conversations update live, nothing is sent from here.</span></span>
         </DropdownMenu.CheckboxItem>}
+        {onModel && (!current.adopted || !viewOnly) && <DropdownMenu.Item className="menu-item" onSelect={() => onModel(current)}><Cpu size={15} aria-hidden="true"/>Model…</DropdownMenu.Item>}
         {current.adopted && !viewOnly && onTools && <DropdownMenu.Item className="menu-item" onSelect={() => onTools(current)}><Wrench size={15} aria-hidden="true"/>Tools…</DropdownMenu.Item>}
         {current.adopted && !viewOnly && onProject && <DropdownMenu.Item className="menu-item" onSelect={() => onProject(current)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>}
         {current.adopted && !viewOnly && <DropdownMenu.Item className="menu-item" onSelect={() => onInstructions(current)}><FileDiff size={15} aria-hidden="true"/>Update instructions…</DropdownMenu.Item>}
@@ -315,4 +319,67 @@ function CommandTimeout({ agent, onSaved }: { agent: AgentInfo; onSaved(): void 
     <p id="command-timeout-help" className="adopt-meta">A command still running then is stopped, and the agent gets its output so far. Raise it for long builds (up to 240 s: Letta ends any tool call after 5 minutes). Changing it restarts {agent.name}’s sandbox.</p>
     {problem && <p className="form-error" role="alert">{problem}</p>}
   </form>;
+}
+
+/** A model the local Letta backend offers (`GET /api/adoption/agents/<id>/model`). */
+type ModelChoice = { handle: string; label: string; provider: string; providerLabel: string; contextWindow?: number };
+const tokens = (n?: number) => !n ? '' : n >= 1_000_000 ? `${n / 1_000_000}M context` : `${Math.round(n / 1000)}K context`;
+
+/**
+ * Model: the agent's Letta model. For an adopted agent, the models of the
+ * local backend grouped by provider; saving changes the agent's model in
+ * Letta (`PUT /api/adoption/agents/<id>/model`), so Letta Code uses it too.
+ * The app's own agent shows its model read-only (set in code).
+ */
+export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  const toast = useToast();
+  const adopted = !!agent.adopted && !agent.viewOnly;
+  const current = agent.adopted?.model ?? agent.model ?? '';
+  const [models, setModels] = useState<ModelChoice[]>();
+  const [chosen, setChosen] = useState(current);
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState('');
+  const path = `/agents/${encodeURIComponent(agent.id)}/model`;
+  const load = useCallback(async () => { try { setModels((await adoptionApi<{ models: ModelChoice[] }>(path)).models); setProblem(''); } catch (error) { setProblem(adoptionMessage(error)); } }, [path]);
+  useEffect(() => { if (adopted) void load(); }, [adopted, load]);
+  const groups = new Map<string, ModelChoice[]>();
+  for (const model of models ?? []) groups.set(model.providerLabel, [...(groups.get(model.providerLabel) ?? []), model]);
+  const currentLabel = models?.find(m => m.handle === current);
+  async function save() {
+    setSaving(true); setProblem('');
+    try {
+      await adoptionApi(path, { model: chosen }, 'PUT');
+      toast(`${agent.name} now uses ${models?.find(m => m.handle === chosen)?.label ?? chosen}. Its next message uses it.`);
+      onSaved();
+    } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
+  }
+  return <Modal label={`Model of ${agent.name}`} onClose={onClose} className="automations adopt model-dialog">
+    <div className="members-head">
+      <div><h2 className="modal-title">Model</h2>
+        <p className="modal-text">{adopted ? 'Changes the agent’s model in Letta, so Letta Code uses it too.' : 'Set in code (LETTA_MODEL / definition).'}</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <p className="model-current"><span className="automations-heading">Current</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}</p>
+    {adopted && <form onSubmit={event => { event.preventDefault(); if (chosen && chosen !== current) void save(); }}>
+      <div className="member-list adopt-list model-list" role="radiogroup" aria-label="Models" aria-busy={!models || undefined}>
+        {!models && !problem && <p className="member-empty muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading models…</p>}
+        {models && !models.length && <p className="member-empty muted">No models found. Connect a provider in Letta Code first.</p>}
+        {[...groups].map(([provider, list]) => <fieldset key={provider} className="model-group">
+          <legend className="automations-heading">{provider}</legend>
+          {list.map(model => <label key={model.handle} className={`member-row adopt-row${chosen === model.handle ? ' selected' : ''}`}>
+            <input type="radio" name="model" value={model.handle} checked={chosen === model.handle} disabled={saving} onChange={() => { setChosen(model.handle); setProblem(''); }} data-autofocus={model.handle === current || undefined}/>
+            <span className="adopt-text"><span className="adopt-name">{model.label}{model.handle === current && <span className="role-badge small">Current</span>}</span>
+              <span className="adopt-meta">{[model.handle, tokens(model.contextWindow)].filter(Boolean).join(' · ')}</span></span>
+          </label>)}
+        </fieldset>)}
+      </div>
+      <p className="adopt-meta">Saving restarts {agent.name} here; open conversations use the new model on their next message.</p>
+      {problem && <p className="form-error" role="alert">{problem} {!models && <button type="button" className="link-btn" onClick={() => void load()}>Try again</button>}</p>}
+      <div className="modal-actions">
+        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="submit" className="btn primary" disabled={saving || !chosen || chosen === current}>{saving ? 'Saving…' : 'Save'}</button>
+      </div>
+    </form>}
+    {!adopted && <div className="modal-actions"><button type="button" className="btn primary" data-autofocus onClick={onClose}>Close</button></div>}
+  </Modal>;
 }

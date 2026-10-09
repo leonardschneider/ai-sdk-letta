@@ -361,6 +361,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
 export interface GuiAgentInfo {
   id: string;
   name: string;
+  /** The agent's Letta model handle (shown in the agent menu). */
+  model?: string;
   /** Tools whose calls always ask for approval (used for display only). */
   approvalTools?: readonly string[];
   /** Whether the agent accepts file attachments (it has the file tools). */
@@ -508,7 +510,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}) }, versions,
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: !info.viewOnly })), adoption: true } : {}) });
   });
