@@ -32,6 +32,7 @@ import { envTurnLimits, resolveTurnLimits, SDK_TURN_TIMEOUT_MS, type TurnLimits 
 import { dreamHookCommand, dreamHookSupported, parseDreamRequest, reviewDreamRequest, type DreamRequest } from './dream-review.js';
 import type { UnattendedPolicy } from './tools.js';
 import { MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpApps, type McpAppsOptions } from './mcp-apps.js';
+import { MCP_APP_DEV_TOOL_NAMES, mcpAppDevEnabled, mcpAppDevToolTimeouts } from './mcp-app-dev.js';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -142,8 +143,10 @@ export interface LettaRuntime<TOOLS extends ToolSet = ToolSet> {
   harnessCommand(command: 'reflect', args?: string): Promise<string>;
   /** Web app development services of the open conversation, when the agent has `webDevTools`. */
   webDev?: WebDevServices;
-  /** The agent's MCP Apps, when its definition has `mcpApps`. */
+  /** The agent's MCP Apps, when its definition has `mcpApps` (or the dev app tools). */
   mcpApps?: McpApps;
+  /** See {@link ConversationSession.toolsStale}. */
+  toolsStale?(): boolean;
   /** Close the session and SDK client, then release the identity lock. Idempotent. */
   close(): Promise<void>;
 }
@@ -268,8 +271,14 @@ export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   harnessCommand(command: 'reflect', args?: string): Promise<string>;
   /** Web app development services of this conversation (dev server, preview, browser), when the agent has `webDevTools`. */
   webDev?: WebDevServices;
-  /** The agent's MCP Apps, when its definition has `mcpApps`. */
+  /** The agent's MCP Apps, when its definition has `mcpApps` (or the dev app tools). */
   mcpApps?: McpApps;
+  /**
+   * Did this conversation's dev app tools change since it opened
+   * (`mcp_app_dev_start`, reload, stop)? The session's tool list is fixed
+   * when it opens: reopen it before the next turn so the agent gets them.
+   */
+  toolsStale(): boolean;
   /** Close this conversation's session (the host and other conversations stay open). Idempotent. */
   close(): Promise<void>;
 }
@@ -498,9 +507,12 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     webDevCleanup = ownRegistry;
     const webDevRegistry = webDevEnabled(definition) ? options.webDev?.registry ?? ownRegistry : undefined;
     // MCP Apps: the app's (kept across hosts), or this host's own (stopped with it). Started before the first conversation opens.
-    const ownApps = definition.mcpApps?.length && !options.mcpApps?.apps ? new McpApps(definition.mcpApps, { directory: mcpAppsDirectory(paths.root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), ...(options.mcpApps?.launcher ? { launcher: options.mcpApps.launcher } : {}), ...(options.mcpApps?.connector ? { connector: options.mcpApps.connector } : {}) }) : undefined;
+    // MCP Apps dev mode (mcpAppDevTools) needs them too, also without installed apps.
+    const appDev = mcpAppDevEnabled(definition, webDevEnabled(definition));
+    const wantsApps = !!definition.mcpApps?.length || appDev;
+    const ownApps = wantsApps && !options.mcpApps?.apps ? new McpApps(definition.mcpApps ?? [], { directory: mcpAppsDirectory(paths.root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), ...(options.mcpApps?.launcher ? { launcher: options.mcpApps.launcher } : {}), ...(options.mcpApps?.connector ? { connector: options.mcpApps.connector } : {}) }) : undefined;
     appsCleanup = ownApps;
-    const apps = definition.mcpApps?.length ? options.mcpApps?.apps ?? ownApps : undefined;
+    const apps = wantsApps ? options.mcpApps?.apps ?? ownApps : undefined;
     // Conversation creation writes one pending-intent file per agent: create one at a time.
     let creating: Promise<unknown> = Promise.resolve();
     const opened = new Set<string>();
@@ -576,7 +588,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         }
         // MCP Apps: their model-visible tools join the agent's (named <app>__<tool>, with the definition's policy).
         await apps?.ready();
-        const appTools = apps?.agentTools();
+        // With a conversation: its dev apps' tools too. The session's tool list is fixed when it opens:
+        // when they change (mcp_app_dev_start/reload/stop), toolsStale() tells the host to reopen it before the next turn.
+        const appTools = apps?.agentTools(conversationId);
+        const devSignature = apps?.devSignature(conversationId) ?? '';
         const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}), ...(webDev ? { [WEBDEV_CONTEXT]: webDev } : {}),
           ...(apps ? { [MCP_APPS_CONTEXT]: { apps, conversationId } } : {}),
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
@@ -604,7 +619,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const withProvenance = { ...agentTools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
         const exposed = listening ? { ...withProvenance, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : withProvenance;
         // Without a sandbox (or without web development), those tools are never exposed.
-        const hidden = new Set<string>([...(sandbox ? [] : SANDBOX_TOOL_NAMES), ...(webDev ? [] : WEBDEV_TOOL_NAMES)]);
+        const hidden = new Set<string>([...(sandbox ? [] : SANDBOX_TOOL_NAMES), ...(webDev ? [] : WEBDEV_TOOL_NAMES), ...(webDev && apps ? [] : MCP_APP_DEV_TOOL_NAMES)]);
         const allowedTools = hidden.size ? Object.keys(exposed).filter(name => !hidden.has(name)) : undefined;
         const sandboxTimeout = definition.sandbox ? sandboxToolTimeout(definition.sandbox) : undefined;
         const shell = sandbox;
@@ -621,7 +636,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             }
           },
           ...(listening ? { uncounted: [STAY_SILENT_TOOL] } : {}),
-          toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(webDev ? webDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
+          toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(webDev ? webDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(webDev && appDev ? mcpAppDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
             // A search (searching, reading, summarizing) has its own deadline; leave it room to report it.
             ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}),
             ...(appTools ? Object.fromEntries(Object.keys(appTools.tools).map(name => [name, Math.max(definition.toolTimeoutMs, MCP_APP_LIMITS.callTimeoutMs + 5000)])) : {}) },
@@ -786,7 +801,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           if (response.success !== true) throw new Error(typeof response.error === 'string' ? response.error.slice(0, 300) : 'harness_command_failed');
           return typeof response.output === 'string' ? response.output : '';
         };
-        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), ...(apps ? { mcpApps: apps } : {}), truncated: history.truncated, startupStatus, close: shutdown };
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), ...(apps ? { mcpApps: apps } : {}), toolsStale: () => !!apps && apps.devSignature(conversationId) !== devSignature, truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
       } catch (error) { await shutdown(); throw error; }
@@ -839,7 +854,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
     return {
       definition, identity, lease, ...(resources ? { resources } : {}), get memory() { return guard; },
       openConversation,
-      open: async target => { const { agent, conversationId, title, history, rewind, memory, harnessCommand, webDev, mcpApps, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, memory, harnessCommand, ...(webDev ? { webDev } : {}), ...(mcpApps ? { mcpApps } : {}), close: closeConversation }; },
+      open: async target => { const { agent, conversationId, title, history, rewind, memory, harnessCommand, webDev, mcpApps, toolsStale, close: closeConversation } = await openConversation(target); return { agent, conversationId, title, history, rewind, memory, harnessCommand, ...(webDev ? { webDev } : {}), ...(mcpApps ? { mcpApps } : {}), toolsStale, close: closeConversation }; },
       check,
       close,
     };
@@ -956,7 +971,7 @@ export async function openLettaAgent<TOOLS extends ToolSet>(definition: AgentDef
         assertHistorySettled(loaded.messages);
       },
     };
-    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, ...(conversation.webDev ? { webDev: conversation.webDev } : {}), ...(conversation.mcpApps ? { mcpApps: conversation.mcpApps } : {}), ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
+    return { agent: conversation.agent, identity, navigation, rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, ...(conversation.webDev ? { webDev: conversation.webDev } : {}), ...(conversation.mcpApps ? { mcpApps: conversation.mcpApps } : {}), toolsStale: conversation.toolsStale, ...(host.resources ? { resources: host.resources } : {}), close: () => host.close() };
   } catch (error) { await host.close(); throw error; }
 }
 

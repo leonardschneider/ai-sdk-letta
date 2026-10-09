@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { McpApps, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import { DecisionBoard } from './decisions.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
@@ -181,7 +181,7 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
-      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand };
+      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand, ...(runtime.toolsStale ? { toolsStale: runtime.toolsStale } : {}) };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
     // Check and unlock (the runtime closed the session first): read-only, under the identity lock.
@@ -209,7 +209,7 @@ function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>,
       const host = await opened();
       const conversation = await host.open(options);
       const presentation = conversation.agent.presentation!;
-      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, close: () => conversation.close() };
+      return { agent: conversation.agent, agentId: host.identity.agentId, conversationId: conversation.conversationId, history: presentation.initialMessages, reload: () => conversation.history(), rewind: conversation.rewind, memory: conversation.memory, harnessCommand: conversation.harnessCommand, toolsStale: conversation.toolsStale, close: () => conversation.close() };
     },
     close: async () => { const current = agent; agent = undefined; await (await current?.catch(() => undefined))?.close(); },
     check: async (conversationId, otid) => (await opened()).check(conversationId, otid),
@@ -272,7 +272,8 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     let notify: (() => void) | undefined;
     const webDev = webDevEnabled(definition) ? new WebDevRegistry({ directory: join(statePaths(stateDirectory).root, 'webdev'), onChange: () => notify?.() }) : undefined;
     // MCP Apps: started now (in the background), kept across sessions, stopped with the server.
-    const apps = definition.mcpApps?.length ? new McpApps(definition.mcpApps, { directory: mcpAppsDirectory(statePaths(stateDirectory).root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), onChange: () => notify?.(), log }) : undefined;
+    // Installed apps, or MCP Apps dev mode (mcpAppDevTools) without any.
+    const apps = appsEnabled(definition) ? new McpApps(definition.mcpApps ?? [], { directory: mcpAppsDirectory(statePaths(stateDirectory).root, definition.id), ...(definition.sandbox ? { sandbox: definition.sandbox } : {}), onChange: () => notify?.(), log }) : undefined;
     void apps?.ready();
     const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, webDev, apps), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     notify = () => runtime.webDevChanged();
@@ -330,7 +331,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       // Rewinds a stop interrupted are finished first, then outcomes decided before a restart and not sent yet are sent (once).
       await runtime.resumeRewinds(owner).catch(() => {});
       board?.resumeAll();
-      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview && webDev ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}${preview && apps ? `\nMCP App views: http://s-<view token>.localhost:${preview.port}/ (loopback, one origin per view) · apps: ${definition.mcpApps!.map(a => a.id).join(', ')}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
+      log(`${definition.name} GUI: ${url}\nDefinition: ${definition.id} · state: ${stateDirectory}${automation ? `\nAutomation API: ${automation.url} (tokens: Automations in the app)${options.automation?.scheduler ? ` · schedule_task → ${options.automation.scheduler.kind}` : ''}` : ''}${preview && webDev ? `\nWeb app previews: http://p-<conversation token>.localhost:${preview.port}/ (loopback, own origin)` : ''}${preview && apps ? `\nMCP App views: http://s-<view token>.localhost:${preview.port}/ (loopback, one origin per view) · apps: ${(definition.mcpApps ?? []).map(a => a.id).join(', ') || 'none installed'}${mcpAppDevEnabled(definition, webDevEnabled(definition)) ? ' · dev mode' : ''}` : ''}\nPID ${process.pid}. Stop with Ctrl-C or SIGTERM.`);
       const stop = lifecycle(server, runtime, unlock, log, 'GUI', { ...automation, ...(preview ? { webDev: { ...(webDev ? { registry: webDev } : {}), preview } } : {}), ...(apps ? { apps } : {}) });
       return { url, port: bound, ...(automation ? { automation: { url: automation.url, port: automation.port } } : {}), ...(preview ? { preview: { port: preview.port } } : {}), close: async () => { await adoption?.close(); await stop(); } };
     } catch (error) { automation?.service.close(); automation?.server.close(); preview?.close(); await webDev?.close(); await apps?.close(); await adoption?.close(); throw error; }
@@ -379,7 +380,9 @@ export interface TeamServeOptions extends ServeOptions {
 }
 
 /** What the browser may know about a definition. */
-export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, ...(definition.mcpApps?.length ? { apps: true } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
+/** Does the agent have MCP Apps: installed ones, or dev mode (`mcpAppDevTools` with web development)? */
+const appsEnabled = (definition: AgentDefinition) => !!definition.mcpApps?.length || mcpAppDevEnabled(definition, webDevEnabled(definition));
+export const agentInfo = (definition: AgentDefinition): GuiAgentInfo => ({ id: definition.id, name: definition.name, ...(appsEnabled(definition) ? { apps: true } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'), files: filesEnabled(definition), ...((atlassianEnabled(definition) || webDevEnabled(definition)) && !filesEnabled(definition) ? { resources: true } : {}), ...(webDevEnabled(definition) ? { webDev: true } : {}), ui: { latex: definition.ui?.latex ?? true }, integrations: atlassianEnabled(definition) ? ['atlassian'] : [], ...(definition.memory?.reviewer !== 'off' ? { memory: true } : {}), ...(definition.memory?.trustJiminy ? { trustJiminy: true } : {}), ...(projectOf(definition) ? { project: basename(projectOf(definition)!) } : {}) });
 
 /**
  * Serve several agents to a team, on 127.0.0.1 behind `tailscale serve`.

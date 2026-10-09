@@ -235,6 +235,8 @@ export interface RuntimeSession {
   reload?(): Promise<UIMessage[]>;
   /** Close only this conversation's session (parallel hosts). */
   close?(): Promise<void>;
+  /** Its tool list changed since it opened (dev apps): it is reopened before the next turn. */
+  toolsStale?(): boolean;
   /** Rewind support (fork, history records, memory journal); without it, rewinds are refused with `rewind_unavailable`. */
   rewind?: ConversationRewind;
   /** The agent's memory guard (provenance, reviews), when the host has one. */
@@ -521,7 +523,8 @@ export class ThreadRuntime {
     try { return await fn(); } finally { lane.locked = false; }
   }
   private async open(lane: Lane, thread: Thread) {
-    if (lane.current && lane.current.conversationId === thread.conversationId) return lane.current;
+    // A session whose tools changed (a dev app started, reloaded or stopped) is reopened: the agent gets the new tool list.
+    if (lane.current && lane.current.conversationId === thread.conversationId && !lane.current.toolsStale?.()) return lane.current;
     await this.closeLane(lane);
     const session = await this.host.open(thread.conversationId ? { conversationId: thread.conversationId } : { newTitle: thread.title });
     const identity = this.state.threads.find(t => t.agentId)?.agentId;
