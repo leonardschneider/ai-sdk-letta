@@ -3,6 +3,7 @@ import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
 import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
+import { includesMcpAppDevTools } from './mcp-app-dev.js';
 import { includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, webDevEnabled, WEB_DEV_NOTE, type ResolvedWebDevConfig, type WebDevConfig } from './webdev.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 import { resolveMcpApps, type McpAppConfig, type ResolvedMcpAppConfig } from './mcp-apps.js';
@@ -256,6 +257,9 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   // Web development needs Node and Chromium: its image, unless the definition names another.
   const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(includesWebDevTools(input.tools) && input.sandbox && typeof input.sandbox === 'object' && input.sandbox.image === undefined ? { ...input.sandbox, image: WEBDEV_IMAGE } : input.sandbox);
   const webDev = resolveWebDevConfig(input.webDev);
+  // MCP Apps dev mode runs dev apps in the web development services container.
+  if (includesMcpAppDevTools(input.tools) && !includesWebDevTools(input.tools)) throw new Error('mcpAppDevTools need webDevTools (dev apps run in the web development services container)');
+  if (includesMcpAppDevTools(input.tools) && (!sandbox || (sandbox.provider !== 'docker' && sandbox.provider !== 'apple-container'))) throw new Error('mcpAppDevTools need sandbox with the built-in "docker" or "apple-container" provider');
   const missing = names.filter(name => !Object.hasOwn(permissions, name));
   if (missing.length) throw new Error(`Missing permission for tool(s): ${missing.join(', ')}. Every tool needs "allow", "ask" or "deny".`);
   const dreaming = { ...DEFAULT_DREAMING, ...input.dreaming };

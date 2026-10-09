@@ -553,6 +553,16 @@ They also need `npm install --save-exact @ai-sdk/mcp@2.0.60`, and are
 single-user only (`startGuiServer`). Details, the sandbox and the gate:
 [MCP Apps](../README.md#mcp-apps-run-mode).
 
+**MCP Apps dev mode** lets the agent write its own MCP Apps: add
+`mcpAppDevTools` (with `MCP_APP_DEV_TOOL_PERMISSIONS`) next to
+`webDevTools`. The agent reads `mcp_app_guide`, builds the app in its
+sandbox, runs it with `mcp_app_dev_start` over stdio in the services
+container (no network; packages come in through `run_command_online`), and
+calls it as `dev_<name>__<tool>` from the next turn: the view renders in the
+chat with a **Dev** badge, its calls always ask, and `mcp_app_dev_reload`
+re-renders open views live. Details:
+[MCP Apps dev mode](../README.md#mcp-apps-dev-mode).
+
 **Images** need no tool: a user turn may carry up to 4 PNG, JPEG, GIF or
 WebP images (5 MB each), if the model accepts images. From code, pass the
 transcript plus the new turn:

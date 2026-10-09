@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { acceptFrameMessage, appToolLabel, approvalError, approvalTitle, hostContext, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
+import { acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
 import { historyMessages, knownApp } from '../src/messages.js';
 
 test('display modes: only modes the view declared and the host offers; otherwise the current one', () => {
@@ -64,4 +64,20 @@ test('history: a message an app sent keeps its app (the "App" badge after a relo
   assert.equal(knownApp({ metadata: { app: { id: 'clock' } } }), undefined);
   const [message] = historyMessages([{ id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hello from the app' }], metadata: { app } }]);
   assert.deepEqual((message!.metadata?.custom as { app?: unknown }).app, app);
+});
+
+test('dev reloads: a view keys on its dev app\'s generation; installed apps and unknown tools stay at 0', () => {
+  const tools = { dev_notes__show_board: { app: 'dev_notes', appName: 'notes (dev)', tool: 'show_board', dev: true as const }, clock__show: { app: 'clock', appName: 'Clock', tool: 'show' } };
+  assert.equal(viewGeneration(tools, { dev_notes: 3 }, 'dev_notes__show_board'), 3);
+  assert.equal(viewGeneration(tools, {}, 'dev_notes__show_board'), 0, 'a stopped dev app');
+  assert.equal(viewGeneration(tools, { dev_notes: 3, clock: 9 }, 'clock__show'), 0, 'installed apps never remount');
+  assert.equal(viewGeneration(tools, { dev_notes: 3 }, 'nope'), 0);
+  assert.equal(viewGeneration(tools, { dev_notes: 3 }, undefined), 0);
+  assert.equal(devGenerationsKey({ b: 2, a: 1 }), 'a:1,b:2');
+  // A dev app's tools are app tools too (their line shows the view).
+  assert.ok(isAppToolName('dev_notes__show_board'));
+  assert.ok(isAppToolName('clock__show'));
+  assert.ok(!isAppToolName('run_command'));
+  assert.ok(!isAppToolName('mcp_app_dev_start'));
+  assert.notEqual(devGenerationsKey({ a: 1 }), devGenerationsKey({ a: 2 }));
 });

@@ -12,6 +12,18 @@
       "package": "sharp",
       "expires": "2026-11-01",
       "reason": "libheif CVEs, fixed in sharp 0.35.4. Same path and constraint as GHSA-f88m-g3jw-g9cj."
+    },
+    {
+      "id": "GHSA-wq5f-xc86-pv6w",
+      "package": "sharp",
+      "expires": "2026-11-01",
+      "reason": "librsvg CVE-2026-96889, fixed in sharp 0.35.5. Same path and constraint as GHSA-f88m-g3jw-g9cj (letta-code 0.33.4 pins sharp ^0.34.5 and sharp-electron 0.35.3; an override breaks its image worker)."
+    },
+    {
+      "id": "GHSA-6qxp-vccf-f47h",
+      "package": "@modelcontextprotocol/sdk",
+      "expires": "2026-11-01",
+      "reason": "OAuth client could send credentials to an authorization server chosen by the MCP server; fixed in 1.31.0. Reached only through @letta-ai/letta-agent-sdk 0.8.22 -> @letta-ai/letta-code 0.33.4, which pins @modelcontextprotocol/sdk 1.30.0 exactly (and @google/genai's optional peer). This package's MCP Apps use @ai-sdk/mcp and the ext-apps SDK 2.x, never this client's OAuth flow. Remove when the SDK is bumped to a letta-code that ships >= 1.31.0."
     }
   ]
 }

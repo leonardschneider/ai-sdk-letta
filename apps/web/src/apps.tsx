@@ -3,7 +3,7 @@ import { Blocks, ChevronRight, LoaderCircle, ShieldAlert, X } from 'lucide-react
 import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
-import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DisplayMode, type ViewTool } from './apps-model.js';
+import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
 
 /** The view frame carries the MCP SDK: loaded only when a view shows. */
 const AppFrame = lazy(() => import('./app-view.js'));
@@ -12,10 +12,12 @@ const AppFrame = lazy(() => import('./app-view.js'));
 export type AppsState = {
   enabled: boolean; threadId?: string;
   viewTools: Readonly<Record<string, ViewTool>>;
-  /** The call shown in the panel, if any. */
-  panel?: string;
-  openPanel(toolCallId: string): void;
-  closePanel(): void;
+  /** Running dev apps' generations: a reload remounts their open views. */
+  generations?: DevGenerations;
+  /** The calls with a tab in the side panel (this conversation). */
+  panel?: readonly string[];
+  openPanel(toolCallId: string, toolName: string): void;
+  closePanel(toolCallId: string): void;
   /** The call shown full screen or in picture-in-picture, if any. */
   overlay?: { toolCallId: string; mode: Exclude<DisplayMode, 'inline'> };
   setOverlay(value: AppsState['overlay']): void;
@@ -24,17 +26,22 @@ export type AppsState = {
 };
 export const AppsContext = createContext<AppsState>({ enabled: false, viewTools: {}, openPanel: () => {}, closePanel: () => {}, setOverlay: () => {}, refreshApprovals: () => {}, onSent: () => {} });
 
-/** `GET /v1/apps` (tools with views), refreshed with the conversation. */
-export function useViewTools(enabled: boolean, refreshKey: number): Record<string, ViewTool> {
-  const [tools, setTools] = useState<Record<string, ViewTool>>({});
+/**
+ * `GET /v1/apps` (tools with views, dev apps' generations), refreshed with
+ * the conversation and with every server change (a dev app reload notifies).
+ */
+export function useViewTools(enabled: boolean, refreshKey: number): { viewTools: Record<string, ViewTool>; generations: DevGenerations } {
+  const [state, setState] = useState<{ viewTools: Record<string, ViewTool>; generations: DevGenerations }>({ viewTools: {}, generations: {} });
   useEffect(() => {
     if (!enabled) return;
     let live = true;
-    api<{ viewTools: Record<string, ViewTool> }>('/v1/apps').then(data => { if (live) setTools(data.viewTools ?? {}); }).catch(() => {});
+    api<{ viewTools: Record<string, ViewTool>; devGenerations?: Record<string, number> }>('/v1/apps').then(data => { if (live) setState({ viewTools: data.viewTools ?? {}, generations: data.devGenerations ?? {} }); }).catch(() => {});
     return () => { live = false; };
   }, [enabled, refreshKey]);
-  return tools;
+  return state;
 }
+/** The remount key of a view: its call, and its dev app's generation. */
+const viewKey = (apps: AppsState, prefix: string, toolCallId: string, toolName: string | undefined) => `${prefix}-${toolCallId}-${viewGeneration(apps.viewTools, apps.generations ?? {}, toolName)}`;
 /** Pending approvals of app actions in a thread, and context waiting for the next turn. */
 export function useAppApprovals(threadId: string | undefined, enabled: boolean, refreshKey: number): [AppApprovalView[], () => void] {
   const [list, setList] = useState<{ threadId: string; approvals: AppApprovalView[] }>();
@@ -61,19 +68,20 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
   // A call that failed (refused, denied, or the app failed) reads like any failed tool: no view.
   if (phase === 'error') return <>{fallback}</>;
   const overlay = apps.overlay?.toolCallId === toolCallId ? apps.overlay.mode : undefined;
-  const inPanel = apps.panel === toolCallId;
+  const inPanel = !!apps.panel?.includes(toolCallId);
   const label = appToolLabel(view, phase);
   return <div className="line app-line" data-tone={phase} data-tool-call-id={toolCallId}>
     <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`${label}. ${open ? 'Hide' : 'Show'} the app`}>
       {phase === 'running' ? <LoaderCircle size={14} className="line-icon spin" aria-hidden="true"/> : <Blocks size={14} className="line-icon" aria-hidden="true"/>}
       <span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{label}</span>
       <span className="app-badge" aria-hidden="true">App</span>
+      {view.dev && <span className="side-tab-dev" aria-hidden="true">Dev</span>}
       <ChevronRight size={14} className="chev" aria-hidden="true"/>
     </button>
     {open && <div className="app-line-body">
       {inPanel || overlay
-        ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(); else apps.setOverlay(undefined); }}>Show here</button></p>
-        : <AppSlot toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId)}/>}
+        ? <p className="muted app-elsewhere">{inPanel ? 'Shown in the panel.' : overlay === 'pip' ? 'Shown in picture-in-picture.' : 'Shown full screen.'} <button type="button" className="link-btn" onClick={() => { if (inPanel) apps.closePanel(toolCallId); else apps.setOverlay(undefined); }}>Show here</button></p>
+        : <AppSlot key={viewKey(apps, 'inline', toolCallId, toolName)} toolCallId={toolCallId} placement="inline" mode="inline" version={phase} name={view.appName} onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onOpenPanel={() => apps.openPanel(toolCallId, toolName)}/>}
       {fallback}
     </div>}
   </div>;
@@ -89,11 +97,11 @@ export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'pane
   </Suspense>;
 }
 
-/** The right panel: one app view at full height. */
-export function AppPanel({ toolCallId, onClose }: { toolCallId: string; onClose(): void }) {
+/** An app tab of the side panel: one app view at full height. */
+export function AppPanel({ toolCallId, toolName, onClose }: { toolCallId: string; toolName?: string; onClose(): void }) {
   const apps = useContext(AppsContext);
   return <div className="app-panel">
-    <AppSlot key={`panel-${toolCallId}`} toolCallId={toolCallId} placement="panel" mode="inline" onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onClose={onClose}/>
+    <AppSlot key={viewKey(apps, 'panel', toolCallId, toolName)} toolCallId={toolCallId} placement="panel" mode="inline" onMode={mode => { if (mode !== 'inline') apps.setOverlay({ toolCallId, mode }); }} onClose={onClose}/>
   </div>;
 }
 
@@ -109,7 +117,7 @@ export function AppOverlay() {
   }, [overlay, apps]);
   if (!overlay) return null;
   return <div className={`app-overlay ${overlay.mode}`} role={overlay.mode === 'fullscreen' ? 'dialog' : 'complementary'} aria-label="App">
-    <AppSlot key={`${overlay.mode}-${overlay.toolCallId}`} toolCallId={overlay.toolCallId} placement="inline" mode={overlay.mode} onMode={mode => apps.setOverlay(mode === 'inline' ? undefined : { toolCallId: overlay.toolCallId, mode })} onClose={() => apps.setOverlay(undefined)}/>
+    <AppSlot key={`${overlay.mode}-${overlay.toolCallId}-${devGenerationsKey(apps.generations ?? {})}`} toolCallId={overlay.toolCallId} placement="inline" mode={overlay.mode} onMode={mode => apps.setOverlay(mode === 'inline' ? undefined : { toolCallId: overlay.toolCallId, mode })} onClose={() => apps.setOverlay(undefined)}/>
   </div>;
 }
 

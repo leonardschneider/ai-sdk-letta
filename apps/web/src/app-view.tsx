@@ -194,6 +194,7 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
   return <div className="appview" data-placement={placement} data-mode={mode} data-border={state.instance?.prefersBorder === false ? 'none' : undefined} data-phase={state.phase}>
     <div className="appview-bar">
       <span className="app-badge" title="An interactive view of an MCP App: its content comes from the app">App</span>
+      {state.instance?.app.id.startsWith('dev_') && <span className="side-tab-dev" title="A dev app of this conversation: the agent is writing it">Dev</span>}
       <span className="appview-name" title={state.instance ? `${state.instance.app.name} · ${state.instance.tool.title ?? state.instance.tool.name}` : undefined}>{name}{state.instance && <span className="muted"> · {state.instance.tool.title ?? state.instance.tool.name}</span>}</span>
       {state.instance?.changed && <span className="appview-note" title="The app’s view changed since this call ran">updated</span>}
       <span className="appview-tools">

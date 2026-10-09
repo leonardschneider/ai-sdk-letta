@@ -9,6 +9,7 @@ import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
 import type { Listened, MessageApp, MessageAuthor as Author, MessageSource } from './messages.js';
 import { AppToolLine } from './apps.js';
+import { isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
@@ -117,7 +118,7 @@ function UserBubble() {
 /** Questions stay ungrouped so they read as part of the conversation. */
 const byType = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [], 'tool-call:web_search': [] });
 /** MCP App tools (`<app>__<tool>`) stay ungrouped too: their views show in the conversation. */
-const groupTools: typeof byType = (part, context) => part.type === 'tool-call' && /^[a-z][a-z0-9-]{0,23}__/.test(part.toolName) ? [] : byType(part, context);
+const groupTools: typeof byType = (part, context) => part.type === 'tool-call' && isAppToolName(part.toolName) ? [] : byType(part, context);
 
 function AssistantParts() {
   return <><MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
@@ -189,7 +190,7 @@ function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
   if (props.toolName === 'web_search') return <WebSearchPart {...props}/>;
   // MCP App tools with a view: the view under the line (the line itself keeps its details).
-  if (/^[a-z][a-z0-9-]{0,23}__/.test(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props} detailsLabel="What the agent got"/>}/>;
+  if (isAppToolName(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props} detailsLabel="What the agent got"/>}/>;
   return <ToolLine {...props}/>;
 }
 
