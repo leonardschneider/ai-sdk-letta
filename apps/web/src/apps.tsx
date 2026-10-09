@@ -142,9 +142,9 @@ export function AppOverlay() {
 /**
  * Cards for app actions waiting for the person (outside any turn): a tool
  * the app wants to run, a message it wants to send to the agent, or context
- * it wants to give it. Allow or deny, once; admins may also allow a tool
- * call always (this tool, or every tool of the app that asks), undone in
- * the Apps dialog.
+ * it wants to give it. Allow or deny, once; admins may also allow it
+ * always (this tool, the app's messages or its context updates; or every
+ * action of the app that asks), undone in the Apps dialog.
  */
 export function AppApprovalCards({ approvals, onDecided, admin = true }: { approvals: AppApprovalView[]; onDecided(): void; admin?: boolean }) {
   const toast = useToast();
@@ -152,7 +152,7 @@ export function AppApprovalCards({ approvals, onDecided, admin = true }: { appro
   if (!approvals.length) return null;
   const decide = async (approval: AppApprovalView, approved: boolean, always?: 'tool' | 'app') => {
     setBusy(approval.id);
-    try { await api(`/v1/apps/approvals/${encodeURIComponent(approval.id)}`, { approved, ...(always ? { always } : {}) }); if (always) toast(always === 'app' ? `${approval.appName}: its actions run without asking from now on. Reset in Apps.` : `${approval.tool} runs without asking from now on. Reset in Apps.`); }
+    try { await api(`/v1/apps/approvals/${encodeURIComponent(approval.id)}`, { approved, ...(always ? { always } : {}) }); if (always) toast(always === 'app' ? `${approval.appName}: its actions run without asking from now on. Reset in Apps.` : approval.kind === 'message' ? `${approval.appName}: its messages to the agent are sent without asking from now on. Reset in Apps.` : approval.kind === 'context' ? `${approval.appName}: its context updates reach the agent without asking from now on. Reset in Apps.` : `${approval.tool} runs without asking from now on. Reset in Apps.`); }
     catch (error) { const code = errorCode(error); toast(code === 'already_decided' ? 'Already decided.' : code === 'approval_expired' ? 'That request expired; nothing was done.' : 'Couldn’t send your decision. Try again.', { tone: 'error' }); }
     finally { setBusy(undefined); onDecided(); }
   };
@@ -165,7 +165,7 @@ export function AppApprovalCards({ approvals, onDecided, admin = true }: { appro
     <div className="card-actions">
       <button type="button" className="btn ghost" disabled={busy === approval.id} onClick={() => void decide(approval, false)}>Deny</button>
       {admin && approval.grantable && <button type="button" className="btn ghost" disabled={busy === approval.id} onClick={() => void decide(approval, true, 'app')} title={`Every action of ${approval.appName} that asks runs without asking (reset in Apps)`}>Allow all from this app</button>}
-      {admin && approval.grantable && <button type="button" className="btn ghost" disabled={busy === approval.id} onClick={() => void decide(approval, true, 'tool')} title="This action runs without asking from now on (reset in Apps)">Allow always</button>}
+      {admin && approval.grantable && <button type="button" className="btn ghost" disabled={busy === approval.id} onClick={() => void decide(approval, true, 'tool')} title={approval.kind === 'message' ? `Messages from ${approval.appName} are sent without asking from now on (reset in Apps)` : approval.kind === 'context' ? `Context updates from ${approval.appName} reach the agent without asking from now on (reset in Apps)` : 'This action runs without asking from now on (reset in Apps)'}>Allow always</button>}
       <button type="button" className="btn primary" disabled={busy === approval.id} onClick={() => void decide(approval, true)}>Allow</button>
     </div>
   </section>)}</div>;
@@ -197,7 +197,7 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
     catch { toast('Couldn’t change it. Try again.', { tone: 'error' }); }
   };
   const reset = async (app: AppStatusView, tool: string) => {
-    try { await api(`/v1/apps/${encodeURIComponent(app.id)}/grants/reset`, { tool }); toast(tool === '*' ? `${app.name}: its actions ask again.` : `${tool} asks again.`); load(); }
+    try { await api(`/v1/apps/${encodeURIComponent(app.id)}/grants/reset`, { tool }); toast(tool === '*' ? `${app.name}: its actions ask again.` : tool === '@message' ? `${app.name}: its messages ask again.` : tool === '@context' ? `${app.name}: its context updates ask again.` : `${tool} asks again.`); load(); }
     catch { toast('Couldn’t reset it. Try again.', { tone: 'error' }); }
   };
   const devAsk = async (app: AppStatusView, ask: boolean) => {
@@ -224,7 +224,9 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
             <span className="mono">{view.uri}</span>: {Object.values(view.declared).some(list => list?.length) ? <>declares {Object.entries(view.declared).filter(([, list]) => list?.length).map(([key, list]) => `${key.replace(/Domains$/, '')} ${list!.join(', ')}`).join('; ')} · granted {Object.values(view.granted).some(list => list.length) ? Object.entries(view.granted).filter(([, list]) => list.length).map(([key, list]) => `${key.replace(/Domains$/, '')} ${list.join(', ')}`).join('; ') : 'none'}</> : 'no outside sites'}
           </span>)}
           {app.grantedAll && <span className="member-login app-grant">All actions of this app that ask run without asking (allowed always). <button type="button" className="link-btn" aria-label={`Reset ${app.name}: ask again`} onClick={() => void reset(app, '*')}>Reset</button></span>}
-          {app.dev && <label className="member-login app-dev-ask" title="The agent’s own code, in its container without network; every action is audited. Untick to be asked each time."><input type="checkbox" checked={!app.viewsAsk} onChange={event => void devAsk(app, !event.target.checked)}/> Run its views’ actions without asking</label>}
+          {app.grantedMessages && <span className="member-login app-grant">Messages to the agent: allowed always. <button type="button" className="link-btn" aria-label={`Reset ${app.name} messages: ask again`} onClick={() => void reset(app, '@message')}>Reset</button></span>}
+          {app.grantedContext && <span className="member-login app-grant">Context updates for the agent: allowed always. <button type="button" className="link-btn" aria-label={`Reset ${app.name} context updates: ask again`} onClick={() => void reset(app, '@context')}>Reset</button></span>}
+          {app.dev && <label className="member-login app-dev-ask" title="The agent’s own code, in its container without network; every action, message and context update is audited. Untick to be asked each time."><input type="checkbox" checked={!app.viewsAsk} onChange={event => void devAsk(app, !event.target.checked)}/> Run its views’ actions, messages and context updates without asking</label>}
           {!!app.origins?.length && <span className="member-login">Allowed sites: {app.origins.join(', ')}</span>}
           {viewPolicy && onViewPolicy && !!app.views?.length && <label className="member-login app-view-policy">Views:{' '}
             <select value={viewPolicy(app.id)} onChange={event => onViewPolicy(app.id, event.target.value === 'every' ? 'every' : 'single')} aria-label={`Views of ${app.name}`}>

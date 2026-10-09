@@ -276,7 +276,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     switch (req.params.action) {
       case 'call': return res.json(await g.call(owner, id, req.body, author(req)));
       case 'read': return res.json(await g.read(owner, id, req.body));
-      case 'message': return res.json(g.message(owner, id, req.body, author(req)));
+      case 'message': return res.json(await g.message(owner, id, req.body, author(req)));
       case 'context': return res.json(g.context(owner, id, req.body, author(req)));
       case 'log': g.log(owner, id, req.body, author(req)); return res.json({ ok: true });
       case 'close': g.closeInstance(owner, id); return res.json({ ok: true });

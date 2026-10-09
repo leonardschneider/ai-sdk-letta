@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { McpAppError, appSource, appVisible, grantedCsp, mcpAppCsp, type ContentSource, type McpApps, type McpCallResult } from 'ai-sdk-letta';
+import { McpAppError, VIEW_ACTION_GRANT, appSource, appVisible, grantedCsp, mcpAppCsp, type ContentSource, type McpApps, type McpCallResult } from 'ai-sdk-letta';
 import { RuntimeFault, type RunAuthor, type RunApp, type ThreadRuntime } from './runtime.js';
 
 /**
@@ -111,7 +111,7 @@ export type AppApproval = {
   decidedBy?: { id: string; name: string }; decidedAt?: string;
   /** `call`, once run: its result (for the view), or why it failed. */
   result?: McpCallResult; error?: string;
-  /** `call` of an installed app: "Allow always" may be chosen (for the tool, or for every tool of the app that asks). */
+  /** Installed apps: "Allow always" may be chosen (for the tool, or this kind of action: message or context; or for every action of the app that asks). */
   grantable?: boolean;
   /** Decided with "Allow always": for this tool, or for the whole app. */
   always?: 'tool' | 'app';
@@ -288,8 +288,13 @@ export class AppGate {
     try { return { result: await this.apps.readResource(instance.app, uri) }; }
     catch (error) { return { error: { code: -32002, message: error instanceof McpAppError ? error.message : 'Resource unavailable' } }; }
   }
-  /** `ui/message`: always asks; once allowed, the text becomes a user message of the thread (queued behind a running turn). */
-  message(owner: string, instanceId: string, input: unknown, author?: RunAuthor): { pending: string } | { error: { code: number; message: string } } {
+  /**
+   * `ui/message`: the text becomes a user message of the thread (queued
+   * behind a running turn), marked as from the app. Asks first, unless the
+   * app may send without asking (dev apps unless asking was turned back on;
+   * installed apps with an "Allow always" grant, see `McpApps.viewMay`).
+   */
+  async message(owner: string, instanceId: string, input: unknown, author?: RunAuthor): Promise<{ result: Record<string, never> } | { pending: string } | { error: { code: number; message: string } }> {
     const instance = this.live(owner, instanceId);
     const params = (input ?? {}) as { role?: unknown; content?: unknown };
     if (params.role !== undefined && params.role !== 'user') return { error: { code: -32602, message: 'Only user messages are supported' } };
@@ -300,14 +305,30 @@ export class AppGate {
       this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_message', outcome: 'refused:conversation_blocked' }, author);
       return { error: { code: -32000, message: 'This conversation is read-only (its last turn did not finish); the message was not sent.' } };
     }
+    const allowed = this.apps.viewMay(instance.app, 'message');
+    if (allowed) {
+      this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_message', outcome: `allowed:${allowed}`, detail: `${text.length} chars` }, author);
+      const sent = await this.send(owner, instance.threadId, text, { id: instance.app, name: this.apps.name(instance.app), toolCallId: instance.toolCallId, approvedBy: this.options.person(author) }, author);
+      return 'error' in sent ? { error: { code: -32000, message: sent.error } } : { result: {} };
+    }
     const approval = this.ask(instance, 'message', { text });
     this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_message', outcome: 'asked', detail: approval.id }, author);
     return { pending: approval.id };
   }
+  /** Send a view's message as the person's own turn, from the app (queued behind a running turn); the reason when it was not sent (audited). */
+  private async send(owner: string, threadId: string, text: string, app: RunApp, author?: RunAuthor, approvalId?: string): Promise<{ ok: true } | { error: string }> {
+    try { await this.options.runtime.sendFromApp(owner, threadId, text, app, author); return { ok: true }; }
+    catch (error) {
+      const code = error instanceof RuntimeFault ? error.code : 'not_sent';
+      this.audit({ app: app.id, threadId, toolCallId: app.toolCallId, event: 'app_message', outcome: `not_sent:${code}`, ...(approvalId ? { detail: approvalId } : {}) }, author);
+      return { error: code === 'delivery_uncertain' ? 'This conversation is read-only (its last turn did not finish); the message was not sent.' : code === 'runtime_busy' ? 'The agent was busy for too long; the message was not sent.' : `The message was not sent (${code}).` };
+    }
+  }
   /**
    * `ui/update-model-context`: the latest value per view, given to the agent
-   * at the next turn. The first update of a view asks; later ones replace it
-   * without asking (the person can see them in the view's card).
+   * at the next turn. The first update of a view asks (unless the app may
+   * without asking, see `McpApps.viewMay`); later ones replace it without
+   * asking (the person can see them in the view's card).
    */
   context(owner: string, instanceId: string, input: unknown, author?: RunAuthor): { result: Record<string, never> } | { pending: string } | { error: { code: number; message: string } } {
     const instance = this.live(owner, instanceId);
@@ -317,9 +338,11 @@ export class AppGate {
     const key = `${instance.threadId}/${instance.toolCallId}`;
     if (!text) { this.contexts.delete(key); return { result: {} }; }
     const appName = this.apps.name(instance.app);
+    const allowed = this.contextConsent.has(key) ? undefined : this.apps.viewMay(instance.app, 'context');
+    if (allowed) this.contextConsent.add(key);
     if (this.contextConsent.has(key)) {
       this.contexts.set(key, { threadId: instance.threadId, app: instance.app, appName, text, at: new Date().toISOString() });
-      this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_context', outcome: 'updated', detail: `${text.length} chars` }, author);
+      this.audit({ app: instance.app, threadId: instance.threadId, toolCallId: instance.toolCallId, event: 'app_context', outcome: allowed ? `allowed:${allowed}` : 'updated', detail: `${text.length} chars` }, author);
       this.options.runtime.appsChanged();
       return { result: {} };
     }
@@ -344,7 +367,7 @@ export class AppGate {
     if ([...this.approvals.values()].filter(a => a.status === 'pending' && a.threadId === instance.threadId).length >= APP_GATE_LIMITS.maxPending) throw new RuntimeFault('too_many_pending', 429);
     const now = Date.now();
     const approval: AppApproval = { id: randomUUID(), kind, threadId: instance.threadId, app: instance.app, appName: this.apps.name(instance.app), toolCallId: instance.toolCallId, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + APP_GATE_LIMITS.approvalTtlMs).toISOString(), status: 'pending', ...what,
-      ...(kind === 'call' && !this.apps.isDev(instance.app) ? { grantable: true } : {}) };
+      ...(!this.apps.isDev(instance.app) ? { grantable: true } : {}) };
     this.approvals.set(approval.id, approval);
     this.instanceOf.set(approval.id, instance);
     this.trim();
@@ -397,10 +420,11 @@ export class AppGate {
    * once: the first decision wins (409 `already_decided` after). An allowed
    * tool call runs now; an allowed message is sent as a user message; an
    * allowed context lets the view set the agent's context from now on.
-   * `always` ("Allow always", installed apps' calls only, admins only:
+   * `always` ("Allow always", installed apps only, admins only:
    * `admin: false` refuses it with 403) also lets later calls from the app's
-   * views of this tool (`'tool'`) or of every tool that asks (`'app'`) run
-   * without asking, kept across restarts (see `McpApps.grant`).
+   * views of this tool, or its later messages or context updates (`'tool'`:
+   * this kind of action), or every action that asks (`'app'`) run without
+   * asking, kept across restarts (see `McpApps.grant`).
    */
   async decide(owner: string, id: string, input: unknown, author?: RunAuthor, access: { admin?: boolean } = {}): Promise<ReturnType<typeof publicApproval>> {
     const { approved, always } = (input ?? {}) as { approved?: unknown; always?: unknown };
@@ -419,7 +443,7 @@ export class AppGate {
     const base = { app: approval.app, threadId: approval.threadId, toolCallId: approval.toolCallId, ...(approval.tool ? { tool: approval.tool } : {}) };
     this.audit({ ...base, event: `app_${approval.kind}`, outcome: approved ? (always ? `approved:always_${always}` : 'approved') : 'denied', detail: approval.id }, author);
     if (always === 'tool' || always === 'app') {
-      try { this.apps.grant(approval.app, always === 'app' ? '*' : approval.tool!); approval.always = always; }
+      try { this.apps.grant(approval.app, always === 'app' ? '*' : approval.kind === 'call' ? approval.tool! : VIEW_ACTION_GRANT[approval.kind]); approval.always = always; }
       catch { /* the tool no longer asks (its definition changed): allowed once */ }
     }
     this.options.runtime.appsChanged();
@@ -436,13 +460,8 @@ export class AppGate {
     } else {
       // The message becomes the person's own turn, sent on their behalf from the app (queued behind a running turn).
       const app: RunApp = { id: approval.app, name: approval.appName, toolCallId: approval.toolCallId, approvedBy: who };
-      try { await this.options.runtime.sendFromApp(owner, approval.threadId, approval.text ?? '', app, author); approval.status = 'done'; }
-      catch (error) {
-        approval.status = 'failed';
-        const code = error instanceof RuntimeFault ? error.code : 'not_sent';
-        approval.error = code === 'delivery_uncertain' ? 'This conversation is read-only (its last turn did not finish); the message was not sent.' : code === 'runtime_busy' ? 'The agent was busy for too long; the message was not sent.' : `The message was not sent (${code}).`;
-        this.audit({ app: approval.app, threadId: approval.threadId, toolCallId: approval.toolCallId, event: 'app_message', outcome: `not_sent:${code}`, detail: approval.id }, author);
-      }
+      const sent = await this.send(owner, approval.threadId, approval.text ?? '', app, author, approval.id);
+      if ('error' in sent) Object.assign(approval, { status: 'failed', error: sent.error }); else approval.status = 'done';
     }
     this.options.runtime.appsChanged();
     this.wake();

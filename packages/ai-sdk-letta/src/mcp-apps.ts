@@ -677,7 +677,16 @@ export type McpAppStatus = {
   grantedAll?: boolean;
   /** Dev apps: calls from its views ask first (the default is to run them, like the agent's own calls). */
   viewsAsk?: boolean;
+  /** Installed apps: "Allow always" was chosen for its views' messages to the agent (`ui/message`). */
+  grantedMessages?: boolean;
+  /** Installed apps: "Allow always" was chosen for its views' context updates (`ui/update-model-context`). */
+  grantedContext?: boolean;
 };
+/** What a view asks of the host besides tool calls: send a message to the agent, or update its context. */
+export type McpAppViewAction = 'message' | 'context';
+/** The grant keys of {@link McpAppViewAction}s in an app's grants (never MCP tool names, which can't contain `@`). */
+export const VIEW_ACTION_GRANT: Record<McpAppViewAction, string> = { message: '@message', context: '@context' };
+const VIEW_ACTION_KEYS = new Set(Object.values(VIEW_ACTION_GRANT));
 /** A failure with a fixed code (refused calls, unavailable apps). */
 export class McpAppError extends Error {
   override readonly name = 'McpAppError';
@@ -856,16 +865,31 @@ export class McpApps {
   /** Why a view's call of this tool runs without asking: a grant for the tool, or for the whole app (installed apps whose tool asks). */
   granted(appId: string, toolName: string): 'tool' | 'app' | undefined {
     const tools = this.grants.get(appId);
-    if (!tools || this.live.get(appId)?.dev || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask') return undefined;
+    if (!tools || VIEW_ACTION_KEYS.has(toolName) || this.live.get(appId)?.dev || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask') return undefined;
     return tools.has(toolName) ? 'tool' : tools.has('*') ? 'app' : undefined;
   }
   /**
+   * May a view of this app send a message to the agent (`'message'`) or
+   * update its context (`'context'`) without asking? Dev apps: yes (like
+   * their views' calls) unless {@link setDevViewsAsk} turned asking back on
+   * (`'dev'`). Installed apps: once a person chose "Allow always" for it
+   * (`'always'`), or "Allow all from this app" (`'app'`).
+   */
+  viewMay(appId: string, action: McpAppViewAction): 'dev' | 'always' | 'app' | undefined {
+    const dev = this.live.get(appId)?.dev;
+    if (dev) return this.devAsk.has(`${dev.conversationId}/${appId}`) ? undefined : 'dev';
+    const granted = this.grants.get(appId);
+    return granted?.has(VIEW_ACTION_GRANT[action]) ? 'always' : granted?.has('*') ? 'app' : undefined;
+  }
+  /**
    * "Allow always": calls from this app's views of `toolName` (`'*'`: of
-   * every tool of the app that asks) run without asking from now on. Kept
-   * across restarts. Never loosens a tool the definition denies.
+   * every tool of the app that asks, and its messages and context updates)
+   * run without asking from now on; {@link VIEW_ACTION_GRANT} keys allow its
+   * views' messages or context updates. Kept across restarts. Never loosens
+   * a tool the definition denies.
    */
   grant(appId: string, toolName: string): void {
-    if (!this.configs.some(c => c.id === appId) || (toolName !== '*' && (toolName.length > 128 || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask'))) throw new McpAppError('app_unknown', `Nothing to allow for "${appId}"`);
+    if (!this.configs.some(c => c.id === appId) || (toolName !== '*' && !VIEW_ACTION_KEYS.has(toolName) && (toolName.length > 128 || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask'))) throw new McpAppError('app_unknown', `Nothing to allow for "${appId}"`);
     const tools = this.grants.get(appId) ?? new Set<string>();
     tools.add(toolName); this.grants.set(appId, tools);
     this.saveSettings();
@@ -1015,6 +1039,7 @@ export class McpApps {
       const live = this.live.get(config.id)!;
       const dev = live.dev ? { dev: { conversationId: live.dev.conversationId, folder: live.dev.folder, command: live.dev.command, generation: live.dev.generation, startedAt: live.dev.startedAt } } : {};
       return { ...dev, ...(live.dev && this.devAsk.has(`${live.dev.conversationId}/${config.id}`) ? { viewsAsk: true } : {}), ...(!live.dev && this.grants.get(config.id)?.has('*') ? { grantedAll: true } : {}),
+        ...(!live.dev && this.grants.get(config.id)?.has(VIEW_ACTION_GRANT.message) ? { grantedMessages: true } : {}), ...(!live.dev && this.grants.get(config.id)?.has(VIEW_ACTION_GRANT.context) ? { grantedContext: true } : {}),
         id: config.id, name: this.name(config.id), ...(live.prepared?.packageVersion ?? live.serverInfo?.version ? { version: String(live.prepared?.packageVersion ?? live.serverInfo?.version).slice(0, 64) } : {}), ...(live.prepared?.packageName ? { packageName: live.prepared.packageName } : {}),
         status: live.status, ...(live.error ? { error: live.error } : {}), enabled: this.enabled(config.id), origins: [...config.origins],
         tools: live.tools.map(t => { const uri = toolResourceUri(t); const visibility = toolVisibility(t); return { name: t.name, ...(visibility.includes('model') && this.policy(config.id, t.name, 'agent') !== 'deny' ? { agentTool: agentToolName(config.id, t.name) } : {}), ...(typeof t.title === 'string' ? { title: t.title.slice(0, 120) } : {}), ...(typeof t.description === 'string' ? { description: t.description.slice(0, 500) } : {}), inputSchema: t.inputSchema ?? { type: 'object' }, visibility, policy: this.policy(config.id, t.name), ...(this.granted(config.id, t.name) ? { granted: this.granted(config.id, t.name) } : {}), ...(uri ? { resourceUri: uri } : {}) }; }),

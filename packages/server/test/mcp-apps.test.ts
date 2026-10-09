@@ -191,16 +191,16 @@ test('gate: allow-policy tools run at once; resources/read is limited to ui:// o
   } finally { await f.cleanup(); }
 });
 
-test('ui/message: always asks; allowed, it becomes a user turn from the app (untrusted); denied, nothing is sent', async () => {
+test('ui/message: asks (installed app); allowed, it becomes a user turn from the app (untrusted); denied, nothing is sent', async () => {
   const f = await fixture();
   try {
     const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
-    const invalid = f.gate.message('owner', instance, { role: 'assistant', content: [{ type: 'text', text: 'x' }] });
+    const invalid = await f.gate.message('owner', instance, { role: 'assistant', content: [{ type: 'text', text: 'x' }] });
     assert.ok('error' in invalid);
-    const denied = f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'Do not send' }] }) as { pending: string };
+    const denied = await f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'Do not send' }] }) as { pending: string };
     await f.gate.decide('owner', denied.pending, { approved: false });
     assert.equal(f.turns.length, 0);
-    const asked = f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'Hello from the app' }] }) as { pending: string };
+    const asked = await f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'Hello from the app' }] }) as { pending: string };
     assert.equal(f.gate.pending('owner', f.thread)[0]!.kind, 'message');
     const decided = await f.gate.decide('owner', asked.pending, { approved: true });
     assert.equal(decided.status, 'done');
@@ -269,7 +269,7 @@ test('ui/message follows the usable-run rule: sent after a stopped turn, refused
     const long = { id: randomUUID(), threadId: f.thread, text: 'long', parentRunId: null };
     await f.runtime.start('owner', long);
     await until(() => f.runtime.events('owner', long.id, 0).events.some(e => e.type === 'text'));
-    const queued = say('after the stop') as { pending: string };
+    const queued = await say('after the stop') as { pending: string };
     const deciding = f.gate.decide('owner', queued.pending, { approved: true });
     f.runtime.cancel('owner', long.id);
     await until(() => statusOf(long.id) === 'stopped');
@@ -283,7 +283,7 @@ test('ui/message follows the usable-run rule: sent after a stopped turn, refused
     await until(() => statusOf(lost.id) === 'failed');
     assert.equal(f.runtime.latestRun('owner', f.thread)!.usable, false);
     // Behind the uncertain turn, nothing is even asked.
-    const refused = say('behind a failed turn');
+    const refused = await say('behind a failed turn');
     assert.ok('error' in refused && /read-only/.test(refused.error.message));
     assert.equal(f.gate.pending('owner', f.thread).length, 0);
     assert.ok(!f.turns.some(t => t.text.includes('behind a failed turn')));
@@ -294,7 +294,7 @@ test('an approved ui/message whose conversation became uncertain while it waited
   const f = await fixture();
   try {
     const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
-    const asked = f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'too late' }] }) as { pending: string };
+    const asked = await f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'too late' }] }) as { pending: string };
     const lost = { id: randomUUID(), threadId: f.thread, text: 'lost', parentRunId: null };
     await f.runtime.start('owner', lost);
     await until(() => f.runtime.events('owner', lost.id, 0).status === 'failed');
@@ -353,6 +353,75 @@ test('gate: a dev app\'s view calls run without a card (audited); asking can be 
     assert.ok('pending' in asked, 'asks again when turned on');
     assert.equal(f.gate.pending('owner', f.thread)[0]!.grantable, undefined, 'no "Allow always" for dev apps (the toggle is the way)');
     await assert.rejects(f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }), /invalid_input/);
+  } finally { await f.cleanup(); }
+});
+
+test('gate: a dev app\'s view messages and context updates go through without a card (audited); asking can be turned back on', async () => {
+  const f = await fixture();
+  try {
+    const conversationId = f.runtime.conversationOf('owner', f.thread)!;
+    await f.apps.startDev({ name: 'probe', conversationId, folder: '/workspace/probe', command: 'node server.mjs', launch: async () => ({ line: { command: process.execPath, args: [SERVER] }, stop: async () => {} }) });
+    await f.apps.callAsAgent('dev_probe__show', { label: 'dev' }, { conversationId, toolCallId: 'call-dev' });
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-dev' }) as { instance: string };
+    const sent = await f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'Hello from the dev app' }] });
+    assert.deepEqual(sent, { result: {} }, 'no card');
+    assert.equal(f.gate.pending('owner', f.thread).length, 0);
+    await until(() => f.turns.some(t => t.text.includes('Hello from the dev app')));
+    await until(() => f.runtime.events('owner', f.runtime.latestRun('owner', f.thread)!.id, 0).status === 'completed');
+    const run = f.runtime.runRecord('owner', f.runtime.latestRun('owner', f.thread)!.id)!;
+    assert.equal(run.app?.id, 'dev_probe', 'a user turn marked as from the app');
+    assert.equal(run.app?.approvedBy.name, 'You');
+    const context = f.gate.context('owner', instance, { content: [{ type: 'text', text: 'dev context' }] });
+    assert.deepEqual(context, { result: {} }, 'no card for the first update either');
+    assert.equal(f.gate.waitingContext('owner', f.thread)[0]!.text, 'dev context');
+    assert.ok(f.gate.recent.some(e => e.event === 'app_message' && e.app === 'dev_probe' && e.outcome === 'allowed:dev'), 'message audited');
+    assert.ok(f.gate.recent.some(e => e.event === 'app_context' && e.app === 'dev_probe' && e.outcome === 'allowed:dev'), 'context audited');
+    // Asking turned back on: both ask again (a new view; this one's context consent stays).
+    f.apps.setDevViewsAsk('dev_probe', true);
+    const asked = await f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text: 'ask me' }] });
+    assert.ok('pending' in asked);
+    await f.apps.callAsAgent('dev_probe__show', { label: 'dev2' }, { conversationId, toolCallId: 'call-dev2' });
+    const second = await f.gate.instance('owner', f.thread, { toolCallId: 'call-dev2' }) as { instance: string };
+    assert.ok('pending' in f.gate.context('owner', second.instance, { content: [{ type: 'text', text: 'ask me too' }] }));
+    assert.deepEqual(f.gate.pending('owner', f.thread).map(a => [a.kind, a.grantable]), [['message', undefined], ['context', undefined]], 'no "Allow always" for dev apps');
+  } finally { await f.cleanup(); }
+});
+
+test('gate: "Allow always" for an installed app\'s messages and context: persists across a restart, resets; admins only; "allow all from this app" covers them', async () => {
+  const f = await fixture();
+  try {
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
+    const say = (text: string) => f.gate.message('owner', instance, { role: 'user', content: [{ type: 'text', text }] });
+    const asked = await say('first') as { pending: string };
+    assert.equal(f.gate.pending('owner', f.thread)[0]!.grantable, true, 'the message card offers "Allow always"');
+    await assert.rejects(f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }, undefined, { admin: false }), /admin_required/);
+    assert.equal((await f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }, undefined, { admin: true })).status, 'done');
+    assert.deepEqual(await say('second'), { result: {} }, 'the next message goes without a card');
+    await until(() => f.turns.some(t => t.text.includes('second')));
+    assert.ok(f.gate.recent.some(e => e.event === 'app_message' && e.outcome === 'allowed:always'));
+    assert.ok(f.apps.status()[0]!.grantedMessages);
+    assert.equal(f.apps.status()[0]!.grantedContext, undefined, 'context still asks');
+    assert.ok('pending' in f.gate.context('owner', instance, { content: [{ type: 'text', text: 'ctx' }] }));
+    // A restart: the grant is kept (settings.json); its key never reads as a tool grant.
+    const reloaded = new McpApps(resolveMcpApps([{ id: 'test', command: ['node'], tools: {}, origins: [] }]), { directory: join(f.directory, 'apps'), launcher: async () => ({ line: { command: process.execPath, args: [SERVER] }, stop: async () => {} }) });
+    await reloaded.ready();
+    try {
+      assert.equal(reloaded.viewMay('test', 'message'), 'always');
+      assert.equal(reloaded.viewMay('test', 'context'), undefined);
+      assert.ok(reloaded.status()[0]!.tools.every(t => !t.granted));
+    } finally { await reloaded.close(); }
+    // Reset: asks again.
+    f.apps.revoke('test', '@message');
+    assert.ok('pending' in await say('third'));
+    // "Allow all from this app" (from a message card) covers messages and context.
+    const card = f.gate.pending('owner', f.thread).find(a => a.kind === 'message')!;
+    await f.gate.decide('owner', card.id, { approved: true, always: 'app' });
+    assert.equal(f.apps.viewMay('test', 'message'), 'app');
+    assert.deepEqual(await say('fourth'), { result: {} });
+    await until(() => f.turns.some(t => t.text.includes('fourth')) && f.runtime.events('owner', f.runtime.latestRun('owner', f.thread)!.id, 0).status === 'completed');
+    const { instance: other } = await f.gate.instance('owner', f.thread, { toolCallId: 'call_A0Td5zq|fc_05dd421' }) as { instance: string };
+    assert.deepEqual(f.gate.context('owner', other, { content: [{ type: 'text', text: 'all' }] }), { result: {} });
+    assert.ok(f.gate.recent.some(e => e.event === 'app_context' && e.outcome === 'allowed:app'));
   } finally { await f.cleanup(); }
 });
 
