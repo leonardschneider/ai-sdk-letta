@@ -467,3 +467,23 @@ test('the preview tunnel is only available while the container runs', async () =
 
 // Keep the imports used in type positions.
 void createServer; void httpRequest;
+
+test('dev apps: STATE_DIR=/workspace/.app-state/<name>, created before the server starts (stdio and http)', async () => {
+  const { driver, containers } = fakeDriver({ folders: ['/workspace/My chat/notes'] });
+  const services = new WebDevServices(manager(), resolveWebDevConfig({}), { driver });
+  try {
+    const line = await services.devAppLine('notes', { cwd: 'notes', command: 'node server.js' });
+    assert.ok(line.ok);
+    assert.equal(line.stateDir, '/workspace/.app-state/notes');
+    assert.ok(line.line.args.includes('STATE_DIR=/workspace/.app-state/notes'), line.line.args.join(' '));
+    const execs = containers[0]!.execs.map(argv => argv.join(' '));
+    const mkdir = execs.findIndex(e => e === 'mkdir -p /workspace/.app-state/notes');
+    assert.ok(mkdir >= 0, 'created first');
+    // HTTP: the detached server gets the same STATE_DIR (here it never listens: the fake has no port).
+    await services.devAppHttpStart('notes', { cwd: 'notes', command: 'node server.js', port: 3000, path: '/mcp' });
+    const started = containers[0]!.execs.find(argv => argv[0] === 'env' && argv.includes('PORT=3000'));
+    assert.ok(started?.includes('STATE_DIR=/workspace/.app-state/notes'), started?.join(' '));
+    const all = containers[0]!.execs.map(argv => argv.join(' '));
+    assert.ok(all.lastIndexOf('mkdir -p /workspace/.app-state/notes') < all.findIndex(e => e.startsWith('env ') && e.includes('PORT=3000')));
+  } finally { await services.close(); }
+});

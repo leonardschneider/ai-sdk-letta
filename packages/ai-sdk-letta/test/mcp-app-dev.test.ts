@@ -87,6 +87,7 @@ test('dev tools: start → tools for that conversation only, linter output, stde
   assert.match(started.text, /ui:\/\/clock\/view\.html · fingerprint \S{12}/);
   assert.match(started.text, /Check: /, 'the linter ran');
   assert.match(started.text, /Folder: \/workspace\/Chat\/clock/);
+  assert.match(started.text, /STATE_DIR: \/workspace\/\.app-state\/clock \(kept across restarts/);
   // The command line: env -i, cd into the folder, stderr appended to the log, marked.
   const line = lines.at(-1)!;
   assert.equal(line.args[0], 'exec'); assert.ok(line.args.includes('-i'));
@@ -208,6 +209,7 @@ test('mcp_app_guide: bounded, attributed, the object form of callServerTool, and
   const guide = await run('mcp_app_guide', {});
   assert.equal(guide.isError, undefined);
   assert.ok(guide.text.length < 7000, `about 1.5k tokens (${guide.text.length} chars)`);
+  for (const needle of ['Persist server state (games, documents) as files under $STATE_DIR', '## Restoring the view', "'ui/state/save'", 'io.ai-sdk-letta/viewState', 'ui/update-model-context']) assert.ok(guide.text.includes(needle), needle);
   for (const needle of ['create-mcp-app', 'Apache-2.0', 'CC-BY-4.0', '@modelcontextprotocol/ext-apps@2.0.3', 'registerAppTool', 'registerAppResource', '_meta: { ui: { resourceUri', 'text/html;profile=mcp-app', 'new App(', 'app.connect()', "callServerTool({ name: 'add_note', arguments:", 'run_command_online', 'mcp_app_dev_reload']) assert.ok(guide.text.includes(needle), needle);
   assert.equal(MCP_APP_DEV_TOOL_PERMISSIONS.mcp_app_guide, 'allow');
   assert.match((mcpAppDevTools.mcp_app_dev_start as { description: string }).description, /mcp_app_guide/);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
+import { hostCapabilities, VIEW_STATE_EXTENSION, VIEW_STATE_SAVE, viewStateContext, viewStateParams, acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
 import { historyMessages, knownApp } from '../src/messages.js';
 
 test('display modes: only modes the view declared and the host offers; otherwise the current one', () => {
@@ -142,4 +142,18 @@ test('app messages: the first sentence, IDs shortened, at most 80 characters; th
   assert.equal(shortenIds('board 86E6B101-66f8-4107-93e0-c12b90845214.'), 'board 86E6B101….');
   assert.equal(shortenIds('token abcdef0123456789abcdef!'), 'token abcdef01…!');
   assert.equal(shortenIds('internationalization rnbqkbnr/pppppppp/8 e2e4'), 'internationalization rnbqkbnr/pppppppp/8 e2e4', 'words, FENs and moves stay');
+});
+
+test('view state (host extension): namespaced capability and host context key, { state } params', () => {
+  assert.equal(VIEW_STATE_EXTENSION, 'io.ai-sdk-letta/viewState');
+  assert.equal(VIEW_STATE_SAVE, 'ui/state/save');
+  const csp = { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] };
+  assert.deepEqual(hostCapabilities(csp).experimental, { 'io.ai-sdk-letta/viewState': {} }, 'advertised for feature detection');
+  assert.deepEqual(hostCapabilities(csp).sandbox, { csp });
+  assert.deepEqual(viewStateContext({ viewState: { n: 2 } }), { 'io.ai-sdk-letta/viewState': { state: { n: 2 } } });
+  assert.deepEqual(viewStateContext({ viewState: null }), { 'io.ai-sdk-letta/viewState': { state: null } }, 'null is a saved state');
+  assert.deepEqual(viewStateContext({}), {}, 'nothing saved: no key');
+  assert.deepEqual(viewStateParams['~standard'].validate({ state: [1] }), { value: { state: [1] } });
+  assert.ok('issues' in viewStateParams['~standard'].validate({}));
+  assert.ok('issues' in viewStateParams['~standard'].validate(null));
 });

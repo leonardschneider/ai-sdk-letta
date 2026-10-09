@@ -39,6 +39,12 @@ export type AppInstance = {
  */
 export const VIEW_STATE_EXTENSION = 'io.ai-sdk-letta/viewState';
 export const VIEW_STATE_SAVE = 'ui/state/save';
+/** What the host offers a view (`ui/initialize`), with the view state extension under `experimental` (views feature-detect it). */
+export const hostCapabilities = (csp: AppInstance['csp']) => ({
+  serverTools: {}, serverResources: {}, logging: {}, openLinks: {}, message: { text: {} }, updateModelContext: { text: {}, structuredContent: {} },
+  sandbox: { csp },
+  experimental: { [VIEW_STATE_EXTENSION]: {} },
+});
 /** The host context entry with a view's saved state (none when nothing was saved). */
 export const viewStateContext = (instance: Pick<AppInstance, 'viewState'>) => 'viewState' in instance && instance.viewState !== undefined ? { [VIEW_STATE_EXTENSION]: { state: instance.viewState } } : {};
 /** `ui/state/save` params: `{ state }` with any JSON value (checked again, and limited, by the server). Standard Schema, so the bridge validates it without a schema library. */
