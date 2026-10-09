@@ -10,7 +10,10 @@ import { ThreadRuntime, TeamDirectory, guiApp, teamApp, PREVIEW_CSP, type Runtim
 import { ProjectFolder, PROJECT_LIMITS, parseStatus, projectPath } from '../src/project.js';
 
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
-const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+// No automatic maintenance: `git commit` may start `gc --auto` / `maintenance run --auto` in the background,
+// which writes into .git after the fixture returns and made the "nothing was written" fingerprint flaky in CI.
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+  GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'gc.auto', GIT_CONFIG_VALUE_0: '0', GIT_CONFIG_KEY_1: 'maintenance.auto', GIT_CONFIG_VALUE_1: 'false', GIT_CONFIG_KEY_2: 'gc.autoDetach', GIT_CONFIG_VALUE_2: 'false' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { env: gitEnv }).toString();
 
 /** A small git project with a .gitignore, nested folders, Markdown, an image, an outside symlink and an inside one. */
