@@ -35,31 +35,23 @@ zod@^4.2.0, esbuild@^0.25 (bundles the view). Not the old
 
 ## How this host runs your app
 
-- Your server is a dev app of this conversation: mcp_app_dev_start runs your
-  command in the services container. By default it serves **Streamable
-  HTTP**: listen on 127.0.0.1:$PORT (PORT=3000 and HOST=127.0.0.1 are set;
-  pass "port" for another one, not 5173 or 3128) with the MCP endpoint at
-  /mcp (pass "path" for another one). The host reaches it through a tunnel;
-  stdout and stderr go to its log (mcp_app_dev_logs). Legacy stdio servers
-  still work with "transport": "stdio" (then stdout is MCP only). No network
-  there, and the command must not build or install anything.
-- Python: FastMCP serves Streamable HTTP with
-  \`mcp.run(transport="http", host="127.0.0.1", port=3000)\` (or ASGI
-  \`mcp.http_app()\` under uvicorn); its endpoint path is assumed to be
-  /mcp; if yours differs (for example "/mcp/"), pass it as "path".
-- Install packages with run_command_online (the user approves it; plain
-  run_command has no network) in the app folder: \`npm install\`. Nothing is
-  vendored. Then build with run_command.
+- mcp_app_dev_start runs your server in the services container (no
+  network; the command must not build or install). It serves **Streamable
+  HTTP** on 127.0.0.1:$PORT (PORT=3000, HOST=127.0.0.1 set; "port" to
+  change, not 5173/3128), endpoint /mcp ("path" to change). Its output goes
+  to mcp_app_dev_logs. Legacy stdio: "transport": "stdio".
+- Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`
+  (or \`mcp.http_app()\` under uvicorn); assumed at /mcp, else pass "path".
+- Install with run_command_online (the user approves; run_command has no
+  network) in the app folder: \`npm install\`. Then build with run_command.
 - Tool visibility (\`_meta.ui.visibility\`): "model" tools become yours as
-  dev_<name>__<tool> from your next turn (calling one renders its view in the
-  chat, with a Dev badge); "app" tools only the view may call. Default: both.
-- Each call from the view (app.callServerTool) asks the user first (an
-  approval card). Expect a delay; show the result when it comes back.
+  dev_<name>__<tool> next turn (calling one renders its view, Dev badge);
+  "app" tools only the view may call. Default: both.
+- Each view call (app.callServerTool) asks the user first: expect a delay.
 - View CSP: no network unless granted (declared \`_meta.ui.csp\` domains
   intersected with the origins the user approved; for dev apps, none).
-  Inline scripts and styles work; no eval, no workers, no form submission
-  (form-action 'none': call preventDefault), no external scripts or fonts.
-  So inline everything into one HTML string.
+  Inline scripts and styles work; no eval, workers, form submission
+  (call preventDefault), external scripts or fonts: inline everything.
 - Support light and dark (\`color-scheme: light dark\`) and narrow widths.
 
 ## API cheat-sheet
@@ -90,8 +82,8 @@ package.json:
   "dependencies": { "@modelcontextprotocol/ext-apps": "2.0.3", "@modelcontextprotocol/server": "2.0.0", "zod": "^4.2.0", "esbuild": "^0.25.0" } }
 \`\`\`
 
-server.js (Streamable HTTP; \`createMcpHandler\` builds a server per
-request, so keep state outside the factory):
+server.js (\`createMcpHandler\` builds a server per request: keep state
+outside the factory):
 \`\`\`js
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -120,7 +112,6 @@ const handler = createMcpHandler(() => {
   return server;
 });
 
-// node:http -> web Request -> handler.fetch -> web Response (streams SSE too).
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   if (url.pathname !== '/mcp') { res.writeHead(404).end(); return; }
@@ -151,15 +142,14 @@ document.getElementById('f').addEventListener('submit', async e => {
 app.connect();
 \`\`\`
 
-Keep state in the server (until the next reload), not in the view.
+State lives in the server until the next reload, not in the view.
 
 ## The loop
 
 1. Scaffold the folder (above), run_command_online \`npm install\`,
    run_command \`npm run build\`.
-2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}
-   (Streamable HTTP on 127.0.0.1:3000/mcp). It waits until the port accepts
-   connections, then runs the contract check: fix every error
+2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
+   It waits for the port, then runs the contract check: fix every error
    (mcp_app_dev_check again). If it fails to start, read mcp_app_dev_logs.
 3. mcp_app_dev_call tests any tool (also "app" ones) without the user.
 4. Call your dev_<name>__<tool> (next turn): the view renders in the chat;
