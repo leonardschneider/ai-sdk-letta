@@ -885,9 +885,13 @@ export class McpApps {
     }
     return out;
   }
-  /** Each running dev app's generation (it grows with every reload): open views of an app render again when it changes. */
+  /**
+   * Each dev app's generation (it grows with every reload): open views of an
+   * app render again when it changes. While a (re)start runs, the previous
+   * one: views remount once the new server answers, not while it starts.
+   */
   devGenerations(): Record<string, number> {
-    return Object.fromEntries([...this.live.entries()].filter(([, live]) => live.dev).map(([id, live]) => [id, live.dev!.generation]));
+    return Object.fromEntries([...this.live.entries()].filter(([, live]) => live.dev).map(([id, live]) => [id, live.dev!.generation - (live.status === 'starting' ? 1 : 0)]));
   }
 
   /* ---------------- dev apps (MCP Apps dev mode) ---------------- */

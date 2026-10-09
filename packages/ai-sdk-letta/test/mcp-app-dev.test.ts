@@ -121,7 +121,9 @@ test('dev tools: reload reports changes; status; stop removes the tools', async 
   await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js' });
   state.tools = [{ ...viewTool, description: 'Show the time, now with zones' }, { name: 'set_alarm', inputSchema: { type: 'object' } }];
   state.html = `${HTML}<!-- v2 -->`;
-  const reloaded = await run('mcp_app_dev_reload', { name: 'clock' });
+  const reloading = run('mcp_app_dev_reload', { name: 'clock' });
+  assert.deepEqual(apps.devGenerations(), { dev_clock: 1 }, 'while it restarts, open views keep the previous generation');
+  const reloaded = await reloading;
   assert.equal(reloaded.isError, undefined, reloaded.text);
   assert.match(reloaded.text, /generation 2/);
   assert.deepEqual(apps.devGenerations(), { dev_clock: 2 }, 'the browser remounts open views on this');
