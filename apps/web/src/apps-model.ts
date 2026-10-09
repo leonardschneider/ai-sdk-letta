@@ -38,11 +38,15 @@ export type AppApprovalView = {
   id: string; kind: 'call' | 'message' | 'context'; threadId: string; app: string; appName: string; toolCallId: string; createdAt: string; expiresAt: string;
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'done' | 'failed';
   tool?: string; arguments?: Record<string, unknown>; text?: string; error?: string; decidedBy?: { id: string; name: string };
+  /** "Allow always" may be offered (installed apps' tool calls). */
+  grantable?: boolean;
 };
 /** What the admin sees of an app (`GET /v1/apps`). */
 export type AppStatusView = {
   id: string; name: string; version?: string; packageName?: string; status: 'starting' | 'running' | 'failed' | 'stopped'; error?: string; enabled: boolean; origins?: string[];
-  tools?: { name: string; agentTool?: string; title?: string; description?: string; visibility: ('model' | 'app')[]; policy: 'allow' | 'ask' | 'deny'; resourceUri?: string }[];
+  tools?: { name: string; agentTool?: string; title?: string; description?: string; visibility: ('model' | 'app')[]; policy: 'allow' | 'ask' | 'deny'; resourceUri?: string; granted?: 'tool' | 'app' }[];
+  /** "Allow all from this app" was chosen; dev apps: whether calls from its views ask first. */
+  grantedAll?: boolean; dev?: { conversationId: string }; viewsAsk?: boolean;
   views?: { uri: string; declared: Record<string, string[] | undefined>; granted: Record<string, string[]>; fingerprint?: string }[];
 };
 

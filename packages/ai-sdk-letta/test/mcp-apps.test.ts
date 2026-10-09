@@ -310,3 +310,44 @@ test('provenance: app content is its own untrusted kind, round-trips through tra
   assert.deepEqual(parsed.sources.map(s => s.kind), ['app', 'app']);
   assert.equal(parsed.sources[1]!.reviewed, true);
 });
+
+test('allow always: a grant turns ask into allow for views (not the agent), persists across restarts, resets; deny and allow always win', async () => {
+  const dir = tmp('apps-grants');
+  let { apps } = await openApps(dir, { plain: 'deny', show: 'allow' });
+  try {
+    assert.equal(apps.policy('test', 'record'), 'ask');
+    apps.grant('test', 'record');
+    assert.equal(apps.policy('test', 'record'), 'allow', 'views: runs without asking');
+    assert.equal(apps.granted('test', 'record'), 'tool');
+    assert.equal(apps.policy('test', 'secret', 'agent'), 'ask', 'the agent never uses grants');
+    assert.throws(() => apps.grant('test', 'plain'), (e: Error & { code?: string }) => e.code === 'app_unknown', 'a denied tool cannot be granted');
+    assert.throws(() => apps.grant('nope', 'record'), (e: Error & { code?: string }) => e.code === 'app_unknown');
+    // Restart: the grant is still there (the settings file, next to `disabled`).
+    await apps.close();
+    ({ apps } = await openApps(dir, { plain: 'deny', show: 'allow' }));
+    assert.equal(apps.policy('test', 'record'), 'allow', 'kept across restarts');
+    assert.equal(apps.status()[0]!.tools.find(t => t.name === 'record')!.granted, 'tool', 'the Apps dialog lists it');
+    apps.revoke('test', 'record');
+    assert.equal(apps.policy('test', 'record'), 'ask', 'reset: asks again');
+    // Allow all from this app: every tool that asks, never a denied one.
+    apps.grant('test', '*');
+    assert.equal(apps.policy('test', 'record'), 'allow');
+    assert.equal(apps.granted('test', 'record'), 'app');
+    assert.equal(apps.policy('test', 'plain'), 'deny', 'an explicit deny always wins');
+    assert.equal(apps.policy('test', 'show'), 'allow');
+    assert.equal(apps.granted('test', 'show'), undefined, 'allowed by its definition, not a grant');
+    assert.equal(apps.status()[0]!.grantedAll, true);
+    await apps.close();
+    ({ apps } = await openApps(dir, { plain: 'deny', show: 'allow' }));
+    assert.equal(apps.policy('test', 'record'), 'allow');
+    apps.revoke('test', '*');
+    assert.equal(apps.policy('test', 'record'), 'ask');
+    assert.equal(apps.status()[0]!.grantedAll, undefined);
+    // A definition that later denies the tool wins over an old grant.
+    apps.grant('test', 'record');
+    await apps.close();
+    ({ apps } = await openApps(dir, { record: 'deny' }));
+    assert.equal(apps.policy('test', 'record'), 'deny');
+    await assert.rejects(apps.callAsApp('test', 'record', {}), (e: Error & { code?: string }) => e.code === 'tool_denied');
+  } finally { await apps.close(); rmSync(dir, { recursive: true, force: true }); }
+});

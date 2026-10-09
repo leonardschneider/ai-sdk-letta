@@ -26,7 +26,8 @@ import { TOOL_OUTPUT_LIMIT } from './tools.js';
  *   web development's browser), at `HTTPS_PROXY=http://127.0.0.1:3128`.
  * - Tools whose visibility includes `"model"` (the default is
  *   `["model", "app"]`) join the agent's tools as `<app id>__<tool>`, with the
- *   definition's per-tool policy (default `'ask'`). The model sees the
+ *   definition's per-tool policy (default `'ask'`; for calls from views, a
+ *   person's "Allow always" grant turns `'ask'` into `'allow'`). The model sees the
  *   result's `content` only, within the tool output limit.
  * - Every call the agent makes of a tool with a view is recorded (server,
  *   resource, the full result with `structuredContent`), so views render
@@ -661,7 +662,9 @@ export class McpAppRecords {
 /** A view's resource, read from its server. */
 export type McpAppView = { uri: string; html: string; meta: { csp?: unknown; permissions?: unknown; prefersBorder?: boolean; domain?: unknown }; fingerprint: string };
 /** One tool of an app, as discovered. */
-export type McpAppToolInfo = { name: string; agentTool?: string; title?: string; description?: string; inputSchema: Record<string, unknown>; visibility: McpToolVisibility[]; policy: McpAppToolPolicy; resourceUri?: string };
+export type McpAppToolInfo = { name: string; agentTool?: string; title?: string; description?: string; inputSchema: Record<string, unknown>; visibility: McpToolVisibility[]; policy: McpAppToolPolicy; resourceUri?: string;
+  /** Calls from the app's views run without asking because a person chose "Allow always" (this tool, or all of the app's tools that ask). */
+  granted?: 'tool' | 'app' };
 /** What the admin sees of an app. */
 export type McpAppStatus = {
   id: string; name: string; version?: string; packageName?: string; status: 'starting' | 'running' | 'failed' | 'stopped'; error?: string; enabled: boolean;
@@ -670,6 +673,10 @@ export type McpAppStatus = {
   views: { uri: string; declared: McpAppCspDomains; granted: Required<McpAppCspDomains>; fingerprint?: string }[];
   /** A dev app (`mcp_app_dev_start`): the conversation it belongs to, its folder and command, and how many times it was (re)started. */
   dev?: { conversationId: string; folder: string; command: string; generation: number; startedAt: string };
+  /** Installed apps: "Allow all from this app" was chosen (its views' calls of tools that ask run without asking). */
+  grantedAll?: boolean;
+  /** Dev apps: calls from its views ask first (the default is to run them, like the agent's own calls). */
+  viewsAsk?: boolean;
 };
 /** A failure with a fixed code (refused calls, unavailable apps). */
 export class McpAppError extends Error {
@@ -683,7 +690,8 @@ type Live = { prepared?: PreparedMcpApp; runtime?: McpAppRuntime; client?: McpAp
  * A dev app (MCP Apps dev mode, see `mcpAppDevTools`): an MCP server the
  * agent is writing, run over stdio in its conversation's services container.
  * It belongs to that conversation only: its tools are `dev_<name>__<tool>`
- * there, its views carry a "Dev" badge, and calls from its views ask.
+ * there, its views carry a "Dev" badge, and calls from its views run
+ * without asking (audited) unless the admin turns asking back on.
  */
 export interface McpAppDevSpec {
   /** Short name (lowercase letters, digits, `-`; 1–20): the app is `dev_<name>`. */
@@ -744,12 +752,22 @@ export class McpApps {
   readonly records: McpAppRecords;
   private readonly settingsFile: string;
   private disabled = new Set<string>();
+  /** "Allow always" grants for calls from views: app → tools (`*`: every tool of the app that asks). */
+  private grants = new Map<string, Set<string>>();
+  /** Dev apps whose views' calls ask first, as `<conversation>/<app>`. */
+  private devAsk = new Set<string>();
   private readonly launcher: McpAppLauncher;
   private readonly connector: McpAppConnector;
   constructor(readonly configs: readonly ResolvedMcpAppConfig[], private readonly options: McpAppsOptions) {
     this.records = new McpAppRecords(join(options.directory, 'records.json'));
     this.settingsFile = join(options.directory, 'settings.json');
-    try { const saved = JSON.parse(readFileSync(this.settingsFile, 'utf8')) as { disabled?: unknown }; if (Array.isArray(saved.disabled)) this.disabled = new Set(saved.disabled.filter((v): v is string => typeof v === 'string')); } catch { /* none yet */ }
+    try {
+      const saved = JSON.parse(readFileSync(this.settingsFile, 'utf8')) as { disabled?: unknown; grants?: unknown; devAsk?: unknown };
+      const strings = (list: unknown) => Array.isArray(list) ? list.filter((v): v is string => typeof v === 'string') : [];
+      this.disabled = new Set(strings(saved.disabled));
+      this.devAsk = new Set(strings(saved.devAsk));
+      if (saved.grants && typeof saved.grants === 'object') for (const [app, tools] of Object.entries(saved.grants)) { const list = strings(tools); if (list.length) this.grants.set(app, new Set(list)); }
+    } catch { /* none yet */ }
     const sandbox = options.sandbox;
     this.launcher = options.launcher ?? (sandbox ? containerLauncher(sandbox) : async () => { throw new SandboxError('sandbox_unavailable', 'MCP Apps need a sandbox (provider "docker" or "apple-container")'); });
     this.connector = options.connector ?? mcpAppConnector;
@@ -822,12 +840,55 @@ export class McpApps {
   }
   /**
    * Policy of an app's tool (the definition's, default `'ask'`). Dev apps:
-   * the agent's own calls run (`'allow'`: its code, in its own container
-   * without network, like `run_command`); calls from their views ask.
+   * their calls run (`'allow'`: the agent's own code, in its own container
+   * without network, like `run_command`), also from their views unless
+   * {@link setDevViewsAsk} turned asking back on. Installed apps: calls from
+   * views of a tool that asks run once a person chose "Allow always" for it
+   * (or for the whole app, see {@link grant}); the definition's `'deny'` and
+   * `'allow'` always win, and the agent's own calls never use these grants.
    */
   policy(appId: string, toolName: string, caller: 'agent' | 'app' = 'app'): McpAppToolPolicy {
-    if (this.live.get(appId)?.dev) return caller === 'agent' ? 'allow' : 'ask';
-    return this.config(appId)?.tools[toolName] ?? 'ask';
+    const dev = this.live.get(appId)?.dev;
+    if (dev) return caller === 'agent' || !this.devAsk.has(`${dev.conversationId}/${appId}`) ? 'allow' : 'ask';
+    const defined = this.config(appId)?.tools[toolName] ?? 'ask';
+    return defined === 'ask' && caller === 'app' && this.granted(appId, toolName) ? 'allow' : defined;
+  }
+  /** Why a view's call of this tool runs without asking: a grant for the tool, or for the whole app (installed apps whose tool asks). */
+  granted(appId: string, toolName: string): 'tool' | 'app' | undefined {
+    const tools = this.grants.get(appId);
+    if (!tools || this.live.get(appId)?.dev || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask') return undefined;
+    return tools.has(toolName) ? 'tool' : tools.has('*') ? 'app' : undefined;
+  }
+  /**
+   * "Allow always": calls from this app's views of `toolName` (`'*'`: of
+   * every tool of the app that asks) run without asking from now on. Kept
+   * across restarts. Never loosens a tool the definition denies.
+   */
+  grant(appId: string, toolName: string): void {
+    if (!this.configs.some(c => c.id === appId) || (toolName !== '*' && (toolName.length > 128 || (this.config(appId)?.tools[toolName] ?? 'ask') !== 'ask'))) throw new McpAppError('app_unknown', `Nothing to allow for "${appId}"`);
+    const tools = this.grants.get(appId) ?? new Set<string>();
+    tools.add(toolName); this.grants.set(appId, tools);
+    this.saveSettings();
+  }
+  /** Back to asking: drop the grant of a tool (`'*'`: the whole-app grant). Idempotent. */
+  revoke(appId: string, toolName: string): void {
+    const tools = this.grants.get(appId);
+    if (!tools?.delete(toolName)) return;
+    if (!tools.size) this.grants.delete(appId);
+    this.saveSettings();
+  }
+  /** Dev apps: should calls from its views ask first (`true`), or run like the agent's own (`false`, the default)? Per conversation (a dev app belongs to one), kept across restarts. */
+  setDevViewsAsk(appId: string, ask: boolean): void {
+    const dev = this.live.get(appId)?.dev;
+    if (!dev) throw new McpAppError('app_unknown', `No dev app "${appId}"`);
+    const key = `${dev.conversationId}/${appId}`;
+    if (ask) this.devAsk.add(key); else this.devAsk.delete(key);
+    this.saveSettings();
+  }
+  private saveSettings() {
+    mkdirSync(dirname(this.settingsFile), { recursive: true, mode: 0o700 });
+    writeFileSync(this.settingsFile, JSON.stringify({ disabled: [...this.disabled], grants: Object.fromEntries([...this.grants].map(([app, tools]) => [app, [...tools]])), devAsk: [...this.devAsk] }), { mode: 0o600 });
+    this.changed();
   }
   /** May a view of this app render in (and act for) this conversation? Installed apps: any; dev apps: only their own. */
   servesConversation(appId: string, conversationId: string): boolean {
@@ -941,9 +1002,7 @@ export class McpApps {
   setEnabled(appId: string, enabled: boolean): void {
     if (!this.live.has(appId) || this.live.get(appId)!.dev) throw new McpAppError('app_unknown', `No MCP App "${appId}"`);
     if (enabled) this.disabled.delete(appId); else this.disabled.add(appId);
-    mkdirSync(dirname(this.settingsFile), { recursive: true, mode: 0o700 });
-    writeFileSync(this.settingsFile, JSON.stringify({ disabled: [...this.disabled] }), { mode: 0o600 });
-    this.changed();
+    this.saveSettings();
   }
   enabled(appId: string): boolean { return !this.disabled.has(appId); }
   /** Display name of an app. */
@@ -955,10 +1014,10 @@ export class McpApps {
     return [...this.configs, ...devs].map(config => {
       const live = this.live.get(config.id)!;
       const dev = live.dev ? { dev: { conversationId: live.dev.conversationId, folder: live.dev.folder, command: live.dev.command, generation: live.dev.generation, startedAt: live.dev.startedAt } } : {};
-      return { ...dev,
+      return { ...dev, ...(live.dev && this.devAsk.has(`${live.dev.conversationId}/${config.id}`) ? { viewsAsk: true } : {}), ...(!live.dev && this.grants.get(config.id)?.has('*') ? { grantedAll: true } : {}),
         id: config.id, name: this.name(config.id), ...(live.prepared?.packageVersion ?? live.serverInfo?.version ? { version: String(live.prepared?.packageVersion ?? live.serverInfo?.version).slice(0, 64) } : {}), ...(live.prepared?.packageName ? { packageName: live.prepared.packageName } : {}),
         status: live.status, ...(live.error ? { error: live.error } : {}), enabled: this.enabled(config.id), origins: [...config.origins],
-        tools: live.tools.map(t => { const uri = toolResourceUri(t); const visibility = toolVisibility(t); return { name: t.name, ...(visibility.includes('model') && this.policy(config.id, t.name, 'agent') !== 'deny' ? { agentTool: agentToolName(config.id, t.name) } : {}), ...(typeof t.title === 'string' ? { title: t.title.slice(0, 120) } : {}), ...(typeof t.description === 'string' ? { description: t.description.slice(0, 500) } : {}), inputSchema: t.inputSchema ?? { type: 'object' }, visibility, policy: this.policy(config.id, t.name), ...(uri ? { resourceUri: uri } : {}) }; }),
+        tools: live.tools.map(t => { const uri = toolResourceUri(t); const visibility = toolVisibility(t); return { name: t.name, ...(visibility.includes('model') && this.policy(config.id, t.name, 'agent') !== 'deny' ? { agentTool: agentToolName(config.id, t.name) } : {}), ...(typeof t.title === 'string' ? { title: t.title.slice(0, 120) } : {}), ...(typeof t.description === 'string' ? { description: t.description.slice(0, 500) } : {}), inputSchema: t.inputSchema ?? { type: 'object' }, visibility, policy: this.policy(config.id, t.name), ...(this.granted(config.id, t.name) ? { granted: this.granted(config.id, t.name) } : {}), ...(uri ? { resourceUri: uri } : {}) }; }),
         views: [...live.views.values()].map(view => ({ uri: view.uri, declared: declaredCsp(view.meta.csp), granted: grantedCsp(view.meta.csp, config.origins), fingerprint: view.fingerprint })),
       };
     });

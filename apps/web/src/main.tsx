@@ -928,7 +928,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                       {!readOnly && !viewOnly && !blocked && <Starters/>}
                     </div>)}
                 <ThreadPrimitive.Messages components={{ Message }}/>
-                <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals}/>
+                <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals} admin={!team || isAdmin}/>
                 {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
               </div>
               <ThreadPrimitive.ViewportFooter className="footer">

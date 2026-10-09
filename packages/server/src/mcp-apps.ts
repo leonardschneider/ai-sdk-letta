@@ -111,10 +111,14 @@ export type AppApproval = {
   decidedBy?: { id: string; name: string }; decidedAt?: string;
   /** `call`, once run: its result (for the view), or why it failed. */
   result?: McpCallResult; error?: string;
+  /** `call` of an installed app: "Allow always" may be chosen (for the tool, or for every tool of the app that asks). */
+  grantable?: boolean;
+  /** Decided with "Allow always": for this tool, or for the whole app. */
+  always?: 'tool' | 'app';
 };
 /** What the browser may know of an approval. */
 export const publicApproval = (a: AppApproval) => ({ id: a.id, kind: a.kind, threadId: a.threadId, app: a.app, appName: a.appName, toolCallId: a.toolCallId, createdAt: a.createdAt, expiresAt: a.expiresAt, status: a.status,
-  ...(a.tool ? { tool: a.tool } : {}), ...(a.arguments ? { arguments: a.arguments } : {}), ...(a.text !== undefined ? { text: a.text } : {}), ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}), ...(a.decidedAt ? { decidedAt: a.decidedAt } : {}), ...(a.error ? { error: a.error } : {}) });
+  ...(a.tool ? { tool: a.tool } : {}), ...(a.arguments ? { arguments: a.arguments } : {}), ...(a.text !== undefined ? { text: a.text } : {}), ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}), ...(a.decidedAt ? { decidedAt: a.decidedAt } : {}), ...(a.error ? { error: a.error } : {}), ...(a.grantable ? { grantable: true } : {}), ...(a.always ? { always: a.always } : {}) });
 
 /** One audit line: who did what through which app, from which tool call. */
 export type AppAuditEvent = { at: string; event: string; actor: { kind: 'person'; id: string; name?: string }; via: string; app: string; threadId: string; toolCallId: string; tool?: string; outcome?: string; detail?: string };
@@ -339,7 +343,8 @@ export class AppGate {
     this.expire();
     if ([...this.approvals.values()].filter(a => a.status === 'pending' && a.threadId === instance.threadId).length >= APP_GATE_LIMITS.maxPending) throw new RuntimeFault('too_many_pending', 429);
     const now = Date.now();
-    const approval: AppApproval = { id: randomUUID(), kind, threadId: instance.threadId, app: instance.app, appName: this.apps.name(instance.app), toolCallId: instance.toolCallId, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + APP_GATE_LIMITS.approvalTtlMs).toISOString(), status: 'pending', ...what };
+    const approval: AppApproval = { id: randomUUID(), kind, threadId: instance.threadId, app: instance.app, appName: this.apps.name(instance.app), toolCallId: instance.toolCallId, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + APP_GATE_LIMITS.approvalTtlMs).toISOString(), status: 'pending', ...what,
+      ...(kind === 'call' && !this.apps.isDev(instance.app) ? { grantable: true } : {}) };
     this.approvals.set(approval.id, approval);
     this.instanceOf.set(approval.id, instance);
     this.trim();
@@ -388,23 +393,35 @@ export class AppGate {
   }
   private wake() { for (const waiter of [...this.waiters]) waiter(); }
   /**
-   * Decide an approval (`{ approved: boolean }`), once: the first decision
-   * wins (409 `already_decided` after). An allowed tool call runs now; an
-   * allowed message is sent as a user message; an allowed context lets the
-   * view set the agent's context from now on.
+   * Decide an approval (`{ approved: boolean, always?: 'tool' | 'app' }`),
+   * once: the first decision wins (409 `already_decided` after). An allowed
+   * tool call runs now; an allowed message is sent as a user message; an
+   * allowed context lets the view set the agent's context from now on.
+   * `always` ("Allow always", installed apps' calls only, admins only:
+   * `admin: false` refuses it with 403) also lets later calls from the app's
+   * views of this tool (`'tool'`) or of every tool that asks (`'app'`) run
+   * without asking, kept across restarts (see `McpApps.grant`).
    */
-  async decide(owner: string, id: string, input: unknown, author?: RunAuthor): Promise<ReturnType<typeof publicApproval>> {
-    const approved = (input as { approved?: unknown } | undefined)?.approved;
-    if (typeof approved !== 'boolean') throw new RuntimeFault('invalid_input', 400);
+  async decide(owner: string, id: string, input: unknown, author?: RunAuthor, access: { admin?: boolean } = {}): Promise<ReturnType<typeof publicApproval>> {
+    const { approved, always } = (input ?? {}) as { approved?: unknown; always?: unknown };
+    if (typeof approved !== 'boolean' || (always !== undefined && (approved !== true || (always !== 'tool' && always !== 'app')))) throw new RuntimeFault('invalid_input', 400);
     this.expire();
     const approval = this.approvals.get(id);
     const instance = this.instanceOf.get(id);
     if (!approval || !instance || instance.owner !== owner) throw new RuntimeFault('not_found', 404);
     if (approval.status !== 'pending') throw new RuntimeFault(approval.status === 'expired' ? 'approval_expired' : 'already_decided', 409);
+    if (always !== undefined) {
+      if (access.admin === false) throw new RuntimeFault('admin_required', 403);
+      if (!approval.grantable) throw new RuntimeFault('invalid_input', 400);
+    }
     const who = this.options.person(author);
     Object.assign(approval, { status: approved ? 'approved' : 'denied', decidedBy: who, decidedAt: new Date().toISOString() });
     const base = { app: approval.app, threadId: approval.threadId, toolCallId: approval.toolCallId, ...(approval.tool ? { tool: approval.tool } : {}) };
-    this.audit({ ...base, event: `app_${approval.kind}`, outcome: approved ? 'approved' : 'denied', detail: approval.id }, author);
+    this.audit({ ...base, event: `app_${approval.kind}`, outcome: approved ? (always ? `approved:always_${always}` : 'approved') : 'denied', detail: approval.id }, author);
+    if (always === 'tool' || always === 'app') {
+      try { this.apps.grant(approval.app, always === 'app' ? '*' : approval.tool!); approval.always = always; }
+      catch { /* the tool no longer asks (its definition changed): allowed once */ }
+    }
     this.options.runtime.appsChanged();
     this.wake();
     if (!approved) return publicApproval(approval);

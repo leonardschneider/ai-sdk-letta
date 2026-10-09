@@ -305,3 +305,53 @@ test('an approved ui/message whose conversation became uncertain while it waited
     assert.ok(f.gate.recent.some(e => e.event === 'app_message' && e.outcome === 'not_sent:delivery_uncertain'));
   } finally { await f.cleanup(); }
 });
+
+test('gate: "Allow always" runs the next calls without a card (audited), persists, resets; admins only; deny wins; "allow all from this app"', async () => {
+  const f = await fixture({ plain: 'deny' });
+  try {
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
+    const asked = await f.gate.call('owner', instance, { name: 'record', arguments: { note: 'one' } }) as { pending: string };
+    assert.equal(f.gate.pending('owner', f.thread)[0]!.grantable, true, 'the card may offer "Allow always"');
+    // Team members who are not admins: refused (and nothing is decided).
+    await assert.rejects(f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }, undefined, { admin: false }), /admin_required/);
+    await assert.rejects(f.gate.decide('owner', asked.pending, { approved: false, always: 'tool' }), /invalid_input/);
+    assert.equal(f.gate.pending('owner', f.thread).length, 1);
+    const decided = await f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }, undefined, { admin: true });
+    assert.equal(decided.status, 'done', 'this call runs now');
+    const next = await f.gate.call('owner', instance, { name: 'record', arguments: { note: 'two' } });
+    assert.ok('result' in next, 'the next call runs without a card');
+    assert.equal(f.gate.pending('owner', f.thread).length, 0);
+    const settings = JSON.parse(readFileSync(join(f.directory, 'apps', 'settings.json'), 'utf8')) as { grants: Record<string, string[]> };
+    assert.deepEqual(settings.grants, { test: ['record'] }, 'kept next to "disabled"');
+    // Reset: asks again.
+    f.apps.revoke('test', 'record');
+    assert.ok('pending' in await f.gate.call('owner', instance, { name: 'record', arguments: {} }));
+    // Allow all from this app; the denied tool stays denied.
+    const pending = f.gate.pending('owner', f.thread)[0]!;
+    await f.gate.decide('owner', pending.id, { approved: true, always: 'app' });
+    assert.ok('result' in await f.gate.call('owner', instance, { name: 'record', arguments: {} }));
+    const denied = await f.gate.call('owner', instance, { name: 'plain', arguments: {} });
+    assert.ok('error' in denied && /policy/.test(denied.error.message));
+    const audit = readFileSync(join(f.directory, 'audit.ndjson'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { event: string; outcome?: string });
+    assert.deepEqual(audit.filter(e => e.event === 'app_call').map(e => e.outcome), ['asked', 'approved:always_tool', 'ok', 'ok', 'asked', 'approved:always_app', 'ok', 'ok', 'refused:policy_deny']);
+  } finally { await f.cleanup(); }
+});
+
+test('gate: a dev app\'s view calls run without a card (audited); asking can be turned back on', async () => {
+  const f = await fixture();
+  try {
+    const conversationId = f.runtime.conversationOf('owner', f.thread)!;
+    await f.apps.startDev({ name: 'probe', conversationId, folder: '/workspace/probe', command: 'node server.mjs', launch: async () => ({ line: { command: process.execPath, args: [SERVER] }, stop: async () => {} }) });
+    await f.apps.callAsAgent('dev_probe__show', { label: 'dev' }, { conversationId, toolCallId: 'call-dev' });
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-dev' }) as { instance: string };
+    const ran = await f.gate.call('owner', instance, { name: 'record', arguments: { note: 'dev' } });
+    assert.ok('result' in ran, 'no card for the agent\'s own dev app');
+    assert.equal(f.gate.pending('owner', f.thread).length, 0);
+    assert.ok(f.gate.recent.some(e => e.event === 'app_call' && e.app === 'dev_probe' && e.outcome === 'ok'), 'audited');
+    f.apps.setDevViewsAsk('dev_probe', true);
+    const asked = await f.gate.call('owner', instance, { name: 'record', arguments: {} });
+    assert.ok('pending' in asked, 'asks again when turned on');
+    assert.equal(f.gate.pending('owner', f.thread)[0]!.grantable, undefined, 'no "Allow always" for dev apps (the toggle is the way)');
+    await assert.rejects(f.gate.decide('owner', asked.pending, { approved: true, always: 'tool' }), /invalid_input/);
+  } finally { await f.cleanup(); }
+});

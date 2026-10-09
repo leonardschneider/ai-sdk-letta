@@ -236,13 +236,31 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     runtime.appsChanged();
     res.json({ ok: true });
   });
+  /** Back to asking: drop an "Allow always" grant (admins): `{ tool }` (`"*"`: the app-wide one). */
+  app.post('/v1/apps/:app/grants/reset', (req, res) => {
+    if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const tool = (req.body as { tool?: unknown } | undefined)?.tool;
+    if (typeof tool !== 'string' || !tool || tool.length > 128) throw new RuntimeFault('invalid_input', 400);
+    gate().apps.revoke(req.params.app, tool);
+    runtime.appsChanged();
+    res.json({ ok: true });
+  });
+  /** Dev apps: should calls from its views ask first? `{ ask }` (admins). */
+  app.patch('/v1/apps/:app/dev', (req, res) => {
+    if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const ask = (req.body as { ask?: unknown } | undefined)?.ask;
+    if (typeof ask !== 'boolean') throw new RuntimeFault('invalid_input', 400);
+    try { gate().apps.setDevViewsAsk(req.params.app, ask); } catch { throw new RuntimeFault('not_found', 404); }
+    runtime.appsChanged();
+    res.json({ ok: true });
+  });
   /** A view instance for a recorded tool call of the thread: `{ toolCallId, placement }`. */
   app.post('/v1/threads/:id/apps/instances', async (req, res) => res.status(201).json(await gate().instance(owner, req.params.id, req.body)));
   /** Approvals of the thread's app actions (the cards), and context waiting for the next turn. */
   app.get('/v1/threads/:id/apps/approvals', (req, res) => res.json({ approvals: gate().pending(owner, req.params.id), context: gate().waitingContext(owner, req.params.id) }));
-  /** Decide an app action: `{ approved }`. Only the person who sent the turn... or anyone in the single-user app; on a team server, members of the agent (admins for others' views). */
+  /** Decide an app action: `{ approved, always?: 'tool' | 'app' }` ("Allow always": admins only). Only the person who sent the turn... or anyone in the single-user app; on a team server, members of the agent (admins for others' views). */
   app.post('/v1/apps/approvals/:approval', async (req, res) => {
-    try { res.json(await gate().decide(owner, req.params.approval, req.body, author(req))); }
+    try { res.json(await gate().decide(owner, req.params.approval, req.body, author(req), { admin: access ? access.mayAct(req, {}) : true })); }
     catch (error) { if (error instanceof RuntimeFault && (error.code === 'already_decided' || error.code === 'approval_expired')) return res.status(409).json({ error: error.code }); throw error; }
   });
   /** An approval's outcome (`?wait=1` waits while it is pending). */
