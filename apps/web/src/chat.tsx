@@ -14,6 +14,7 @@ import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 import { EditAction, EditBubble, RewindContext } from './rewind.js';
+import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -79,19 +80,45 @@ function AppMessageLine({ app, text, time }: { app: MessageApp; text: string; ti
   </div>;
 }
 
+/**
+ * One message. Its kind (a decision's outcome, a listened turn, a message
+ * from an app's view, or a bubble) picks a component of its own: the same
+ * message can change kind while it is shown (a live turn becomes its history
+ * record, with the app or outcome it carries), and each kind has its own
+ * hooks. A message that fails to render shows an inline error card instead.
+ */
 export function Message() {
+  const id = useAuiState(s => s.message.id);
+  return <ErrorBoundary where="message" resetKey={id} fallback={props => <MessagePrimitive.Root className="msg" data-role="assistant"><ErrorCard {...props} label="This message couldn’t be shown."/></MessagePrimitive.Root>}><MessageProbe/><MessageOfKind/></ErrorBoundary>;
+}
+
+/** Test hook: the last message only (see CrashProbe), so the rest of the conversation shows. */
+function MessageProbe() {
+  const last = useAuiState(s => s.message.isLast);
+  return last ? <CrashProbe where="message"/> : null;
+}
+
+function MessageOfKind() {
   const role = useAuiState(s => s.message.role);
-  const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
-  const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text.trim()));
   const listened = useAuiState(s => (s.message.metadata.custom as { listened?: Listened } | undefined)?.listened);
   const outcome = useAuiState(s => !!(s.message.metadata.custom as { decision?: unknown } | undefined)?.decision);
   const app = useAuiState(s => (s.message.metadata.custom as { app?: MessageApp } | undefined)?.app);
-  const appText = useAuiState(s => s.message.parts.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n'));
+  const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
   // A decision's outcome reached the agent here: one compact line, not a message bubble.
   if (role === 'user' && outcome) return <MessagePrimitive.Root className="msg decision-outcome-msg" data-role={role}><OutcomeMessage/></MessagePrimitive.Root>;
-  if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} time={time}/></MessagePrimitive.Root>;
+  if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} {...(time ? { time } : {})}/></MessagePrimitive.Root>;
   // A message an MCP App's view sent: one muted line ("chessos: I played e2e4."), the full text behind a chevron. The agent got all of it.
-  if (role === 'user' && app) return <MessagePrimitive.Root className="msg app-msg" data-role={role}><AppMessageLine app={app} text={appText} time={time}/></MessagePrimitive.Root>;
+  if (role === 'user' && app) return <AppMessage app={app} time={time}/>;
+  return <BubbleMessage role={role} time={time}/>;
+}
+
+function AppMessage({ app, time }: { app: MessageApp; time?: string | undefined }) {
+  const appText = useAuiState(s => s.message.parts.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n'));
+  return <MessagePrimitive.Root className="msg app-msg" data-role="user"><AppMessageLine app={app} text={appText} time={time}/></MessagePrimitive.Root>;
+}
+
+function BubbleMessage({ role, time }: { role: string; time?: string | undefined }) {
+  const hasText = useAuiState(s => s.message.parts.some(p => p.type === 'text' && p.text.trim()));
   const runId = useAuiState(s => (s.message.metadata.custom as { runId?: string } | undefined)?.runId);
   const text = useAuiState(s => s.message.parts.filter(p => p.type === 'text' && p.text !== IMAGE_PLACEHOLDER).map(p => (p as { text: string }).text).join('\n'));
   const rewind = useContext(RewindContext);
@@ -144,13 +171,18 @@ const byType = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_us
 /** MCP App tools (`<app>__<tool>`) stay ungrouped too: their views show in the conversation. */
 const groupTools: typeof byType = (part, context) => part.type === 'tool-call' && isAppToolName(part.toolName) ? [] : byType(part, context);
 
+/** One part of a reply (text, a tool line, an app view): if it fails to render, an inline error card; the rest of the reply stays. */
+function PartBoundary({ children, resetKey }: { children: React.ReactNode; resetKey?: string }) {
+  return <ErrorBoundary where="message-part" {...(resetKey ? { resetKey } : {})} fallback={props => <ErrorCard {...props} label="Part of this reply couldn’t be shown."/>}>{children}</ErrorBoundary>;
+}
+
 function AssistantParts() {
   return <><MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
     {({ part, children }) => {
       switch (part.type) {
         case 'group-tools': return part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</>;
-        case 'text': return part.text ? <Markdown/> : <></>;
-        case 'tool-call': return <ToolPart {...part}/>;
+        case 'text': return part.text ? <PartBoundary><Markdown/></PartBoundary> : <></>;
+        case 'tool-call': return <PartBoundary resetKey={part.toolCallId}><ToolPart {...part}/></PartBoundary>;
         case 'indicator': return <Thinking/>;
         default: return <></>;
       }
@@ -189,7 +221,7 @@ function ListenedLine({ listened, time }: { listened: Listened; time?: string })
       {reasoning && <div className="listened-thoughts"><span className="listened-label">Thoughts</span><p>{reasoning}</p></div>}
       {!listened.reason && !reasoning && <p className="muted">The agent read this and chose not to reply. It recorded no thoughts.</p>}
       {tools > 0 && <MessagePrimitive.GroupedParts groupBy={groupTools}>
-        {({ part, children }) => part.type === 'group-tools' ? part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</> : part.type === 'tool-call' ? <ToolPart {...part}/> : <></>}
+        {({ part, children }) => part.type === 'group-tools' ? part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</> : part.type === 'tool-call' ? <PartBoundary resetKey={part.toolCallId}><ToolPart {...part}/></PartBoundary> : <></>}
       </MessagePrimitive.GroupedParts>}
     </div>
   </Disclosure>;

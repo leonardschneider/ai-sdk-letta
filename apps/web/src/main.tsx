@@ -31,6 +31,7 @@ import { TrustMenu } from './trust-menu.js';
 import { checkSummary, isLocked, lockedNotice, stoppedLine, type CheckResult } from './turn-state.js';
 import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
+import { AppErrorPanel, CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
 import { PreviewPanel, usePreviewStatus } from './preview.js';
@@ -994,17 +995,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
           <SideTabs tabs={sideTabs} active={sideTab} live={devServerRunning(previewStatus)} labelOf={tab => { const id = appTabId(tab); const app = id ? appTabs.find(t => t.id === id) : undefined; const view = app ? viewTools[app.tool] : undefined; return { label: view ? appToolLabel(view, 'done') : app?.tool ?? 'App', dev: !!view?.dev }; }}
             onSelect={tab => updateSide(s => selectSide(s, tab))} onCloseApp={id => appsState.closePanel(id)}/>
           {resourcesEnabled && <div className="side-tabpanel" role="tabpanel" id={tabPanelId('resources')} aria-labelledby={tabId('resources')} hidden={sideTab !== 'resources'}>
-            <ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => updateSide(closeSide)}
+            <SideBoundary tab="resources"><ResourcesPanel visible={resourcesOpen} threadId={current.draft ? undefined : current.id} refreshKey={`${turns}:${archives}`} project={agent.project} projectOnly={!filesEnabled && !agent.resources} onClose={() => updateSide(closeSide)}
               onOpenThread={id => { if (narrow) setSideDrawer(false); void select(id); }}
-              onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/>
+              onThreadChanged={updated => setThreads(list => list.map(t => t.id === updated.id ? { ...t, ...updated } : t))}/></SideBoundary>
           </div>}
           {previewOpen && !current.draft && <div className="side-tabpanel" role="tabpanel" id={tabPanelId('preview')} aria-labelledby={tabId('preview')}>
-            <PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
-              onClose={() => updateSide(closeSide)} onChanged={() => void reloadPreview()}/>
+            <SideBoundary tab={`preview:${current.id}`}><PreviewPanel threadId={current.id} status={previewStatus} device={previewLayout.device} onDevice={device => setPreviewLayout(l => ({ ...l, device }))}
+              onClose={() => updateSide(closeSide)} onChanged={() => void reloadPreview()}/></SideBoundary>
           </div>}
           {/* Like Preview, an app view runs only while its tab shows (switching back starts it again, as reopening the former panel did). */}
           {sideOpen && sideTab && appTabId(sideTab) && <div key={sideTab} className="side-tabpanel" role="tabpanel" id={tabPanelId(sideTab)} aria-labelledby={tabId(sideTab)}>
-            <AppPanel toolCallId={appTabId(sideTab)!} {...(appTabs.find(t => t.id === appTabId(sideTab))?.tool ? { toolName: appTabs.find(t => t.id === appTabId(sideTab))!.tool } : {})} onClose={() => appsState.closePanel(appTabId(sideTab)!)}/>
+            <SideBoundary tab={sideTab}><AppPanel toolCallId={appTabId(sideTab)!} {...(appTabs.find(t => t.id === appTabId(sideTab))?.tool ? { toolName: appTabs.find(t => t.id === appTabId(sideTab))!.tool } : {})} onClose={() => appsState.closePanel(appTabId(sideTab)!)}/></SideBoundary>
           </div>}
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
@@ -1125,4 +1126,10 @@ function AttachmentErrors(accepts: { files: boolean }) {
   return null;
 }
 
-createRoot(document.getElementById('root')!).render(<ToastProvider><LightboxProvider><Root/></LightboxProvider></ToastProvider>);
+/** The content of a side-panel tab: a render error shows an inline card in the tab; the conversation keeps working. */
+function SideBoundary({ tab, children }: { tab: string; children: React.ReactNode }) {
+  return <ErrorBoundary where="side-panel" resetKey={tab} fallback={props => <div className="side-error"><ErrorCard {...props} label="This tab couldn’t be shown."/></div>}><CrashProbe where="side-panel"/>{children}</ErrorBoundary>;
+}
+
+// A render error anywhere shows a recoverable panel (Try again, Reload), never a blank page.
+createRoot(document.getElementById('root')!).render(<ErrorBoundary where="app" fallback={props => <AppErrorPanel {...props}/>}><CrashProbe where="app"/><ToastProvider><LightboxProvider><Root/></LightboxProvider></ToastProvider></ErrorBoundary>);

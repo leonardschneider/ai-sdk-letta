@@ -2,6 +2,7 @@ import React, { createContext, Suspense, lazy, useCallback, useContext, useEffec
 import { Blocks, ChevronRight, LoaderCircle, ShieldAlert, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
+import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
 import { useToast } from './toasts.js';
 import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewPolicy, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
 
@@ -106,10 +107,14 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
 export function AppSlot(props: { toolCallId: string; placement: 'inline' | 'panel'; mode: DisplayMode; version?: string; name?: string; onMode(mode: DisplayMode): void; onOpenPanel?(): void; onClose?(): void }) {
   const apps = useContext(AppsContext);
   if (!apps.threadId) return null;
-  return <Suspense fallback={<div className="appview-wait" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/>Loading the app…</div>}>
+  // A view that fails to render (or whose frame code fails to load) shows an inline card; the conversation and other views keep working.
+  return <ErrorBoundary where="app-view" resetKey={`${apps.threadId}:${props.toolCallId}`} fallback={fallback => <div className="appview" data-placement={props.placement} data-mode={props.mode} data-phase="failed"><ErrorCard {...fallback} label={`${props.name ?? 'The app'}’s view couldn’t be shown.`}/>{props.onClose && <button type="button" className="link-btn appview-error-close" onClick={props.onClose}>Close</button>}</div>}>
+  <CrashProbe where="app-view"/>
+  <Suspense fallback={<div className="appview-wait" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/>Loading the app…</div>}>
     <AppFrame threadId={apps.threadId} toolCallId={props.toolCallId} placement={props.placement} mode={props.mode} onMode={props.onMode} onApprovals={apps.refreshApprovals} onSent={apps.onSent}
       {...(props.version ? { version: props.version } : {})} {...(props.name ? { name: props.name } : {})} {...(props.onOpenPanel ? { onOpenPanel: props.onOpenPanel } : {})} {...(props.onClose ? { onClose: props.onClose } : {})}/>
-  </Suspense>;
+  </Suspense>
+  </ErrorBoundary>;
 }
 
 /** A view's `version` from its call's phase (the panel and full screen retarget to a new call while it still streams). */

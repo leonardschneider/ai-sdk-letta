@@ -129,8 +129,9 @@ export function MessageImage({ src, name }: { src: string; name?: string }) {
   const url = useObjectUrl(blob);
   const open = useContext(LightboxContext);
   const label = name || 'Image';
-  if (!blob) return <span className="image-placeholder">{IMAGE_PLACEHOLDER}</span>;
+  // Before any early return: hooks run in the same order whatever the image (a placeholder can become an image).
   const [loaded, setLoaded] = useState(false);
+  if (!blob) return <span className="image-placeholder">{IMAGE_PLACEHOLDER}</span>;
   // Marking the load changes an attribute, which the thread viewport observes:
   // it keeps following the bottom when an image's height arrives late.
   return <button type="button" className="msg-image" data-loaded={loaded || undefined} aria-label={`Enlarge ${label}`} title="Click to enlarge" disabled={!url} onClick={() => url && open({ url, name: label })}>
