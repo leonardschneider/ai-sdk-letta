@@ -1,5 +1,17 @@
 # @ai-sdk-letta/server
 
+## 0.19.0
+
+### Minor Changes
+
+- 1219862: MCP Apps dev mode: the agent writes MCP Apps and tries them in the conversation. `mcpAppDevTools` (`mcp_app_guide`, `mcp_app_dev_start`, `_reload`, `_stop`, `_status`, `_logs`, `_call`, `_check`) run an MCP server the agent is writing as a dev app of its conversation, over stdio in the web development services container, with a contract linter. Its model-visible tools join the agent as `dev_<name>__<tool>` from the next turn (the session reopens when they change), its views render inline and in side panel tabs with a Dev badge, every call a view makes asks, and `mcp_app_dev_reload` re-renders open views live (`GET /v1/apps` carries `devGenerations`). `mcp_app_guide` is a short guide adapted from the ext-apps `create-mcp-app` skill (v2.0.3; Apache-2.0 code, CC-BY-4.0 docs). The browser app's side panel is now tabbed (Resources, Preview, one tab per app view). `examples/basic` enables it with `MCP_APP_DEV=1`.
+
+### Patch Changes
+
+- d500f85: Document browser support for the GUI. The browser app, including the web development Preview pane and MCP App views, is verified in Safari 26.5 and Chrome 154, and in Firefox 142 for the main paths. Covered: HMR through the preview listener, the sandbox proxy handshake, inline, panel, full screen and picture-in-picture views, tool calls through the gate, and isolation that matches across browsers. The README gains a "Browser support" section. It covers the `*.localhost` origins and the known differences: Safari compiles WebAssembly in MCP App views where Chrome refuses, and storage in frames is partitioned. The agent's `browser_*` tools always use the container's headless Chromium. Nothing in the code changes.
+- Updated dependencies [1219862]
+  - ai-sdk-letta@0.19.0
+
 ## 0.18.0
 
 ### Minor Changes
