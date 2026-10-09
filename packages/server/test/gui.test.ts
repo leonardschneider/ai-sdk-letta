@@ -47,3 +47,39 @@ test('GUI loopback session, CSRF, origin, Host and static asset boundaries', asy
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await runtime.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+
+test('client errors: POST /api/client-errors needs the session and CSRF; logged as one bounded line, rate limited', async () => {
+  const { clientErrorLog } = await import('../src/index.js');
+  const lines: string[] = [];
+  let now = 0;
+  const log = clientErrorLog({ log: line => lines.push(line), perMinute: 2, now: () => now });
+  assert.equal(log({ where: 'app-view', message: 'boom\u0007\nnext', stack: 'Error: boom\n    at AppSlot', componentStack: '\n    at AppSlot\n    at AppPanel' }), true);
+  assert.match(lines[0]!, /^\[client-error\] 1970-01-01T00:00:00\.000Z app-view: boom next\n  stack: Error: boom\n        at AppSlot\n  components: at AppSlot < at AppPanel$/);
+  assert.equal(log({ where: '<script>', message: 'x'.repeat(5000) }), true);
+  assert.match(lines[1]!, /^\[client-error\] \S+ unknown: x{500}$/);
+  assert.equal(log({}), false, 'rate limited');
+  now = 60_000;
+  assert.equal(log(null), true);
+  assert.match(lines[2]!, /unknown: unknown error$/);
+
+  const dir = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-gui-'));
+  const assets = join(dir, 'assets'); mkdirSync(assets); writeFileSync(join(assets, 'index.html'), '<!doctype html>');
+  const runtime = new ThreadRuntime({ open: async () => { throw new Error('not opened'); }, close: async () => {} }, join(dir, 'state.json'), 'owner');
+  const server = guiApp(runtime, 'owner', 0, assets, { id: 'sandbox', name: 'Sandbox' }).listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}`;
+  const errors: unknown[] = [];
+  const original = console.error; console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+  try {
+    const body = JSON.stringify({ where: 'message', message: 'render failed' });
+    assert.equal((await fetch(`${base}/api/client-errors`, { method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body })).status, 401);
+    const session = await fetch(`${base}/api/session`);
+    const cookie = session.headers.get('set-cookie')!.split(';')[0]!;
+    const { csrf } = await session.json() as { csrf: string };
+    const headers = { cookie, origin: base, 'content-type': 'application/json' };
+    assert.equal((await fetch(`${base}/api/client-errors`, { method: 'POST', headers, body })).status, 403, 'CSRF as the other routes');
+    assert.equal((await fetch(`${base}/api/client-errors`, { method: 'POST', headers: { ...headers, 'x-csrf-token': csrf }, body })).status, 204);
+    assert.ok(errors.some(line => /\[client-error\] \S+ message: render failed/.test(String(line))));
+  } finally { console.error = original; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await runtime.close(); rmSync(dir, { recursive: true, force: true }); }
+});

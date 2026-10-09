@@ -500,6 +500,32 @@ export function appCsp(options: { frameSrc?: string } = {}): string {
 }
 
 /**
+ * The log of render errors the browser app caught (`POST /api/client-errors`):
+ * where, the error message and its stacks (bounded, control characters
+ * removed), one line each, at most `perMinute` lines a minute. Returns
+ * whether the report was logged.
+ */
+export function clientErrorLog(options: { log?: (line: string) => void; perMinute?: number; now?: () => number } = {}) {
+  const log = options.log ?? ((line: string) => console.error(line));
+  const limit = options.perMinute ?? 20;
+  const now = options.now ?? Date.now;
+  const sent: number[] = [];
+  const text = (value: unknown, max: number) => typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, max) : undefined;
+  return (body: unknown): boolean => {
+    const at = now();
+    while (sent.length && at - sent[0]! >= 60_000) sent.shift();
+    if (sent.length >= limit) return false;
+    sent.push(at);
+    const report = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+    const where = typeof report.where === 'string' && /^[a-z-]{1,20}$/.test(report.where) ? report.where : 'unknown';
+    const stack = text(report.stack, 4000);
+    const component = text(report.componentStack, 2000);
+    log(`[client-error] ${new Date(at).toISOString()} ${where}: ${(text(report.message, 500) ?? 'unknown error').replace(/\n/g, ' ')}${stack ? `\n  stack: ${stack.replace(/\n/g, '\n    ')}` : ''}${component ? `\n  components: ${component.trim().replace(/\n\s*/g, ' < ')}` : ''}`);
+    return true;
+  };
+}
+
+/**
  * Loopback-only, same-origin browser transport. No bearer token enters the
  * browser: a random HttpOnly SameSite=Strict session cookie authenticates
  * reads, and every mutation also needs the exact Origin and an in-memory CSRF
@@ -536,6 +562,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;
+  const clientErrors = clientErrorLog();
   const feed = runtime.decisions || adoption ? new DecisionFeed(runtime.decisions ? [{ agent: { id: agent.id, name: agent.name }, board: runtime.decisions, runtime, owner }] : []) : undefined;
   if (feed && adoption) adoption.bindFeed(feed);
   const integrations = credentials ? { store: credentials, userOf: local, ...(integrationOptions ? { options: integrationOptions } : {}) } : undefined;
@@ -544,7 +571,10 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     if (!cookie || !/^[a-f0-9]{64}$/.test(cookie) || !timingSafeEqual(Buffer.from(cookie), Buffer.from(session))) return res.status(401).json({ error: 'session_required' });
     if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== `http://127.0.0.1:${port || req.socket.localPort}` || req.headers['x-csrf-token'] !== csrf)) return res.status(403).json({ error: 'csrf_required' });
     next();
-  }, ...(integrations ? [integrationsApp(integrations)] : []),
+  },
+  // Render errors the app caught (its error boundaries): one line each in the server's log, rate limited.
+  express.Router().post('/client-errors', express.json({ limit: 16 * 1024 }), (req, res) => res.status(clientErrors(req.body) ? 204 : 429).end()),
+  ...(integrations ? [integrationsApp(integrations)] : []),
   // The local user owns the single-user app: they manage its automation tokens.
   ...(automation ? [express.Router().use('/automations', automationAdminRoutes(automation.service, () => agent.id, { actor: () => ({ id: LOCAL_USER_ID, name: 'You' }), isAdmin: () => true }, automation.endpoint))] : []),
   // Pending decisions (the notification bell): `?since=<version>` waits until they change.
@@ -663,6 +693,9 @@ export function teamApp(options: TeamAppOptions) {
   const json = express.json({ limit: BODY_LIMIT_BYTES });
   // Each person's own integration accounts: only signed-in people with a user record (members of some agent).
   const integrations = options.credentials ? { store: options.credentials, userOf: (req: express.Request) => actor(req).id, ...(options.integrationOptions ? { options: options.integrationOptions } : {}) } : undefined;
+  // Render errors the app caught (signed-in people only; CSRF checked above): one line each in the server's log, rate limited.
+  const clientErrors = clientErrorLog();
+  app.post('/api/client-errors', (req, res, next) => who(req)?.user ? next() : res.status(404).json({ error: 'not_found' }), express.json({ limit: 16 * 1024 }), (req, res) => res.status(clientErrors(req.body) ? 204 : 429).end());
   if (integrations) app.use('/api', (req, res, next) => { if (req.path.startsWith('/integrations/') && !who(req)?.user) return res.status(404).json({ error: 'not_found' }); next(); }, integrationsApp(integrations));
   if (options.automation) {
     const automation = options.automation;
