@@ -75,6 +75,7 @@ export function AppToolLine({ toolCallId, toolName, result, isError, fallback }:
       {phase === 'running' ? <LoaderCircle size={14} className="line-icon spin" aria-hidden="true"/> : <Blocks size={14} className="line-icon" aria-hidden="true"/>}
       <span className={`line-label ${phase === 'running' ? 'shimmer' : ''}`}>{label}</span>
       <span className="app-badge" aria-hidden="true">App</span>
+      {view.dev && <span className="side-tab-dev" aria-hidden="true">Dev</span>}
       <ChevronRight size={14} className="chev" aria-hidden="true"/>
     </button>
     {open && <div className="app-line-body">
