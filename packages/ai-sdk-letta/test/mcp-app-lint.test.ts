@@ -47,6 +47,13 @@ test('lint: flat ui.resourceUri / ui/resourceUri keys', async () => {
   assert.ok(!rules(findings).includes('no-ui-tools'), 'the flat key still points at a view, which is linted');
 });
 
+test('lint: the legacy flat key next to the same nested resourceUri (as registerAppTool emits) is fine; a different one warns', async () => {
+  const same = await lintMcpApp(fakeClient({ tools: [tool('show', { ui: { resourceUri: URI }, 'ui/resourceUri': URI })] }));
+  assert.ok(!rules(same).includes('flat-resource-uri'), JSON.stringify(same));
+  const different = await lintMcpApp(fakeClient({ tools: [tool('show', { ui: { resourceUri: URI }, 'ui/resourceUri': 'ui://demo/old.html' })] }));
+  assert.deepEqual(different.filter(f => f.rule === 'flat-resource-uri').map(f => f.level), ['warning']);
+});
+
 test('lint: tool _meta.ui failing McpUiToolMeta', async () => {
   const findings = await lintMcpApp(fakeClient({ tools: [viewTool({ csp: { connectDomains: [] } })] }));
   assert.deepEqual(rules(findings), ['tool-meta-schema']);

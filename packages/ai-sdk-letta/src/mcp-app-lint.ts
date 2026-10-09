@@ -75,8 +75,14 @@ export async function lintMcpApp(client: McpAppClient, options: { signal?: Abort
     if (full()) return findings;
     const name = tool.name;
     const meta = isObject(tool._meta) ? tool._meta : undefined;
+    const nested = isObject(meta?.ui) ? (meta!.ui as Record<string, unknown>).resourceUri : undefined;
     for (const key of FLAT_KEYS) {
       if (meta && key in meta) {
+        // The SDK's registerAppTool also emits the legacy flat key next to the nested one, for older hosts: fine when they agree.
+        if (nested !== undefined) {
+          if (nested !== meta[key]) add({ level: 'warning', rule: 'flat-resource-uri', tool: name, message: `_meta has the legacy flat key "${key}" (${JSON.stringify(String(meta[key])).slice(0, 120)}) and a different _meta.ui.resourceUri; hosts read the nested one`, fix: `Make "${key}" equal to _meta.ui.resourceUri, or drop it` });
+          continue;
+        }
         add({ level: 'error', rule: 'flat-resource-uri', tool: name, message: `_meta uses the flat key "${key}"; hosts read the nested _meta.ui.resourceUri`, fix: `Declare _meta: { ui: { resourceUri: ${JSON.stringify(String(meta[key]))} } } (registerAppTool from @modelcontextprotocol/ext-apps/server does this)` });
       }
     }
