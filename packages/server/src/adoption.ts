@@ -11,15 +11,15 @@ import {
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
 import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type GuiAgentInfo } from './http.js';
 import type { DecisionBoard } from './decisions.js';
-import { MODEL_HANDLE, localModels, publicModel, type ModelOption } from './models.js';
+import { EFFORT_VALUE, MODEL_HANDLE, effortOf, localModels, modelSettings, publicModel, type ModelOption } from './models.js';
 import { LiveConversations, type LiveFs } from './live.js';
 
 /** What the registry needs from the Letta backend (a test fake replaces it). */
 export interface AdoptionBackend {
   /** Local agents for the picker. */
   list(adopted: readonly AdoptionRecord[]): Promise<LocalAgentSummary[]>;
-  /** One agent (name, model, tags, system prompt), or `undefined` when it is gone. */
-  agent(agentId: string): Promise<{ id: string; name: string; model: string; tags: string[]; system: string; hidden?: boolean } | undefined>;
+  /** One agent (name, model, tags, system prompt, reasoning effort from its `model_settings`), or `undefined` when it is gone. */
+  agent(agentId: string): Promise<{ id: string; name: string; model: string; tags: string[]; system: string; hidden?: boolean; effort?: string } | undefined>;
   /** Its conversations (not archived), with `default` first. */
   conversations(agentId: string): Promise<ImportedConversation[]>;
   /** Change its system prompt (an approved instructions update or its revert). */
@@ -46,8 +46,9 @@ export function lettaAdoptionBackend(): AdoptionBackend {
     list: adopted => using(c => listAdoptableAgents(c as never, adopted)),
     agent: agentId => using(async c => {
       try {
-        const agent = await c.agents.retrieve(agentId) as unknown as { id: string; name?: string; model?: string; llm_config?: { handle?: string }; tags?: string[]; system?: string; hidden?: boolean };
-        return { id: agent.id, name: agent.name ?? agentId, model: agent.model ?? agent.llm_config?.handle ?? '', tags: agent.tags ?? [], system: agent.system ?? '', ...(agent.hidden ? { hidden: true } : {}) };
+        const agent = await c.agents.retrieve(agentId) as unknown as { id: string; name?: string; model?: string; llm_config?: { handle?: string }; tags?: string[]; system?: string; hidden?: boolean; model_settings?: unknown };
+        const effort = effortOf(agent.model_settings);
+        return { id: agent.id, name: agent.name ?? agentId, model: agent.model ?? agent.llm_config?.handle ?? '', tags: agent.tags ?? [], system: agent.system ?? '', ...(agent.hidden ? { hidden: true } : {}), ...(effort ? { effort } : {}) };
       } catch { return undefined; }
     }),
     conversations: agentId => using(async c => {
@@ -113,6 +114,7 @@ const REFUSALS: Record<string, string> = {
   mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
   view_only: 'This agent is view only here: it works in Letta Code. Turn off View only to use it in the app.',
   model_unknown: 'This model is not available on the local Letta backend.',
+  effort_unknown: 'This model does not offer that reasoning effort.',
   agent_claimed: 'This agent is already in the app.', letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', capacity_reached: 'The app holds as many agents as it can.',
 };
 
@@ -131,7 +133,7 @@ const REFUSALS: Record<string, string> = {
  * - `PUT /api/adoption/agents/<id>/view-only` `{ viewOnly }`: view only (reads only; off is refused while Letta Code uses it);
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
  * - `GET /api/adoption/agents/<id>/model`: its model and the models it may switch to;
- * - `PUT /api/adoption/agents/<id>/model` `{ model }`: change its model in Letta (Letta Code uses it too);
+ * - `PUT /api/adoption/agents/<id>/model` `{ model, effort? }`: change its model and reasoning effort in Letta (Letta Code uses it too);
  * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
  */
@@ -195,14 +197,14 @@ export class AdoptionRegistry {
   /** Agents for the session (the switcher). */
   agents(): GuiAgentInfo[] {
     return [...this.hosted.values()].map(({ record, definition, runtime, webDev, apps }) => ({
-      id: definition.id, name: definition.name, model: record.model, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
+      id: definition.id, name: definition.name, model: record.model, ...(record.effort ? { effort: record.effort } : {}), approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
       files: !record.viewOnly && record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
       ...(record.viewOnly ? { viewOnly: true } : {}),
       // Web development: the Preview pane (and the Resources panel without files); MCP App development: app views.
       ...(webDev ? { webDev: true, ...(!record.tools.includes('files') ? { resources: true } : {}) } : {}), ...(apps ? { apps: true } : {}),
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
-      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
+      adopted: { agentId: record.agentId, model: record.model, ...(record.effort ? { effort: record.effort } : {}), tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -230,7 +232,7 @@ export class AdoptionRegistry {
     if (!viewOnly && this.backend.activity(agentId).active) throw new RuntimeFault('letta_code_active');
     let definitionId = adoptedDefinitionId(agent!);
     if (this.options.reserved.definitionIds.includes(definitionId)) definitionId = `${definitionId}-adopted`.slice(0, 64);
-    const record: AdoptionRecord = { definitionId, agentId, name: agent!.name, model: agent!.model, tools: sets, adoptedAt: new Date().toISOString(), ...(viewOnly ? { viewOnly: true as const } : {}) };
+    const record: AdoptionRecord = { definitionId, agentId, name: agent!.name, model: agent!.model, ...(agent!.effort ? { effort: agent!.effort } : {}), tools: sets, adoptedAt: new Date().toISOString(), ...(viewOnly ? { viewOnly: true as const } : {}) };
     try { this.store.add(record, { definitionIds: this.options.reserved.definitionIds }); }
     catch (error) { throw new RuntimeFault(error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : 'adoption_failed'); }
     try { this.host(record); } catch (error) { this.store.remove(record.definitionId); throw error; }
@@ -324,35 +326,49 @@ export class AdoptionRegistry {
     this.host(record);
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
   }
-  /** Its current model and the models it may switch to (grouped by provider in the app). */
+  /** Its current model and reasoning effort (read from Letta, else the record) and the models it may switch to (grouped by provider in the app). */
   async model(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
-    const models = await this.backend.models().catch(() => [] as ModelOption[]);
-    return { model: hosted.record.model, models: models.map(publicModel) };
+    const [models, agent] = await Promise.all([this.backend.models().catch(() => [] as ModelOption[]), this.backend.agent(hosted.record.agentId).catch(() => undefined)]);
+    const effort = agent?.effort ?? hosted.record.effort;
+    return { model: hosted.record.model, ...(effort ? { effort } : {}), models: models.map(publicModel) };
   }
   /**
-   * Change an adopted agent's model in Letta (`{ model }`, a handle of
-   * {@link AdoptionBackend.models}), so Letta Code uses it too. Refused for a
+   * Change an adopted agent's model in Letta (`{ model, effort? }`, a handle
+   * of {@link AdoptionBackend.models} and one of its reasoning efforts; its
+   * default tier without one), so Letta Code uses it too. The settings are
+   * built from the chosen tier (with its context window). Refused for a
    * view-only agent (`view_only`), while it replies (`runtime_busy`) or
-   * Letta Code uses it (`letta_code_active`), and for a model the backend
-   * does not offer (`model_unknown`). Its runtime restarts, like a tools
-   * change, so the next turn uses the new model.
+   * Letta Code uses it (`letta_code_active`), for a model the backend does
+   * not offer (`model_unknown`) and an effort it does not (`effort_unknown`).
+   * The same model and effort change nothing; otherwise its runtime
+   * restarts, like a tools change, so the next turn uses the new settings.
    */
   async setModel(definitionId: string, input: unknown) {
     const hosted = this.writable(definitionId);
-    const model = (input as { model?: unknown } | undefined)?.model;
+    const { model, effort: requested } = (input ?? {}) as { model?: unknown; effort?: unknown };
     if (typeof model !== 'string' || !MODEL_HANDLE.test(model)) throw new RuntimeFault('invalid_input', 400);
+    if (requested !== undefined && requested !== null && (typeof requested !== 'string' || !EFFORT_VALUE.test(requested))) throw new RuntimeFault('invalid_input', 400);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     if (this.backend.activity(hosted.record.agentId).active) throw new RuntimeFault('letta_code_active');
     const option = (await this.backend.models()).find(m => m.handle === model);
     if (!option) throw new RuntimeFault('model_unknown', 400);
-    if (model === hosted.record.model) return { model };
-    await this.backend.setModel(hosted.record.agentId, model, { modelSettings: option.settings, ...(option.contextWindow ? { contextWindowLimit: option.contextWindow } : {}) });
-    const record = this.store.update(definitionId, r => ({ ...r, model }));
+    const tier = typeof requested === 'string' ? option.tiers.find(t => t.effort === requested) : option.tiers.find(t => t.effort === option.efforts.find(e => e.default)?.value);
+    if (typeof requested === 'string' && !tier) throw new RuntimeFault('effort_unknown', 400);
+    const effort = tier?.effort;
+    if (model === hosted.record.model) {
+      const current = hosted.record.effort ?? (await this.backend.agent(hosted.record.agentId).catch(() => undefined))?.effort;
+      // The same model without an effort, or with its current one: nothing changes.
+      if (requested === undefined || requested === null || effort === current) return { model, ...(current ? { effort: current } : {}) };
+    }
+    const settings = tier ? modelSettings(model, tier.updateArgs) : option.settings;
+    const window = tier ? tier.updateArgs.context_window : option.contextWindow;
+    await this.backend.setModel(hosted.record.agentId, model, { modelSettings: settings, ...(typeof window === 'number' && window > 0 ? { contextWindowLimit: window } : {}) });
+    const record = this.store.update(definitionId, r => { const { effort: _old, ...rest } = r; return { ...rest, model, ...(effort ? { effort } : {}) }; });
     await this.unhost(hosted);
     this.host(record);
-    return { model };
+    return { model, ...(effort ? { effort } : {}) };
   }
   /** The instructions section for an adopted agent: the tools it has here, its project folder, and the memory policy. */
   private section(hosted: Hosted) {
