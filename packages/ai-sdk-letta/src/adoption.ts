@@ -64,6 +64,13 @@ export type AdoptionRecord = {
    * builds; see {@link SANDBOX_LIMITS}.
    */
   commandTimeoutMs?: number;
+  /**
+   * View only: the app shows its conversations (updated live as Letta Code
+   * works) but never sends, opens a session, gives it tools, starts
+   * containers, or reviews or reverts its memory. An agent in use in Letta
+   * Code may be adopted this way; turning it off checks that again.
+   */
+  viewOnly?: true;
 };
 type AdoptionFile = { version: 1; agents: AdoptionRecord[] };
 
@@ -139,7 +146,14 @@ export type ActivityOptions = { backendDirectory: string; processes?: readonly s
 /** How recent a change counts as "in use" for the warning. @default 15 minutes */
 export const RECENT_ACTIVITY_MS = 15 * 60_000;
 
-const conversationFile = (backend: string, id: string) => join(backend, 'conversations', Buffer.from(`conversation:${id}`).toString('base64url'), 'conversation.json');
+/**
+ * The folder of a Letta Code conversation in the local backend:
+ * `<backend>/conversations/<base64url("conversation:<id>")>/`, or
+ * `base64url("default:<agent>")` for an agent's default conversation. It holds
+ * `conversation.json` and `messages.jsonl` (which grows as messages arrive).
+ */
+export const conversationDirectory = (backend: string, id: string, agentId?: string) => join(backend, 'conversations', Buffer.from(id === 'default' && agentId ? `default:${agentId}` : `conversation:${id}`).toString('base64url'));
+const conversationFile = (backend: string, id: string) => join(conversationDirectory(backend, id), 'conversation.json');
 const runningProcesses = (): string[] => {
   try { return execFileSync('ps', ['-axo', 'args='], { encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024 }).split('\n'); } catch { return []; }
 };
@@ -358,9 +372,12 @@ export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): Adop
  * With a project folder ({@link AdoptionRecord.project}) and the sandbox,
  * the folder is mounted at `/project`. With `web_dev` the sandbox uses the
  * web development image (unless the host names another than the default).
+ * A view-only record ({@link AdoptionRecord.viewOnly}) gets no tools, no
+ * sandbox and no dreaming.
  */
 export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionEnvironment = {}): AgentDefinition {
-  const sets = new Set(record.tools);
+  // View only: no tools, no sandbox, no dreaming (the app only reads its conversations).
+  const sets = new Set(record.viewOnly ? [] : record.tools);
   // Web development needs the shell tools and a CLI sandbox; MCP App development needs web development (a record that no longer fits the host just loses them).
   const webDev = sets.has('web_dev') && sets.has('sandbox') && webDevSandbox(environment);
   const appDev = webDev && sets.has('mcp_app_dev');
@@ -385,6 +402,6 @@ export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionE
     tools, permissions, adopt: { agentId: record.agentId },
     ...(sets.has('sandbox') && sandbox ? { sandbox } : {}),
     // Dreaming stays off unless the host turns it on: an adopted agent keeps its own Letta Code reflection settings, and the app never starts a dream of it by surprise.
-    dreaming: environment.dreaming ?? { trigger: 'off' },
+    dreaming: record.viewOnly ? { trigger: 'off' } : environment.dreaming ?? { trigger: 'off' },
   });
 }
