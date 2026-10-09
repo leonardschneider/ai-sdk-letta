@@ -99,7 +99,7 @@ function FileProvenance() {
  * first) with its provenance, verdict and diff; who wrote each part of a
  * file; and which model reviews (Jiminy).
  */
-export function MemoryDialog({ agentName, admin, onClose, onOpenThread }: { agentName: string; admin: boolean; onClose(): void; onOpenThread?(id: string): void }) {
+export function MemoryDialog({ agentName, admin, viewOnly, onClose, onOpenThread }: { agentName: string; admin: boolean; /** View only: nothing is reviewed or reverted here. */ viewOnly?: boolean; onClose(): void; onOpenThread?(id: string): void }) {
   const toast = useToast();
   const [data, setData] = useState<MemoryData>();
   const [failed, setFailed] = useState('');
@@ -115,7 +115,7 @@ export function MemoryDialog({ agentName, admin, onClose, onOpenThread }: { agen
   return <Modal label={`Memory of ${agentName}`} onClose={onClose} className="automations memory">
     <div className="members-head">
       <div><h2 className="modal-title">Memory</h2>
-        <p className="modal-text">Every change to {agentName}’s memory is recorded with who asked for it and what the agent had read, and reviewed by Jiminy, a separate reviewer. Changes it doubts are reverted, or held until someone approves them in the bell.</p></div>
+        {viewOnly ? <p className="modal-text">{agentName} is view only here: its memory changes in Letta Code, and the app neither reviews nor reverts them. Earlier reviews, if any, stay listed below.</p> : <p className="modal-text">Every change to {agentName}’s memory is recorded with who asked for it and what the agent had read, and reviewed by Jiminy, a separate reviewer. Changes it doubts are reverted, or held until someone approves them in the bell.</p>}</div>
       <button type="button" className="icon-btn small" aria-label="Close" data-autofocus onClick={onClose}><X size={16}/></button>
     </div>
     {data?.reviewer && <section className="memory-section memory-reviewer">
