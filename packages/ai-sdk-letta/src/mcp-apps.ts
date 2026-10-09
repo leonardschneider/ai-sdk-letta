@@ -94,6 +94,8 @@ export const MCP_APP_LIMITS = Object.freeze({
   startTimeoutMs: 120_000,
   /** Longest stdio line accepted from a server. */
   maxLineBytes: 8 * 1024 * 1024,
+  /** Dev apps running at once in one conversation. */
+  maxDevApps: 3,
 });
 
 const ID = /^[a-z][a-z0-9-]{0,23}$/;
@@ -372,6 +374,8 @@ export interface McpAppClient {
   listTools(): Promise<{ tools: McpToolDefinition[] }>;
   callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult>;
   readResource(uri: string, signal?: AbortSignal): Promise<{ contents: { uri: string; mimeType?: string; text?: string; blob?: string; _meta?: Record<string, unknown> }[] }>;
+  /** `resources/list` (the linter compares what is listed with what is read). Optional. */
+  listResources?(signal?: AbortSignal): Promise<{ resources: { uri: string; name?: string; mimeType?: string; _meta?: Record<string, unknown> }[] }>;
   close(): Promise<void>;
 }
 /** Connects a client to a command line (default: `@ai-sdk/mcp` over {@link ProcessStdioTransport}, advertising the MCP Apps extension). */
@@ -391,6 +395,7 @@ export const mcpAppConnector: McpAppConnector = async (line, onClose) => {
     listTools: async () => await client.listTools() as { tools: McpToolDefinition[] },
     callTool: async (name, args, signal) => await client.callTool({ name, arguments: args, ...(signal ? { options: { signal } } : {}) }) as McpCallResult,
     readResource: async (uri, signal) => await client.readResource({ uri, ...(signal ? { options: { signal } } : {}) }) as never,
+    listResources: async signal => await client.listResources({ ...(signal ? { options: { signal } } : {}) }) as never,
     // The transport kills the process whatever the client does.
     close: async () => { await Promise.race([client.close().catch(() => {}), new Promise(done => setTimeout(done, 2000))]); await transport.close(); },
   };
@@ -576,6 +581,8 @@ export type McpAppStatus = {
   tools: McpAppToolInfo[]; origins: string[];
   /** Each view's declared CSP domains, and those granted (declared and approved). */
   views: { uri: string; declared: McpAppCspDomains; granted: Required<McpAppCspDomains>; fingerprint?: string }[];
+  /** A dev app (`mcp_app_dev_start`): the conversation it belongs to, its folder and command, and how many times it was (re)started. */
+  dev?: { conversationId: string; folder: string; command: string; generation: number; startedAt: string };
 };
 /** A failure with a fixed code (refused calls, unavailable apps). */
 export class McpAppError extends Error {
@@ -583,7 +590,43 @@ export class McpAppError extends Error {
   constructor(readonly code: 'app_unknown' | 'app_unavailable' | 'app_disabled' | 'tool_unknown' | 'not_app_visible' | 'not_model_visible' | 'tool_denied' | 'resource_refused' | 'resource_invalid' | 'call_failed', message: string) { super(message); }
 }
 
-type Live = { prepared?: PreparedMcpApp; runtime?: McpAppRuntime; client?: McpAppClient; tunnel?: { mux: FrameMux; child: ChildProcess }; tools: McpToolDefinition[]; views: Map<string, McpAppView>; status: McpAppStatus['status']; error?: string; serverInfo?: McpAppClient['serverInfo'] };
+type Live = { prepared?: PreparedMcpApp; runtime?: McpAppRuntime; client?: McpAppClient; tunnel?: { mux: FrameMux; child: ChildProcess }; tools: McpToolDefinition[]; views: Map<string, McpAppView>; status: McpAppStatus['status']; error?: string; serverInfo?: McpAppClient['serverInfo']; dev?: DevApp };
+
+/**
+ * A dev app (MCP Apps dev mode, see `mcpAppDevTools`): an MCP server the
+ * agent is writing, run over stdio in its conversation's services container.
+ * It belongs to that conversation only: its tools are `dev_<name>__<tool>`
+ * there, its views carry a "Dev" badge, and calls from its views ask.
+ */
+export interface McpAppDevSpec {
+  /** Short name (lowercase letters, digits, `-`; 1–20): the app is `dev_<name>`. */
+  name: string;
+  conversationId: string;
+  /** Where it runs (the container path), and the command, for status and reloads. */
+  folder: string;
+  command: string;
+  /** Starts the server (the command line with stdio attached, and how to stop it). Called again by {@link McpApps.reloadDev}. */
+  launch(signal?: AbortSignal): Promise<McpAppRuntime>;
+  /** A call reached the app (keeps its container alive). */
+  touch?(): void;
+}
+type DevApp = McpAppDevSpec & { generation: number; startedAt: string };
+/** The app ID of a dev app: `dev_<name>`. */
+export const devAppId = (name: string) => `dev_${name}`;
+/** Valid dev app names: lowercase letters, digits and `-`, 1–20, starting with a letter. */
+export const DEV_APP_NAME = /^[a-z][a-z0-9-]{0,19}$/;
+/** Is this the ID of a dev app (`dev_<name>`)? */
+export const isDevAppId = (id: string) => id.startsWith('dev_') && DEV_APP_NAME.test(id.slice(4));
+/** What a (re)start of a dev app found: its tools and views, and what changed since the previous start. */
+export type McpAppDevStart = {
+  app: string; status: McpAppStatus['status']; error?: string; generation: number;
+  tools: McpAppToolInfo[];
+  views: { uri: string; fingerprint: string; changed?: boolean; error?: string }[];
+  /** Compared with the previous start (reloads only). */
+  changes?: { added: string[]; removed: string[]; changed: string[]; viewsChanged: string[] };
+};
+/** A model-visible tool's identity for the next turn: name, description, input schema. */
+const toolSignature = (tools: readonly McpToolDefinition[]) => createHash('sha256').update(JSON.stringify(tools.filter(modelVisible).map(t => [t.name, t.description ?? '', t.title ?? '', t.inputSchema ?? null, toolResourceUri(t) ?? '']))).digest('base64url').slice(0, 16);
 
 /** Options of {@link McpApps}. */
 export interface McpAppsOptions {
@@ -679,8 +722,10 @@ export class McpApps {
   }
   private changed() { try { this.options.onChange?.(); } catch { /* observer */ } }
 
-  /** The app of an ID. */
-  config(appId: string): ResolvedMcpAppConfig | undefined { return this.configs.find(c => c.id === appId); }
+  /** The app of an ID (dev apps: no policies, no origins). */
+  config(appId: string): ResolvedMcpAppConfig | undefined {
+    return this.configs.find(c => c.id === appId) ?? (this.live.get(appId)?.dev ? Object.freeze({ id: appId, tools: Object.freeze({}), origins: Object.freeze([]) }) : undefined);
+  }
   private running(appId: string): Live & { client: McpAppClient } {
     const live = this.live.get(appId);
     if (!live) throw new McpAppError('app_unknown', `No MCP App "${appId}"`);
@@ -688,35 +733,58 @@ export class McpApps {
     if (live.status !== 'running' || !live.client) throw new McpAppError('app_unavailable', `The MCP App "${appId}" is not running${live.error ? `: ${live.error}` : ''}`);
     return live as Live & { client: McpAppClient };
   }
-  /** Policy of an app's tool (the definition's, default `'ask'`). */
-  policy(appId: string, toolName: string): McpAppToolPolicy { return this.config(appId)?.tools[toolName] ?? 'ask'; }
+  /**
+   * Policy of an app's tool (the definition's, default `'ask'`). Dev apps:
+   * the agent's own calls run (`'allow'`: its code, in its own container
+   * without network, like `run_command`); calls from their views ask.
+   */
+  policy(appId: string, toolName: string, caller: 'agent' | 'app' = 'app'): McpAppToolPolicy {
+    if (this.live.get(appId)?.dev) return caller === 'agent' ? 'allow' : 'ask';
+    return this.config(appId)?.tools[toolName] ?? 'ask';
+  }
+  /** May a view of this app render in (and act for) this conversation? Installed apps: any; dev apps: only their own. */
+  servesConversation(appId: string, conversationId: string): boolean {
+    const dev = this.live.get(appId)?.dev;
+    return !dev || dev.conversationId === conversationId;
+  }
+  /** Is this app a dev app? */
+  isDev(appId: string): boolean { return !!this.live.get(appId)?.dev; }
   /** A tool definition of a running (or started) app. */
   toolDefinition(appId: string, toolName: string): McpToolDefinition | undefined { return this.live.get(appId)?.tools.find(t => t.name === toolName); }
 
-  /** The agent's tools: model-visible tools of running apps whose policy is not `'deny'`. */
-  agentTools(): { tools: Record<string, Tool>; permissions: Record<string, ToolPermission>; names: Map<string, { app: string; tool: string }> } {
+  /**
+   * The agent's tools: model-visible tools of running apps whose policy is
+   * not `'deny'`; with a conversation, also the tools of its running dev
+   * apps (`dev_<name>__<tool>`), and those of every conversation with `'*'`.
+   */
+  agentTools(conversationId?: string): { tools: Record<string, Tool>; permissions: Record<string, ToolPermission>; names: Map<string, { app: string; tool: string }> } {
     const tools: Record<string, Tool> = {};
     const permissions: Record<string, ToolPermission> = {};
     const names = new Map<string, { app: string; tool: string }>();
-    for (const config of this.configs) {
-      const live = this.live.get(config.id)!;
+    const ids = [...this.configs.map(c => c.id), ...[...this.live.entries()].filter(([, live]) => live.dev && (conversationId === '*' || live.dev.conversationId === conversationId)).map(([id]) => id)];
+    for (const id of ids) {
+      const live = this.live.get(id)!;
       if (live.status !== 'running') continue;
       for (const definition of live.tools) {
-        const policy = this.policy(config.id, definition.name);
+        const policy = this.policy(id, definition.name, 'agent');
         if (!modelVisible(definition) || policy === 'deny') continue;
-        const name = agentToolName(config.id, definition.name);
+        const name = agentToolName(id, definition.name);
         if (names.has(name)) continue;
-        names.set(name, { app: config.id, tool: definition.name });
-        tools[name] = mcpAppTool(config.id, definition, live.serverInfo?.title ?? live.serverInfo?.name ?? config.id);
+        names.set(name, { app: id, tool: definition.name });
+        tools[name] = mcpAppTool(id, definition, live.serverInfo?.title ?? live.serverInfo?.name ?? id, !!live.dev);
         permissions[name] = policy;
       }
     }
     return { tools, permissions, names };
   }
+  /** The model-visible tools of a conversation's dev apps, as one value: when it changes, its sessions need the new tool list (at the next turn). */
+  devSignature(conversationId: string): string {
+    return [...this.live.entries()].filter(([, live]) => live.dev?.conversationId === conversationId && live.status === 'running').map(([id, live]) => `${id}:${toolSignature(live.tools)}`).sort().join(',');
+  }
 
   /** Call a tool as the agent (model-visible tools only). Records calls of tools with a view. */
   async callAsAgent(agentTool: string, input: Record<string, unknown>, call: { conversationId: string; toolCallId: string; signal?: AbortSignal }): Promise<McpCallResult> {
-    const target = this.agentTools().names.get(agentTool);
+    const target = this.agentTools(call.conversationId).names.get(agentTool);
     if (!target) throw new McpAppError('tool_unknown', `No app tool ${agentTool}`);
     const definition = this.toolDefinition(target.app, target.tool);
     if (!definition || !modelVisible(definition)) throw new McpAppError('not_model_visible', 'That tool is not available to the agent');
@@ -749,6 +817,7 @@ export class McpApps {
   }
   private async call(appId: string, toolName: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {
     const live = this.running(appId);
+    try { live.dev?.touch?.(); } catch { /* observer */ }
     const deadline = AbortSignal.timeout(MCP_APP_LIMITS.callTimeoutMs);
     const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
     try {
@@ -783,7 +852,7 @@ export class McpApps {
 
   /** Enable or disable an app (its tools refuse calls and its views do not render while disabled). Kept across restarts. */
   setEnabled(appId: string, enabled: boolean): void {
-    if (!this.live.has(appId)) throw new McpAppError('app_unknown', `No MCP App "${appId}"`);
+    if (!this.live.has(appId) || this.live.get(appId)!.dev) throw new McpAppError('app_unknown', `No MCP App "${appId}"`);
     if (enabled) this.disabled.delete(appId); else this.disabled.add(appId);
     mkdirSync(dirname(this.settingsFile), { recursive: true, mode: 0o700 });
     writeFileSync(this.settingsFile, JSON.stringify({ disabled: [...this.disabled] }), { mode: 0o600 });
@@ -795,25 +864,106 @@ export class McpApps {
 
   /** Every app, for the admin. */
   status(): McpAppStatus[] {
-    return this.configs.map(config => {
+    const devs = [...this.live.entries()].filter(([, live]) => live.dev).map(([id]) => this.config(id)!);
+    return [...this.configs, ...devs].map(config => {
       const live = this.live.get(config.id)!;
-      return {
+      const dev = live.dev ? { dev: { conversationId: live.dev.conversationId, folder: live.dev.folder, command: live.dev.command, generation: live.dev.generation, startedAt: live.dev.startedAt } } : {};
+      return { ...dev,
         id: config.id, name: this.name(config.id), ...(live.prepared?.packageVersion ?? live.serverInfo?.version ? { version: String(live.prepared?.packageVersion ?? live.serverInfo?.version).slice(0, 64) } : {}), ...(live.prepared?.packageName ? { packageName: live.prepared.packageName } : {}),
         status: live.status, ...(live.error ? { error: live.error } : {}), enabled: this.enabled(config.id), origins: [...config.origins],
-        tools: live.tools.map(t => { const uri = toolResourceUri(t); const visibility = toolVisibility(t); return { name: t.name, ...(visibility.includes('model') && this.policy(config.id, t.name) !== 'deny' ? { agentTool: agentToolName(config.id, t.name) } : {}), ...(typeof t.title === 'string' ? { title: t.title.slice(0, 120) } : {}), ...(typeof t.description === 'string' ? { description: t.description.slice(0, 500) } : {}), inputSchema: t.inputSchema ?? { type: 'object' }, visibility, policy: this.policy(config.id, t.name), ...(uri ? { resourceUri: uri } : {}) }; }),
+        tools: live.tools.map(t => { const uri = toolResourceUri(t); const visibility = toolVisibility(t); return { name: t.name, ...(visibility.includes('model') && this.policy(config.id, t.name, 'agent') !== 'deny' ? { agentTool: agentToolName(config.id, t.name) } : {}), ...(typeof t.title === 'string' ? { title: t.title.slice(0, 120) } : {}), ...(typeof t.description === 'string' ? { description: t.description.slice(0, 500) } : {}), inputSchema: t.inputSchema ?? { type: 'object' }, visibility, policy: this.policy(config.id, t.name), ...(uri ? { resourceUri: uri } : {}) }; }),
         views: [...live.views.values()].map(view => ({ uri: view.uri, declared: declaredCsp(view.meta.csp), granted: grantedCsp(view.meta.csp, config.origins), fingerprint: view.fingerprint })),
       };
     });
   }
   /** App tools of the agent with a view: `agentTool → { app, tool, title }`, for the browser. */
-  viewTools(): Record<string, { app: string; appName: string; tool: string; title?: string }> {
-    const out: Record<string, { app: string; appName: string; tool: string; title?: string }> = {};
-    for (const [name, target] of this.agentTools().names) {
+  viewTools(): Record<string, { app: string; appName: string; tool: string; title?: string; dev?: true }> {
+    const out: Record<string, { app: string; appName: string; tool: string; title?: string; dev?: true }> = {};
+    for (const [name, target] of this.agentTools('*').names) {
       const definition = this.toolDefinition(target.app, target.tool);
-      if (definition && toolResourceUri(definition)) out[name] = { app: target.app, appName: this.name(target.app), tool: target.tool, ...(typeof definition.title === 'string' ? { title: definition.title.slice(0, 120) } : {}) };
+      if (definition && toolResourceUri(definition)) out[name] = { app: target.app, appName: this.name(target.app), tool: target.tool, ...(typeof definition.title === 'string' ? { title: definition.title.slice(0, 120) } : {}), ...(this.isDev(target.app) ? { dev: true as const } : {}) };
     }
     return out;
   }
+  /** Each running dev app's generation (it grows with every reload): open views of an app render again when it changes. */
+  devGenerations(): Record<string, number> {
+    return Object.fromEntries([...this.live.entries()].filter(([, live]) => live.dev).map(([id, live]) => [id, live.dev!.generation]));
+  }
+
+  /* ---------------- dev apps (MCP Apps dev mode) ---------------- */
+
+  /** The dev apps of a conversation (their IDs). */
+  devApps(conversationId: string): string[] { return [...this.live.entries()].filter(([, live]) => live.dev?.conversationId === conversationId).map(([id]) => id); }
+  /** A dev app's spec, if `appId` is one. */
+  devSpec(appId: string): Readonly<DevApp> | undefined { return this.live.get(appId)?.dev; }
+  /** The running client of an app (the linter and `mcp_app_dev_call`). */
+  client(appId: string): McpAppClient { return this.running(appId).client; }
+  /**
+   * Start a dev app for a conversation (`dev_<name>`), or restart it with a
+   * new spec. A name another conversation uses is refused. Never throws for
+   * a server that fails: the result says `failed`, with the error.
+   */
+  async startDev(spec: McpAppDevSpec, signal?: AbortSignal): Promise<McpAppDevStart> {
+    if (this.closed) throw new McpAppError('app_unavailable', 'MCP Apps are closed');
+    if (!DEV_APP_NAME.test(spec.name)) throw new McpAppError('app_unknown', 'A dev app name is 1–20 lowercase letters, digits or "-", starting with a letter');
+    const id = devAppId(spec.name);
+    if (this.configs.some(c => c.id === id)) throw new McpAppError('app_unknown', `"${id}" is an installed app`);
+    const known = this.live.get(id);
+    if (known?.dev && known.dev.conversationId !== spec.conversationId) throw new McpAppError('app_unknown', `The dev app name "${spec.name}" is used by another conversation; choose another name`);
+    if (!known && this.devApps(spec.conversationId).length >= MCP_APP_LIMITS.maxDevApps) throw new McpAppError('app_unknown', `At most ${MCP_APP_LIMITS.maxDevApps} dev apps per conversation; stop one first`);
+    const before = known ? { tools: known.tools, views: new Map(known.views) } : undefined;
+    if (known) await this.stopOne(known);
+    const live: Live = known ?? { tools: [], views: new Map(), status: 'stopped' };
+    live.dev = { ...spec, generation: (known?.dev?.generation ?? 0) + 1, startedAt: new Date().toISOString() };
+    live.tools = []; live.views = new Map(); delete live.error; delete live.serverInfo;
+    this.live.set(id, live);
+    live.status = 'starting'; this.changed();
+    const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(MCP_APP_LIMITS.startTimeoutMs)]) : AbortSignal.timeout(MCP_APP_LIMITS.startTimeoutMs);
+    const viewErrors = new Map<string, string>();
+    try {
+      const runtime = live.runtime = await spec.launch(deadline);
+      if (this.closed) { await runtime.stop(); throw new Error('closed'); }
+      const client = live.client = await withDeadline(this.connector(runtime.line, () => { if (live.client === client) { live.status = 'stopped'; live.error = 'The dev app server exited (see mcp_app_dev_logs).'; this.changed(); } }), deadline, 'start_timeout');
+      live.serverInfo = client.serverInfo;
+      const listed = await withDeadline(client.listTools(), deadline, 'start_timeout');
+      live.tools = (Array.isArray(listed?.tools) ? listed.tools : []).filter(t => t && typeof t.name === 'string' && /^[\w.:/-]{1,128}$/.test(t.name)).slice(0, MCP_APP_LIMITS.maxTools);
+      for (const uri of new Set(live.tools.map(toolResourceUri).filter((u): u is string => !!u))) {
+        try { live.views.set(uri, await this.readView(client, uri, deadline)); } catch (error) { viewErrors.set(uri, error instanceof Error ? error.message.slice(0, 200) : 'unreadable'); }
+      }
+      live.status = 'running';
+      this.options.log?.(`Dev app ${id}: generation ${live.dev.generation} started · ${live.tools.length} tool(s), ${live.views.size} view(s).`);
+    } catch (error) {
+      const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (does it speak MCP over stdio? see mcp_app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
+      await this.stopOne(live);
+      live.status = 'failed'; live.error = message;
+    } finally { this.changed(); }
+    const tools = this.status().find(s => s.id === id)?.tools ?? [];
+    const views = [...new Set([...live.views.keys(), ...viewErrors.keys()])].map(uri => ({ uri, fingerprint: live.views.get(uri)?.fingerprint ?? '', ...(before && before.views.get(uri)?.fingerprint !== live.views.get(uri)?.fingerprint ? { changed: true } : {}), ...(viewErrors.has(uri) ? { error: viewErrors.get(uri)! } : {}) }));
+    const changes = before ? (() => {
+      const old = new Map(before.tools.map(t => [t.name, JSON.stringify(t)]));
+      const now = new Map(live.tools.map(t => [t.name, JSON.stringify(t)]));
+      return { added: [...now.keys()].filter(n => !old.has(n)), removed: [...old.keys()].filter(n => !now.has(n)), changed: [...now.keys()].filter(n => old.has(n) && old.get(n) !== now.get(n)), viewsChanged: views.filter(v => v.changed).map(v => v.uri) };
+    })() : undefined;
+    return { app: id, status: live.status, ...(live.error ? { error: live.error } : {}), generation: live.dev.generation, tools, views, ...(changes ? { changes } : {}) };
+  }
+  /** Restart a dev app with the same folder and command: its server is started again and its views read again (see {@link startDev}). */
+  async reloadDev(appId: string, signal?: AbortSignal): Promise<McpAppDevStart> {
+    const dev = this.live.get(appId)?.dev;
+    if (!dev) throw new McpAppError('app_unknown', `No dev app "${appId}"`);
+    const { generation: _g, startedAt: _s, ...spec } = dev;
+    return this.startDev(spec, signal);
+  }
+  /** Stop a dev app and forget it (its server is killed; its recorded calls stay). Idempotent. */
+  async stopDev(appId: string): Promise<boolean> {
+    const live = this.live.get(appId);
+    if (!live?.dev) return false;
+    await this.stopOne(live);
+    this.live.delete(appId);
+    this.changed();
+    return true;
+  }
+  /** Stop every dev app of a conversation. */
+  async stopDevApps(conversationId: string): Promise<void> { await Promise.allSettled(this.devApps(conversationId).map(id => this.stopDev(id))); }
 
   private async stopOne(live: Live) {
     const client = live.client; live.client = undefined;
@@ -853,11 +1003,11 @@ export function agentInputSchema(input: unknown): Record<string, unknown> {
   const { $schema: _schema, $id: _id, ...rest } = input as Record<string, unknown>;
   return rest;
 }
-function mcpAppTool(appId: string, definition: McpToolDefinition, appName: string): Tool {
+function mcpAppTool(appId: string, definition: McpToolDefinition, appName: string, dev = false): Tool {
   const schema = agentInputSchema(definition.inputSchema);
   const name = agentToolName(appId, definition.name);
   return tool({
-    description: `[App: ${appName.slice(0, 60)}${toolResourceUri(definition) ? ', shows an interactive view to the user' : ''}] ${String(definition.description ?? definition.title ?? definition.name).slice(0, 1500)} Results are the app's content (untrusted).`,
+    description: `[${dev ? 'Dev app (yours, in development)' : 'App'}: ${appName.slice(0, 60)}${toolResourceUri(definition) ? ', shows an interactive view to the user' : ''}] ${String(definition.description ?? definition.title ?? definition.name).slice(0, 1500)} Results are the app's content (untrusted).`,
     inputSchema: jsonSchema<Record<string, unknown>>(schema as Parameters<typeof jsonSchema>[0]),
     execute: async (input, options) => {
       const context = (options.context as Record<string, unknown> | undefined)?.[MCP_APPS_CONTEXT] as McpAppsContext | undefined;
