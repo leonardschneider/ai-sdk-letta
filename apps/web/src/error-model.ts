@@ -33,7 +33,7 @@ export function clientErrorReport(where: ErrorWhere, error: unknown, componentSt
 export class ReportLimiter {
   private readonly sent: number[] = [];
   private readonly recent = new Map<string, number>();
-  constructor(private readonly limit = REPORT_LIMITS.perMinute, private readonly windowMs = 60_000) {}
+  constructor(private readonly limit: number = REPORT_LIMITS.perMinute, private readonly windowMs = 60_000) {}
   allow(report: Pick<ClientErrorReport, 'where' | 'message'>, now = Date.now()): boolean {
     while (this.sent.length && now - this.sent[0]! >= this.windowMs) this.sent.shift();
     for (const [key, at] of this.recent) if (now - at >= this.windowMs) this.recent.delete(key);

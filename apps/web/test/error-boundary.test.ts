@@ -47,7 +47,7 @@ test('fallbacks: the inline card and the top-level panel (Try again, Reload, col
 });
 
 test('boundary: renders its children, or its fallback once a render error is caught (a new reset key renders them again)', () => {
-  const ok = renderToStaticMarkup(React.createElement(ErrorBoundary, { where: 'message', fallback: () => 'fallback' }, React.createElement('p', null, 'fine')));
+  const ok = renderToStaticMarkup(React.createElement(ErrorBoundary, { where: 'message', fallback: () => 'fallback', children: React.createElement('p', null, 'fine') }));
   assert.equal(ok, '<p>fine</p>');
   const state = ErrorBoundary.getDerivedStateFromError(new Error('x'));
   assert.ok(state.error);
