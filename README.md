@@ -1566,8 +1566,14 @@ conversations get them on their next message).
   Google). It changes the agent's model in Letta, so Letta Code uses it too;
   refused while it replies, while Letta Code uses it, and in view only. From
   code: `PUT /api/adoption/agents/<id>/model` with `{ "model":
-  "anthropic/claude-sonnet-4-6" }`. The app's own agent shows its model
-  read-only: it is set in code (`LETTA_MODEL` or the definition's `model`).
+  "anthropic/claude-sonnet-4-6" }`. A model with several reasoning efforts
+  (none, minimal, low, medium, high, xhigh, max: the ones its catalog
+  offers, the default marked) gets a **Reasoning** choice; the menu shows it
+  next to the model (`gpt-5.5 · high`), and `{ "model": …, "effort": "high" }`
+  sets it from code (`effort_unknown` for one the model lacks). The app's own
+  agent shows its model read-only: it is set in code (`LETTA_MODEL` or the
+  definition's `model`; a definition has no reasoning setting, so it uses
+  the model's default).
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 

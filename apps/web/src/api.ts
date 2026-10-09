@@ -74,7 +74,7 @@ export type Person = { id?: string; login: string; name: string; avatar?: string
 /** An agent as the browser knows it (team servers add the viewer's role). */
 export type AgentInfo = { id: string; name: string; approvalTools: string[];
   /** The agent's Letta model handle (the agent menu shows it). */
-  model?: string; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
+  model?: string; /** Its reasoning effort, when known. */ effort?: string; files?: boolean; ui?: { latex?: boolean }; role?: 'admin' | 'member';
   /** The agent has resources (a Resources panel) without accepting attachments. */
   resources?: boolean;
   /** Integrations whose accounts each person connects (`'atlassian'`). */
@@ -90,7 +90,7 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[];
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
   /** View only: an adopted agent that works in Letta Code; its conversations update live and nothing is sent. */
   viewOnly?: boolean;
-  adopted?: { agentId: string; model: string; tools: string[]; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; commandTimeoutMs?: number; available?: string[] };
+  adopted?: { agentId: string; model: string; effort?: string; tools: string[]; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; commandTimeoutMs?: number; available?: string[] };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
   /** The agent has MCP Apps: app tool lines show their views; admins see the Apps list. */

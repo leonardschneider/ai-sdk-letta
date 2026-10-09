@@ -1150,3 +1150,10 @@ body[data-resizing] iframe { pointer-events: none; }
 .model-list { max-height: min(48vh, 440px); }
 .model-group { border: 0; margin: 0 0 6px; padding: 0; }
 .model-group legend { padding: 6px 6px 2px; }
+.effort-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 10px 0 4px; }
+.effort-seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: 9px; background: var(--hover); max-width: 100%; }
+.effort-opt { border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: 7px; cursor: pointer; display: inline-flex; align-items: baseline; gap: 3px; }
+.effort-opt:hover:not(:disabled) { color: var(--text); }
+.effort-opt.selected { background: var(--bg-elev); color: var(--text); box-shadow: var(--shadow); }
+.effort-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.effort-default { font-size: 11px; color: var(--text-3); }

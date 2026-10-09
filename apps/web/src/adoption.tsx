@@ -26,6 +26,7 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
       view_only: 'This agent is view only here. Turn off View only (agent menu) to use it in the app.',
       model_unknown: 'This model is not available on the local Letta backend.',
+      effort_unknown: 'This model does not offer that reasoning effort.',
       mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
     };
     // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
@@ -48,7 +49,9 @@ const when = (value?: string) => {
  */
 export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly, onModel }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void; onModel?(agent: AgentInfo): void }) {
   const viewOnly = !!current.viewOnly;
-  const model = current.adopted?.model ?? current.model;
+  const handle = current.adopted?.model ?? current.model;
+  const effort = current.adopted?.effort ?? current.effort;
+  const model = handle && effort ? `${handle} · ${effort}` : handle;
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
       <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`} title={model ? `${current.name} · ${model}` : undefined}>
@@ -321,35 +324,55 @@ function CommandTimeout({ agent, onSaved }: { agent: AgentInfo; onSaved(): void 
   </form>;
 }
 
+/** A reasoning effort of a model (`none` … `max`), the default one marked. */
+type EffortChoice = { value: string; label: string; contextWindow?: number; default?: boolean };
 /** A model the local Letta backend offers (`GET /api/adoption/agents/<id>/model`). */
-type ModelChoice = { handle: string; label: string; provider: string; providerLabel: string; contextWindow?: number };
+type ModelChoice = { handle: string; label: string; provider: string; providerLabel: string; contextWindow?: number; efforts?: EffortChoice[] };
 const tokens = (n?: number) => !n ? '' : n >= 1_000_000 ? `${n / 1_000_000}M context` : `${Math.round(n / 1000)}K context`;
+/** The effort to preselect for a model: the kept one when it offers it, else its default, else none. */
+const effortFor = (model: ModelChoice | undefined, keep?: string) => !model?.efforts?.length ? undefined : model.efforts.some(e => e.value === keep) ? keep : (model.efforts.find(e => e.default) ?? model.efforts[0])!.value;
 
 /**
- * Model: the agent's Letta model. For an adopted agent, the models of the
- * local backend grouped by provider; saving changes the agent's model in
- * Letta (`PUT /api/adoption/agents/<id>/model`), so Letta Code uses it too.
- * The app's own agent shows its model read-only (set in code).
+ * Model: the agent's Letta model and reasoning effort. For an adopted agent,
+ * the models of the local backend grouped by provider, and the reasoning
+ * efforts of the chosen one; saving changes them in Letta
+ * (`PUT /api/adoption/agents/<id>/model` `{ model, effort }`), so Letta Code
+ * uses them too. The app's own agent shows its model read-only (set in code;
+ * a definition has no reasoning setting, so it uses the model's default).
  */
 export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
   const toast = useToast();
   const adopted = !!agent.adopted && !agent.viewOnly;
   const current = agent.adopted?.model ?? agent.model ?? '';
   const [models, setModels] = useState<ModelChoice[]>();
+  const [currentEffort, setCurrentEffort] = useState(agent.adopted?.effort ?? agent.effort);
   const [chosen, setChosen] = useState(current);
+  const [effort, setEffort] = useState<string | undefined>(agent.adopted?.effort ?? agent.effort);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState('');
   const path = `/agents/${encodeURIComponent(agent.id)}/model`;
-  const load = useCallback(async () => { try { setModels((await adoptionApi<{ models: ModelChoice[] }>(path)).models); setProblem(''); } catch (error) { setProblem(adoptionMessage(error)); } }, [path]);
+  const load = useCallback(async () => {
+    try {
+      const result = await adoptionApi<{ model: string; effort?: string; models: ModelChoice[] }>(path);
+      setModels(result.models); setCurrentEffort(result.effort);
+      setEffort(effortFor(result.models.find(m => m.handle === current), result.effort));
+      setProblem('');
+    } catch (error) { setProblem(adoptionMessage(error)); }
+  }, [path, current]);
   useEffect(() => { if (adopted) void load(); }, [adopted, load]);
   const groups = new Map<string, ModelChoice[]>();
   for (const model of models ?? []) groups.set(model.providerLabel, [...(groups.get(model.providerLabel) ?? []), model]);
   const currentLabel = models?.find(m => m.handle === current);
+  const chosenModel = models?.find(m => m.handle === chosen);
+  const efforts = chosenModel?.efforts ?? [];
+  const changed = !!chosen && (chosen !== current || (!!effort && effort !== currentEffort));
+  const pick = (handle: string) => { setChosen(handle); setEffort(effortFor(models?.find(m => m.handle === handle), effort)); setProblem(''); };
   async function save() {
     setSaving(true); setProblem('');
     try {
-      await adoptionApi(path, { model: chosen }, 'PUT');
-      toast(`${agent.name} now uses ${models?.find(m => m.handle === chosen)?.label ?? chosen}. Its next message uses it.`);
+      await adoptionApi(path, { model: chosen, ...(effort && efforts.length ? { effort } : {}) }, 'PUT');
+      const label = chosenModel?.label ?? chosen;
+      toast(`${agent.name} now uses ${label}${effort && efforts.length ? ` (${efforts.find(e => e.value === effort)?.label.toLowerCase() ?? effort} reasoning)` : ''}. Its next message uses it.`);
       onSaved();
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
@@ -359,25 +382,35 @@ export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
         <p className="modal-text">{adopted ? 'Changes the agent’s model in Letta, so Letta Code uses it too.' : 'Set in code (LETTA_MODEL / definition).'}</p></div>
       <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
     </div>
-    <p className="model-current"><span className="automations-heading">Current</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}</p>
-    {adopted && <form onSubmit={event => { event.preventDefault(); if (chosen && chosen !== current) void save(); }}>
+    <p className="model-current"><span className="automations-heading">Current</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}
+      <span className="adopt-meta"> · reasoning: {adopted ? currentEffort ?? 'model default' : agent.adopted?.effort ?? agent.effort ?? 'default'}</span></p>
+    {adopted && <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
       <div className="member-list adopt-list model-list" role="radiogroup" aria-label="Models" aria-busy={!models || undefined}>
         {!models && !problem && <p className="member-empty muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading models…</p>}
         {models && !models.length && <p className="member-empty muted">No models found. Connect a provider in Letta Code first.</p>}
         {[...groups].map(([provider, list]) => <fieldset key={provider} className="model-group">
           <legend className="automations-heading">{provider}</legend>
           {list.map(model => <label key={model.handle} className={`member-row adopt-row${chosen === model.handle ? ' selected' : ''}`}>
-            <input type="radio" name="model" value={model.handle} checked={chosen === model.handle} disabled={saving} onChange={() => { setChosen(model.handle); setProblem(''); }} data-autofocus={model.handle === current || undefined}/>
+            <input type="radio" name="model" value={model.handle} checked={chosen === model.handle} disabled={saving} onChange={() => pick(model.handle)} data-autofocus={model.handle === current || undefined}/>
             <span className="adopt-text"><span className="adopt-name">{model.label}{model.handle === current && <span className="role-badge small">Current</span>}</span>
               <span className="adopt-meta">{[model.handle, tokens(model.contextWindow)].filter(Boolean).join(' · ')}</span></span>
           </label>)}
         </fieldset>)}
       </div>
+      {efforts.length > 1 && <div className="effort-row">
+        <span className="automations-heading" id="effort-label">Reasoning</span>
+        <div className="effort-seg" role="radiogroup" aria-labelledby="effort-label">
+          {efforts.map(e => <button key={e.value} type="button" role="radio" aria-checked={effort === e.value} className={`effort-opt${effort === e.value ? ' selected' : ''}`} disabled={saving}
+            title={[e.default ? 'The model’s default' : '', tokens(e.contextWindow)].filter(Boolean).join(' · ') || undefined} onClick={() => { setEffort(e.value); setProblem(''); }}>
+            {e.label}{e.default && <span className="effort-default" aria-label="(default)">·default</span>}
+          </button>)}
+        </div>
+      </div>}
       <p className="adopt-meta">Saving restarts {agent.name} here; open conversations use the new model on their next message.</p>
       {problem && <p className="form-error" role="alert">{problem} {!models && <button type="button" className="link-btn" onClick={() => void load()}>Try again</button>}</p>}
       <div className="modal-actions">
         <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-        <button type="submit" className="btn primary" disabled={saving || !chosen || chosen === current}>{saving ? 'Saving…' : 'Save'}</button>
+        <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>}
     {!adopted && <div className="modal-actions"><button type="button" className="btn primary" data-autofocus onClick={onClose}>Close</button></div>}
