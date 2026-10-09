@@ -1560,6 +1560,14 @@ conversations get them on their next message).
   when a full build gets stopped. From code: `PUT
   /api/adoption/agents/<id>/sandbox` with `{ "commandTimeoutMs": 240000 }`
   or `{ "commandTimeoutMs": null }`.
+- **Model…** shows its model (the agent menu shows it too) and switches it
+  to another model of the local Letta backend, grouped by provider
+  (ChatGPT subscription, Claude subscription or Anthropic, OpenAI API,
+  Google). It changes the agent's model in Letta, so Letta Code uses it too;
+  refused while it replies, while Letta Code uses it, and in view only. From
+  code: `PUT /api/adoption/agents/<id>/model` with `{ "model":
+  "anthropic/claude-sonnet-4-6" }`. The app's own agent shows its model
+  read-only: it is set in code (`LETTA_MODEL` or the definition's `model`).
 - **Remove from app…** forgets it in this app only: the Letta agent, its
   memory and conversations stay, and Letta Code keeps working with it.
 
