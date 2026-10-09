@@ -72,6 +72,9 @@ View (\`@modelcontextprotocol/ext-apps\`):
   the view (also \`app.ontoolinput\` for its arguments).
 - \`await app.callServerTool({ name: 'add_note', arguments: { text } })\`:
   object form, one argument; resolves to the tool result.
+- \`app.sendMessage(...)\` (ui/message) shows in the chat: keep it short and
+  human ("I played e2e4."); put IDs and state in structuredContent or
+  tool calls, and let the agent fetch state with its tools.
 
 ## Minimal example (notes/)
 

@@ -316,6 +316,18 @@ button.line-summary:hover { color: var(--text); background: var(--hover); }
 .listened-line > .line-summary:hover { color: var(--text-2); }
 .listened-line .line-icon { opacity: .85; }
 .listened-line .line-meta { font-size: 12px; }
+/* A message an app's view sent: one quiet line on the user's side ("chessos: I played e2e4."), the full text on demand. */
+.msg.app-msg, .msg[data-role="user"].app-msg { display: flex; flex-direction: column; align-items: flex-end; margin: -2px 0 12px; }
+.app-msg-line { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 0 6px; margin: 0; max-width: 100%; font-size: 13px; }
+.app-msg-line > .line-summary { padding: 1px 4px 1px 2px; color: var(--text-3); min-width: 0; gap: 5px; }
+.app-msg-line > button.line-summary:hover { color: var(--text-2); }
+.app-msg-name { font-weight: 600; color: var(--text-2); }
+.app-msg-sep { margin-left: -5px; }
+.app-msg-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.app-msg-line .chev { flex-shrink: 0; transition: transform .15s; }
+.app-msg-line > [aria-expanded="true"] .chev { transform: rotate(90deg); }
+.app-msg-time { font-size: 11.5px; color: var(--text-3); }
+.app-msg-full { flex-basis: 100%; margin: 4px 0 0; padding: 8px 10px; max-width: min(640px, 100%); font: 12px/1.5 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); color: var(--text-2); background: var(--hover); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
 .listened-detail { display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--text-2); }
 .listened-detail p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .listened-note, .listened-thoughts { display: flex; flex-direction: column; gap: 2px; }
