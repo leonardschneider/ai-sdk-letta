@@ -15,6 +15,7 @@ export { AutomationService, AutomationStore, automationApp, automationAdminRoute
 export { n8nOrchestrator, conductorOrchestrator, cronAt, CONDUCTOR_FIRE_WORKFLOW, type Orchestrator, type OrchestratorJob, type OrchestratorHandle, type N8nOrchestratorOptions, type ConductorOrchestratorOptions } from './scheduler.js';
 export { TeamDirectory, tailscaleIdentity, decodeHeaderValue, servedOrigin, authorOf, DIRECTORY_LIMITS, type TailscaleIdentity, type TeamUser, type Membership, type MemberRole, type MemberSummary } from './team.js';
 export { DecisionBoard, DecisionConflict, DECISION_BOARD_LIMITS, type DecisionRecord, type DecisionStatus, type DecisionPerson, type PublicDecision } from './decisions.js';
-export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, type AdoptionBackend, type AdoptionRegistryOptions, type HostFactory } from './adoption.js';
+export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, viewOnlyAllowed, VIEW_ONLY_READS, type AdoptionBackend, type AdoptionRegistryOptions, type HostFactory } from './adoption.js';
+export { LiveConversations, LIVE_LIMITS, type LiveFs, type LiveOptions } from './live.js';
 export { AppGate, APP_GATE_LIMITS, sandboxProxyHtml, sandboxOrigin, contentText, publicApproval, type AppGateOptions, type AppInstance, type AppApproval, type AppApprovalKind, type AppAuditEvent } from './mcp-apps.js';
 export { ProjectFolder, PROJECT_LIMITS, PROJECT_DEFAULT_IGNORES, type ProjectEntry, type ProjectListing, type ProjectStatus } from './project.js';

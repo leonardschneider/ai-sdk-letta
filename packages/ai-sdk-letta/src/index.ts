@@ -87,7 +87,7 @@ export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUM
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
 export {
-  AdoptionStore, adoptedDefinition, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, checkAdoptedProject, validCommandTimeout, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
+  AdoptionStore, adoptedDefinition, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, checkAdoptedProject, validCommandTimeout, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, conversationDirectory, adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate,
   ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';

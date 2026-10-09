@@ -1129,3 +1129,15 @@ body[data-resizing] iframe { pointer-events: none; }
 .command-timeout { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .command-timeout-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-2); }
 .command-timeout-row input { width: 90px; }
+
+/* View only (an adopted agent that works in Letta Code). */
+.viewonly-bar span { display: inline-flex; align-items: center; gap: 8px; }
+.live-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-2); padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: #22a35a; box-shadow: 0 0 0 0 rgba(34, 163, 90, .5); animation: live-pulse 2s infinite; }
+@keyframes live-pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 163, 90, .45); } 70% { box-shadow: 0 0 0 6px rgba(34, 163, 90, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 163, 90, 0); } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.viewonly-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.viewonly-text > span:first-child { display: inline-flex; align-items: center; gap: 6px; }
+.menu-hint { font-size: 12px; color: var(--text-3, var(--text-2)); white-space: normal; max-width: 240px; line-height: 1.35; }
+.adopt-viewonly { align-items: flex-start; margin: 10px 0 4px; }
+.adopt-viewonly span { line-height: 1.4; }

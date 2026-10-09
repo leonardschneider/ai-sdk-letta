@@ -17,6 +17,8 @@ export type SidebarProps = {
   active: ThreadSummary[]; archived: ThreadSummary[]; times: Map<string, number | undefined>;
   query: string; onQuery(value: string): void; searchRef: React.RefObject<HTMLInputElement | null>;
   busy: boolean; runningId?: string; archivingIds: ReadonlySet<string>; isDraft: boolean;
+  /** View-only agents: no New chat. */
+  newHidden?: boolean;
   onClose?(): void; onCollapse?(): void; agent: { id: string; name: string };
   /** Installed package versions from the server (About section). */
   versions?: Versions;
@@ -29,7 +31,7 @@ export type SidebarProps = {
 };
 
 export function Sidebar(props: SidebarProps) {
-  const { times, query, onQuery, searchRef, busy, isDraft } = props;
+  const { times, query, onQuery, searchRef, busy, isDraft, newHidden } = props;
   // Indices must come from the runtime's own lists: the adapter is applied after
   // this render, so indexing our React state directly can briefly point past the end.
   const runtimeIds = useAuiState(s => s.threads.threadIds);
@@ -57,9 +59,9 @@ export function Sidebar(props: SidebarProps) {
       {props.onClose && <button type="button" className="icon-btn drawer-close" aria-label="Close sidebar" onClick={props.onClose}><X size={18}/></button>}
     </div>
     <ThreadListPrimitive.Root className="thread-list" aria-label="Conversations">
-      <ThreadListPrimitive.New className="new-chat" disabled={busy} data-current={isDraft || undefined} title="New chat (⌘K)">
+      {!newHidden && <ThreadListPrimitive.New className="new-chat" disabled={busy} data-current={isDraft || undefined} title="New chat (⌘K)">
         <SquarePen size={16} aria-hidden="true"/><span>New chat</span><kbd aria-hidden="true">⌘K</kbd>
-      </ThreadListPrimitive.New>
+      </ThreadListPrimitive.New>}
       <label className="search">
         <Search size={15} aria-hidden="true"/>
         <input ref={searchRef} type="search" placeholder="Search chats" aria-label="Search conversations by title" value={query} onChange={e => onQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Escape' && query) { e.preventDefault(); e.stopPropagation(); onQuery(''); } }}/>

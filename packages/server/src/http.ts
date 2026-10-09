@@ -382,7 +382,9 @@ export interface GuiAgentInfo {
   /** The agent trusts Jiminy by default (`memory.trustJiminy`); each conversation can override it. */
   trustJiminy?: boolean;
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model, tool sets, project folder (as given), and whether the server has a sandbox. */
-  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
+  /** View only (an adopted agent that works in Letta Code): the app shows its conversations live and never sends. */
+  viewOnly?: boolean;
+  adopted?: { agentId: string; model: string; tools: readonly string[]; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
   /** The agent has MCP Apps (`mcpApps`): tool lines of app tools render their views. */
@@ -508,7 +510,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
     res.json({ csrf, agent: { id: agent.id, name: agent.name, approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
-      ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: true })), adoption: true } : {}) });
+      ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: !info.viewOnly })), adoption: true } : {}) });
   });
   // The single-user app has one person: the local user.
   const local = () => LOCAL_USER_ID;

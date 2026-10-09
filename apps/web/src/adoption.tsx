@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, ChevronDown, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
+import { Check, ChevronDown, Eye, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
 import { ApiError, serverApi, type AgentInfo } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
@@ -24,6 +24,7 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'Only agents with MemFS memory can be added.', runtime_busy: 'Wait until the agent finishes replying, then try again.',
       session_required: 'The local server restarted. Refresh the page.', csrf_required: 'The local server restarted. Refresh the page.',
       sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
+      view_only: 'This agent is view only here. Turn off View only (agent menu) to use it in the app.',
       mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
     };
     // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
@@ -31,6 +32,8 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
     throw new AdoptionError(error.code, project ?? messages[error.code] ?? 'That didn’t work. Nothing was changed.');
   }
 }
+/** Turn View only on or off (`PUT /api/adoption/agents/<id>/view-only`). */
+export const saveViewOnly = (definitionId: string, viewOnly: boolean) => adoptionApi<{ viewOnly: boolean }>(`/agents/${encodeURIComponent(definitionId)}/view-only`, { viewOnly }, 'PUT');
 const when = (value?: string) => {
   if (!value) return 'no activity yet';
   const days = Math.floor((Date.now() - Date.parse(value)) / 86_400_000);
@@ -42,7 +45,8 @@ const when = (value?: string) => {
  * adopted agents: switch agents, add one, remove the current one, or update
  * its instructions.
  */
-export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void }) {
+export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void }) {
+  const viewOnly = !!current.viewOnly;
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
       <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`}>
@@ -55,14 +59,18 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
         <DropdownMenu.RadioGroup value={current.id} onValueChange={id => { if (id !== current.id) onSwitch(id); }}>
           {agents.map(agent => <DropdownMenu.RadioItem key={agent.id} value={agent.id} className="menu-item">
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
-            <span className="agent-menu-name">{agent.name}</span>{agent.adopted && <span className="role-badge small" title="An existing Letta agent, opened in place">Letta</span>}
+            <span className="agent-menu-name">{agent.name}</span>{agent.adopted && <span className="role-badge small" title="An existing Letta agent, opened in place">Letta</span>}{agent.viewOnly && <span className="role-badge small" title="View only: it works in Letta Code">View only</span>}
           </DropdownMenu.RadioItem>)}
         </DropdownMenu.RadioGroup>
         <DropdownMenu.Separator className="menu-sep"/>
         <DropdownMenu.Item className="menu-item" onSelect={onAdd}><Plus size={15} aria-hidden="true"/>Add agent…</DropdownMenu.Item>
-        {current.adopted && onTools && <DropdownMenu.Item className="menu-item" onSelect={() => onTools(current)}><Wrench size={15} aria-hidden="true"/>Tools…</DropdownMenu.Item>}
-        {current.adopted && onProject && <DropdownMenu.Item className="menu-item" onSelect={() => onProject(current)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>}
-        {current.adopted && <DropdownMenu.Item className="menu-item" onSelect={() => onInstructions(current)}><FileDiff size={15} aria-hidden="true"/>Update instructions…</DropdownMenu.Item>}
+        {current.adopted && onViewOnly && <DropdownMenu.CheckboxItem className="menu-item viewonly-toggle" checked={viewOnly} onCheckedChange={value => onViewOnly(current, value === true)}>
+          <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
+          <span className="viewonly-text"><span><Eye size={15} aria-hidden="true"/> View only</span><span className="menu-hint">Watch it work in Letta Code: conversations update live, nothing is sent from here.</span></span>
+        </DropdownMenu.CheckboxItem>}
+        {current.adopted && !viewOnly && onTools && <DropdownMenu.Item className="menu-item" onSelect={() => onTools(current)}><Wrench size={15} aria-hidden="true"/>Tools…</DropdownMenu.Item>}
+        {current.adopted && !viewOnly && onProject && <DropdownMenu.Item className="menu-item" onSelect={() => onProject(current)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>}
+        {current.adopted && !viewOnly && <DropdownMenu.Item className="menu-item" onSelect={() => onInstructions(current)}><FileDiff size={15} aria-hidden="true"/>Update instructions…</DropdownMenu.Item>}
         {current.adopted && <DropdownMenu.Item className="menu-item danger" onSelect={() => onRemove(current)}><Trash2 size={15} aria-hidden="true"/>Remove from app…</DropdownMenu.Item>}
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
@@ -80,6 +88,7 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
   const [failed, setFailed] = useState('');
   const [chosen, setChosen] = useState<string>();
   const [tools, setTools] = useState<string[]>([]);
+  const [viewOnly, setViewOnly] = useState(false);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState('');
   const load = useCallback(async () => {
@@ -91,8 +100,8 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
     if (!agent || saving) return;
     setSaving(true); setProblem('');
     try {
-      const record = await adoptionApi<{ definitionId: string; name: string }>('/agents', { agentId: agent.agentId, tools });
-      toast(`Added ${record.name}. Its conversations and memory are the same as in Letta Code.`);
+      const record = await adoptionApi<{ definitionId: string; name: string }>('/agents', { agentId: agent.agentId, tools, ...(viewOnly ? { viewOnly: true } : {}) });
+      toast(viewOnly ? `Added ${record.name}, view only. Its conversations update here as it works in Letta Code.` : `Added ${record.name}. Its conversations and memory are the same as in Letta Code.`);
       onAdded(record.definitionId);
     } catch (error) { setProblem(adoptionMessage(error)); if (error instanceof AdoptionError && error.code === 'letta_code_active') void load(); }
     finally { setSaving(false); }
@@ -111,9 +120,9 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
         const disabled = !!row.adoptedAs || !!row.inApp || !!row.refusal;
         return <li key={row.agentId}>
           <label className={`member-row adopt-row${chosen === row.agentId ? ' selected' : ''}${disabled ? ' disabled' : ''}`}>
-            <input type="radio" name="adopt-agent" value={row.agentId} disabled={disabled} checked={chosen === row.agentId} onChange={() => { setChosen(row.agentId); setProblem(''); }} data-autofocus={!disabled && row === data.agents.find(a => !a.adoptedAs && !a.inApp && !a.refusal) ? true : undefined}/>
+            <input type="radio" name="adopt-agent" value={row.agentId} disabled={disabled} checked={chosen === row.agentId} onChange={() => { setChosen(row.agentId); setProblem(''); if (row.busy) setViewOnly(true); }} data-autofocus={!disabled && row === data.agents.find(a => !a.adoptedAs && !a.inApp && !a.refusal) ? true : undefined}/>
             <span className="adopt-text">
-              <span className="adopt-name">{row.name}{(row.adoptedAs || row.inApp) && <span className="role-badge small">In the app</span>}{row.busy && <span className="role-badge small warn" title="A Letta Code session of this agent is running">In use in Letta Code</span>}</span>
+              <span className="adopt-name">{row.name}{(row.adoptedAs || row.inApp) && <span className="role-badge small">In the app</span>}{row.busy && <span className="role-badge small warn" title="A Letta Code session of this agent is running">In use in Letta Code: add as view only</span>}</span>
               <span className="adopt-meta">{[row.model || 'model unknown', when(row.lastActivity), `${row.conversations} conversation${row.conversations === 1 ? '' : 's'}`].join(' · ')}</span>
               {row.refusal && !row.adoptedAs && !row.inApp && <span className="adopt-meta">{row.refusal === 'agent_without_memfs' ? 'No MemFS memory: cannot be added.' : 'Cannot be added.'}</span>}
             </span>
@@ -121,7 +130,9 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
         </li>;
       })}
     </ul>
-    {agent && data && <fieldset className="adopt-tools">
+    {agent && <label className="adopt-tool adopt-viewonly"><input type="checkbox" checked={viewOnly} onChange={event => { setViewOnly(event.target.checked); setProblem(''); }}/>
+      <span><strong>View only</strong> · watch it work in Letta Code: its conversations update live here; nothing is sent, no tools or memory changes from the app.{agent.busy && !viewOnly && ' It is in use in Letta Code, so it can only be added as view only now.'}</span></label>}
+    {agent && data && !viewOnly && <fieldset className="adopt-tools">
       <legend className="automations-heading">Tools it gets here</legend>
       {data.tools.available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} onChange={event => setTools(list => toggleToolSet(list, set, event.target.checked))}/>{TOOL_LABELS[set] ?? set}</label>)}
       <p className="adopt-meta">Its system prompt, model and tags stay unchanged. Every tool call follows the app’s permissions.</p>
@@ -129,7 +140,7 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
     {problem && <p className="form-error" role="alert">{problem} {/Letta Code/.test(problem) && <button type="button" className="link-btn" onClick={() => void add()}>Retry</button>}</p>}
     <div className="modal-actions">
       <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-      <button type="button" className="btn primary" disabled={!agent || saving} onClick={() => void add()}>{saving ? 'Adding…' : 'Add'}</button>
+      <button type="button" className="btn primary" disabled={!agent || saving || (!!agent.busy && !viewOnly)} onClick={() => void add()}>{saving ? 'Adding…' : viewOnly ? 'Add as view only' : 'Add'}</button>
     </div>
   </Modal>;
 }

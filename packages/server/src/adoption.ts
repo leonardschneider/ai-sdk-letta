@@ -1,4 +1,5 @@
 import express from 'express';
+import { mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
@@ -10,6 +11,7 @@ import {
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
 import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type GuiAgentInfo } from './http.js';
 import type { DecisionBoard } from './decisions.js';
+import { LiveConversations, type LiveFs } from './live.js';
 
 /** What the registry needs from the Letta backend (a test fake replaces it). */
 export interface AdoptionBackend {
@@ -23,6 +25,8 @@ export interface AdoptionBackend {
   setSystem(agentId: string, system: string): Promise<void>;
   /** Whether Letta Code is using it now. */
   activity(agentId: string): { active: boolean; recent: boolean; reason?: string; lastChange?: string };
+  /** The local backend folder (live refresh watches its conversations). Without it, nothing is watched. */
+  directory?: string;
 }
 
 /** The local Letta backend (read-only except {@link AdoptionBackend.setSystem}). */
@@ -60,11 +64,12 @@ export function lettaAdoptionBackend(): AdoptionBackend {
     }),
     setSystem: (agentId, system) => using(async c => { await c.agents.update(agentId, { system }); }),
     activity: agentId => lettaCodeActivity(agentId, { backendDirectory: localBackendDirectory() }),
+    directory: localBackendDirectory(),
   };
 }
 
 /** One hosted adopted agent. */
-type Hosted = { record: AdoptionRecord; definition: AgentDefinition; runtime: ThreadRuntime; board?: DecisionBoard; router: express.Express; close?: () => Promise<void>; webDev?: boolean; apps?: boolean };
+type Hosted = { record: AdoptionRecord; definition: AgentDefinition; runtime: ThreadRuntime; board?: DecisionBoard; router: express.Express; close?: () => Promise<void>; webDev?: boolean; apps?: boolean; live?: LiveConversations };
 /**
  * How the server builds the runtime of an adopted agent (the same wiring as
  * its own agent). `close` stops what the runtime does not own (its web
@@ -83,12 +88,17 @@ export interface AdoptionRegistryOptions {
   backend?: AdoptionBackend;
   build: HostFactory;
   log?: (line: string) => void;
+  /** How a view-only agent reads a conversation (tests replace it). @default {@link adoptedPeek} without app tools */
+  peek?: (agentId: string) => NonNullable<RuntimeHost['peek']>;
+  /** Live refresh options (tests: fake file system and timers). */
+  live?: { fs?: LiveFs; debounceMs?: number; pollMs?: number; idleMs?: number; maxConversations?: number };
 }
 
 const REFUSALS: Record<string, string> = {
   agent_missing: 'This agent no longer exists.', agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'This agent has no MemFS memory; only agents with MemFS can be added.',
   sandbox_unavailable: 'This server has no sandbox (web development needs the docker or apple-container one), so it cannot do that.',
   mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
+  view_only: 'This agent is view only here: it works in Letta Code. Turn off View only to use it in the app.',
   agent_claimed: 'This agent is already in the app.', letta_code_active: 'Letta Code is using this agent right now. Close its Letta Code session, then retry.', capacity_reached: 'The app holds as many agents as it can.',
 };
 
@@ -100,10 +110,11 @@ const REFUSALS: Record<string, string> = {
  *
  * Routes (all behind the app's session and CSRF checks):
  * - `GET /api/adoption/agents`: local agents for the "Add agent" picker;
- * - `POST /api/adoption/agents` `{ agentId, tools? }`: adopt one;
+ * - `POST /api/adoption/agents` `{ agentId, tools?, viewOnly? }`: adopt one (view only: even while Letta Code uses it);
  * - `DELETE /api/adoption/agents/<id>`: remove it from the app (the Letta agent is never deleted);
  * - `PUT /api/adoption/agents/<id>/tools` `{ tools }`: its tool sets;
  * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
+ * - `PUT /api/adoption/agents/<id>/view-only` `{ viewOnly }`: view only (reads only; off is refused while Letta Code uses it);
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
  * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
@@ -129,16 +140,36 @@ export class AdoptionRegistry {
     }
     const definition = adoptedDefinition(usable, this.options.environment);
     const folder = join(statePaths(this.options.stateDirectory).server(definition.id), 'gui');
-    const { runtime, board, close, webDev, apps } = this.options.build(definition, folder);
+    // View only: a runtime that can only read (no session, tools, containers, decisions or memory review).
+    const { runtime, board, close, webDev, apps } = record.viewOnly ? { runtime: this.viewer(record, folder), board: undefined, close: undefined, webDev: undefined, apps: undefined } : this.options.build(definition, folder);
     const router = runtimeRoutes(express(), runtime, this.options.owner);
     const hosted: Hosted = { record, definition, runtime, ...(board ? { board } : {}), router, ...(close ? { close } : {}), ...(webDev ? { webDev } : {}), ...(apps ? { apps } : {}) };
+    hosted.live = this.liveOf(hosted);
     this.hosted.set(record.definitionId, hosted);
     if (board) this.feed?.add({ agent: { id: definition.id, name: definition.name }, board, runtime, owner: this.options.owner });
     return hosted;
   }
+  /** The runtime of a view-only agent: history is read with `peek`; opening a session is refused (`view_only`). */
+  private viewer(record: AdoptionRecord, folder: string): ThreadRuntime {
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    const peek = this.options.peek?.(record.agentId) ?? adoptedPeek(record.agentId, []);
+    return new ThreadRuntime({ open: async () => { throw new RuntimeFault('view_only', 403); }, close: async () => {}, peek }, join(folder, 'state.json'), this.options.owner);
+  }
+  /** Live refresh of an adopted agent's conversations (changes made in Letta Code), when the backend folder is known. */
+  private liveOf(hosted: Hosted): LiveConversations | undefined {
+    const directory = this.backend.directory;
+    if (!directory) return undefined;
+    const id = hosted.definition.id;
+    return new LiveConversations({
+      backendDirectory: directory, agentId: hosted.record.agentId, ...this.options.live,
+      onChange: (conversationId, at) => { if (this.hosted.get(id) === hosted) hosted.runtime.externalChange(this.options.owner, conversationId, at); },
+      onNewConversation: () => { if (this.hosted.get(id) === hosted) void this.refreshConversations(id).catch(() => 0); },
+    });
+  }
   /** Stop a hosted agent: its runtime, then what it does not own (web development services, MCP App servers). */
   private async unhost(hosted: Hosted) {
     this.hosted.delete(hosted.record.definitionId); this.feed?.remove(hosted.record.definitionId);
+    hosted.live?.close();
     try { await hosted.runtime.close(); } finally { await hosted.close?.().catch(error => this.options.log?.(`Services of ${hosted.record.definitionId} not stopped: ${error instanceof Error ? error.message : String(error)}`)); }
   }
   /** The runtime of an adopted agent (by its definition ID), if hosted. */
@@ -149,12 +180,13 @@ export class AdoptionRegistry {
   agents(): GuiAgentInfo[] {
     return [...this.hosted.values()].map(({ record, definition, runtime, webDev, apps }) => ({
       id: definition.id, name: definition.name, approvalTools: Object.keys(definition.permissions).filter(name => definition.permissions[name] === 'ask'),
-      files: record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
+      files: !record.viewOnly && record.tools.includes('files'), ui: { latex: definition.ui.latex }, memory: true,
+      ...(record.viewOnly ? { viewOnly: true } : {}),
       // Web development: the Preview pane (and the Resources panel without files); MCP App development: app views.
       ...(webDev ? { webDev: true, ...(!record.tools.includes('files') ? { resources: true } : {}) } : {}), ...(apps ? { apps: true } : {}),
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
-      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
+      adopted: { agentId: record.agentId, model: record.model, tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -170,18 +202,19 @@ export class AdoptionRegistry {
   }
   /** Adopt an agent (see the class notes). Refusals have fixed codes ({@link REFUSALS}). */
   async adopt(input: unknown): Promise<AdoptionRecord> {
-    const { agentId, tools } = (input ?? {}) as { agentId?: unknown; tools?: unknown };
+    const { agentId, tools, viewOnly } = (input ?? {}) as { agentId?: unknown; tools?: unknown; viewOnly?: unknown };
     if (typeof agentId !== 'string' || !/^agent-local-[a-zA-Z0-9-]{1,100}$/.test(agentId)) throw new RuntimeFault('invalid_input', 400);
+    if (viewOnly !== undefined && typeof viewOnly !== 'boolean') throw new RuntimeFault('invalid_input', 400);
     const sets = tools === undefined ? defaultAdoptedTools(this.options.environment) : this.validTools(tools);
     if (this.store.read().some(r => r.agentId === agentId) || this.options.reserved.agentIds?.().includes(agentId)) throw new RuntimeFault('agent_claimed');
     const agent = await this.backend.agent(agentId);
     const refused = adoptionRefusal(agent);
     if (refused) throw new RuntimeFault(refused, refused === 'agent_missing' ? 404 : 409);
-    const activity = this.backend.activity(agentId);
-    if (activity.active) throw new RuntimeFault('letta_code_active');
+    // View only: it may be in use in Letta Code (the app only reads).
+    if (!viewOnly && this.backend.activity(agentId).active) throw new RuntimeFault('letta_code_active');
     let definitionId = adoptedDefinitionId(agent!);
     if (this.options.reserved.definitionIds.includes(definitionId)) definitionId = `${definitionId}-adopted`.slice(0, 64);
-    const record: AdoptionRecord = { definitionId, agentId, name: agent!.name, model: agent!.model, tools: sets, adoptedAt: new Date().toISOString() };
+    const record: AdoptionRecord = { definitionId, agentId, name: agent!.name, model: agent!.model, tools: sets, adoptedAt: new Date().toISOString(), ...(viewOnly ? { viewOnly: true as const } : {}) };
     try { this.store.add(record, { definitionIds: this.options.reserved.definitionIds }); }
     catch (error) { throw new RuntimeFault(error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : 'adoption_failed'); }
     try { this.host(record); } catch (error) { this.store.remove(record.definitionId); throw error; }
@@ -198,10 +231,34 @@ export class AdoptionRegistry {
     this.store.remove(definitionId);
     return { removed: true, agentId: hosted.record.agentId };
   }
-  /** Change an adopted agent's tool sets: its runtime restarts with the new definition. */
-  async setTools(definitionId: string, input: unknown) {
+  /**
+   * Turn View only on or off (`{ viewOnly }`). Off is refused
+   * (`letta_code_active`) while Letta Code uses the agent. Its runtime
+   * restarts: view only reads, otherwise it gets its tools back.
+   */
+  async setViewOnly(definitionId: string, input: unknown) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
+    const value = (input as { viewOnly?: unknown } | undefined)?.viewOnly;
+    if (typeof value !== 'boolean') throw new RuntimeFault('invalid_input', 400);
+    if (!value && this.backend.activity(hosted.record.agentId).active) throw new RuntimeFault('letta_code_active');
+    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
+    if (!!hosted.record.viewOnly === value) return { viewOnly: value };
+    const record = this.store.update(definitionId, r => { const { viewOnly: _old, ...rest } = r; return value ? { ...rest, viewOnly: true as const } : rest; });
+    await this.unhost(hosted);
+    this.host(record);
+    return { viewOnly: value };
+  }
+  /** A hosted agent that may change (refused with `view_only` for a view-only one). */
+  private writable(definitionId: string): Hosted {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    if (hosted.record.viewOnly) throw new RuntimeFault('view_only', 403);
+    return hosted;
+  }
+  /** Change an adopted agent's tool sets: its runtime restarts with the new definition. */
+  async setTools(definitionId: string, input: unknown) {
+    const hosted = this.writable(definitionId);
     const sets = this.validTools((input as { tools?: unknown } | undefined)?.tools);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const record = this.store.update(definitionId, r => ({ ...r, tools: sets }));
@@ -218,8 +275,7 @@ export class AdoptionRegistry {
    * `project_has_credentials` (with the reason), `sandbox_unavailable`.
    */
   async setProject(definitionId: string, input: unknown) {
-    const hosted = this.hosted.get(definitionId);
-    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const hosted = this.writable(definitionId);
     const path = (input as { path?: unknown } | undefined)?.path;
     if (path !== null && typeof path !== 'string') throw new RuntimeFault('invalid_input', 400);
     if (path !== null) {
@@ -242,8 +298,7 @@ export class AdoptionRegistry {
    * Its runtime restarts, like a project change.
    */
   async setSandbox(definitionId: string, input: unknown) {
-    const hosted = this.hosted.get(definitionId);
-    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const hosted = this.writable(definitionId);
     const value = (input as { commandTimeoutMs?: unknown } | undefined)?.commandTimeoutMs;
     if (value !== null && !validCommandTimeout(value)) throw new RuntimeFault('invalid_input', 400);
     if (!this.options.environment?.sandbox) throw new RuntimeFault('sandbox_unavailable');
@@ -269,8 +324,7 @@ export class AdoptionRegistry {
   }
   /** Apply the instructions update (approved by the person in the app). */
   async applyInstructions(definitionId: string) {
-    const hosted = this.hosted.get(definitionId);
-    if (!hosted) throw new RuntimeFault('not_found', 404);
+    const hosted = this.writable(definitionId);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const agent = await this.backend.agent(hosted.record.agentId);
     if (!agent) throw new RuntimeFault('agent_missing', 404);
@@ -285,6 +339,7 @@ export class AdoptionRegistry {
   async revertInstructions(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted?.record.instructions) throw new RuntimeFault('not_found', 404);
+    if (hosted.record.viewOnly) throw new RuntimeFault('view_only', 403);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const agent = await this.backend.agent(hosted.record.agentId);
     if (!agent) throw new RuntimeFault('agent_missing', 404);
@@ -323,6 +378,7 @@ export class AdoptionRegistry {
     app.delete('/adoption/agents/:id', wrap(async req => this.remove(String(req.params.id))));
     app.put('/adoption/agents/:id/tools', json, wrap(async req => this.setTools(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
+    app.put('/adoption/agents/:id/view-only', json, wrap(async req => this.setViewOnly(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/sandbox', json, wrap(async req => this.setSandbox(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));
     app.post('/adoption/agents/:id/instructions', json, wrap(async req => this.applyInstructions(String(req.params.id))));
@@ -331,6 +387,9 @@ export class AdoptionRegistry {
     app.use('/agents/:agent', async (req, res, next) => {
       const hosted = this.hosted.get(String(req.params.agent));
       if (!hosted) return res.status(404).json({ error: 'not_found' });
+      // Someone watches this agent: its conversations are refreshed live (the one viewed, and new ones).
+      hosted.live?.touch(req.method === 'GET' ? this.viewedConversation(hosted, req.path) : undefined);
+      if (hosted.record.viewOnly && !viewOnlyAllowed(req.method, req.path)) return res.status(403).json({ error: 'view_only', message: REFUSALS.view_only });
       if (req.method === 'GET' && req.path === '/v1/threads') await this.refreshConversations(hosted.definition.id).catch(() => 0);
       // Sending, or opening a conversation's session, is refused while Letta Code uses the agent (viewing is read-only and allowed).
       if (req.method === 'POST' && (req.path === '/v1/runs' || req.path === '/v1/threads') && this.backend.activity(hosted.record.agentId).active) return res.status(409).json({ error: 'letta_code_active', message: REFUSALS.letta_code_active });
@@ -338,11 +397,18 @@ export class AdoptionRegistry {
     });
     return app;
   }
+  /** The conversation a request views (`/v1/threads/<id>/view` or `/history`), if any. */
+  private viewedConversation(hosted: Hosted, path: string): string | undefined {
+    const match = /^\/v1\/threads\/([^/]+)\/(?:view|history)$/.exec(path);
+    if (!match) return undefined;
+    try { return hosted.runtime.conversationOf(this.options.owner, decodeURIComponent(match[1]!)); } catch { return undefined; }
+  }
   /** What the GUI app needs (see {@link GuiAdoption}). */
   gui(): GuiAdoption { return { routes: this.routes(), agents: () => this.agents(), bindFeed: feed => this.bindFeed(feed) }; }
   async close() {
     if (this.closing) return;
     this.closing = true;
+    for (const hosted of this.hosted.values()) hosted.live?.close();
     await Promise.allSettled([...this.hosted.values()].map(hosted => this.unhost(hosted)));
   }
   /** Tool sets from a request: known, in order, and fitting the host (see `adoptedToolsRefusal`). */
@@ -356,6 +422,19 @@ export class AdoptionRegistry {
 
 /** A refused project folder, with its human-readable reason. */
 class ProjectRefusal extends Error { constructor(readonly code: string, message: string) { super(message); } }
+
+/**
+ * Requests a view-only agent's API answers (deny by default): reads only.
+ * Threads (list, view, history, files), resources and memory reads, the
+ * change channel, capabilities and decisions lists. Everything else
+ * (sending, new threads, renames, rewinds, decisions, apps, previews,
+ * uploads, resource writes, memory settings) is refused with `view_only`.
+ */
+export const VIEW_ONLY_READS: readonly RegExp[] = [
+  /^\/v1\/capabilities$/, /^\/v1\/changes$/, /^\/v1\/threads$/, /^\/v1\/threads\/[^/]+\/(?:view|history|files)$/, /^\/v1\/threads\/[^/]+\/files\/[^/]+$/,
+  /^\/v1\/resources$/, /^\/v1\/resources\/(?:history|file|preview)$/, /^\/v1\/memory\/(?:reviews|provenance|reverts)$/, /^\/v1\/decisions$/,
+];
+export const viewOnlyAllowed = (method: string, path: string) => (method === 'GET' || method === 'HEAD') && VIEW_ONLY_READS.some(pattern => pattern.test(path));
 
 /** Tool sets the host can offer. */
 export const availableTools = (environment: AdoptionEnvironment = {}): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => (set !== 'sandbox' || !!environment.sandbox) && (set !== 'web_search' || !!environment.webSearch) && ((set !== 'web_dev' && set !== 'mcp_app_dev') || webDevSandbox(environment)));

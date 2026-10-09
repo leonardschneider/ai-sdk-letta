@@ -1019,6 +1019,26 @@ export class ThreadRuntime {
     if (added || touched) { this.save(); this.changed(); }
     return added;
   }
+  /**
+   * A conversation changed outside this runtime (Letta Code wrote to it):
+   * its thread's activity time moves to `at` and the change channel wakes,
+   * so an open view reloads its history. Ignored while a turn of ours runs in
+   * it (the runtime shows that one live).
+   * @returns whether a thread of this conversation was found
+   */
+  externalChange(owner: string, conversationId: string, at: string): boolean {
+    this.authorize(owner);
+    const thread = this.state.threads.find(t => t.owner === owner && t.conversationId === conversationId);
+    if (!thread) return false;
+    const lane = this.lane(thread.id);
+    if (lane.active || (lane.current && lane.current.conversationId === conversationId)) return true;
+    // The activity time always moves (the app refreshes an open conversation when its summary changed).
+    const when = Number.isFinite(Date.parse(at)) ? at : new Date().toISOString();
+    thread.lastActivityAt = !thread.lastActivityAt || when > thread.lastActivityAt ? when : new Date(Date.parse(thread.lastActivityAt) + 1).toISOString();
+    this.save();
+    this.changed();
+    return true;
+  }
   /** Turns that reached (or may have reached) the agent: not waiting, not withdrawn before sending. */
   private delivered(threadId: string) { return this.state.runs.filter(r => r.threadId === threadId && r.status !== 'queued' && !r.notSent && !r.rewound); }
   /**

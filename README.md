@@ -1569,6 +1569,40 @@ the app shows, such as `blog-2cc740f1`; same state directory). From code:
 `startGuiServer(definition, assets, { adoption: { sandbox } })` (on by
 default; `adoption: false` turns it off).
 
+### View-only agents
+
+An agent that works in Letta Code (one that needs your shell, or runs long
+research sessions there) can still be watched in the app. Turn on **View
+only**, per agent: in the **Add agent** picker (an agent in use in Letta
+Code can only be added this way: "In use in Letta Code: add as view only"),
+or later in the agent menu.
+
+- **Read only, enforced by the server.** Its API answers reads only
+  (conversation list, view and history, resources and Memory view); every
+  other request (sending, new conversations, renames, rewinds, decisions,
+  apps, previews, uploads, resource writes, memory settings, Tools…,
+  Project folder…, Update instructions…) is refused with `403 view_only`.
+  No Letta session is opened, it gets no tools here, no sandbox or service
+  containers start, no dreams, and Jiminy neither reviews nor reverts its
+  memory (the Memory view still shows history).
+- **Live.** The conversations you look at are watched in the Letta backend
+  (`~/.letta/lc-local-backend/conversations/<id>/messages.jsonl` and
+  `conversation.json`, debounced, with a 5-second poll as a fallback for
+  missed file events), so what Letta Code does appears within a second or
+  two, without reloading. New conversations made in Letta Code appear in
+  the sidebar. Watching stops two minutes after the last view and at
+  shutdown; at most 8 conversations per agent are watched. Other adopted
+  agents get the same live refresh while the app has no session of its own
+  open on the conversation.
+- The app hides the message box (a banner says "View only — this agent
+  works in Letta Code. Updates appear here live."), the edit pencil and
+  decision actions, and shows a **Live** badge.
+- **Turning it off** checks again that Letta Code is not using the agent
+  (`letta_code_active` otherwise): close its Letta Code session first.
+
+From code: `PUT /api/adoption/agents/<id>/view-only` with `{ "viewOnly": true }`
+(or `false`), or `POST /api/adoption/agents` with `{ "agentId", "viewOnly": true }`.
+
 ## Sharing with your team (Tailscale)
 
 One server can host several agents for a small team. People reach it over
