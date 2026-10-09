@@ -54,7 +54,7 @@ export {
 } from './sandbox.js';
 export {
   webDevTools, WEBDEV_TOOL_PERMISSIONS, WEBDEV_TOOL_NAMES, BROWSER_TOOL_NAMES, BROWSER_TOOL_BASE_NAMES, BROWSER_TOOL_SPECS, CHROME_DEVTOOLS_MCP_VERSION, WEBDEV_CONTEXT, WEBDEV_PORT, WEBDEV_PROXY_PORT, WEBDEV_LIMITS, WEBDEV_UNTRUSTED_TOOLS, WEB_DEV_GUIDE, WEB_DEV_NOTE, DEV_KILL_SCRIPT, BROWSER_KILL_SCRIPT,
-  WebDevServices, WebDevRegistry, readOrigins, writeOrigins, webDevEnabled, includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, normalizeWebOrigin, browserFlags, browserModelOutput, servicesRunArgs, cliServicesDriver, mcpBrowserConnector, webDevToolTimeouts, readyScript,
+  WebDevServices, WebDevRegistry, readOrigins, writeOrigins, webDevEnabled, includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, normalizeWebOrigin, browserFlags, browserModelOutput, servicesRunArgs, cliServicesDriver, mcpBrowserConnector, webDevToolTimeouts, readyScript, devAppLogFile,
   FrameMux, TUNNEL_SCRIPT, handleEgress, connectOrigin,
   type WebDevConfig, type ResolvedWebDevConfig, type WebDevStatus, type WebDevServicesOptions, type WebDevRegistryOptions, type ServicesDriver, type ServicesContainer, type ServicesRequest, type CommandLine, type BrowserClient, type BrowserConnector, type BrowserResult, type BrowserToolSpec, type BrowserToolBaseName, type BrowserToolName, type WebDevToolName, type TunnelStream, type EgressOptions,
 } from './webdev.js';
@@ -93,8 +93,12 @@ export {
 } from './adoption.js';
 export {
   McpApps, McpAppRecords, McpAppError, ProcessStdioTransport, agentInputSchema, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
-  mcpAppConnector, containerLauncher, mcpAppRunArgs, prepareMcpApp, prepareMcpApps, MCP_APP_LIMITS, MCP_APPS_CONTEXT, MCP_APP_PROXY_PORT,
+  mcpAppConnector, containerLauncher, mcpAppRunArgs, prepareMcpApp, prepareMcpApps, MCP_APP_LIMITS, MCP_APPS_CONTEXT, MCP_APP_PROXY_PORT, devAppId, isDevAppId, DEV_APP_NAME,
   type McpAppConfig, type ResolvedMcpAppConfig, type McpAppToolPolicy, type McpToolDefinition, type McpToolVisibility, type McpAppCspDomains, type McpCallResult, type McpAppClient, type McpAppConnector,
-  type McpAppRuntime, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppsOptions, type McpAppsContext,
+  type McpAppRuntime, type McpAppLauncher, type PreparedMcpApp, type McpAppRecord, type McpAppView, type McpAppToolInfo, type McpAppStatus, type McpAppsOptions, type McpAppsContext, type McpAppDevSpec, type McpAppDevStart,
 } from './mcp-apps.js';
 export { lintMcpApp, MCP_APP_SCHEMA_VERSION, type McpAppLintFinding } from './mcp-app-lint.js';
+export {
+  mcpAppDevTools, MCP_APP_DEV_TOOL_NAMES, MCP_APP_DEV_TOOL_PERMISSIONS, MCP_APP_DEV_LIMITS, includesMcpAppDevTools, mcpAppDevEnabled, mcpAppDevToolTimeouts, formatDevStart, formatFindings, formatCallResult,
+  type McpAppDevToolName,
+} from './mcp-app-dev.js';

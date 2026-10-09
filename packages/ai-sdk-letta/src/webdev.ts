@@ -245,6 +245,13 @@ export const DEV_KILL_SCRIPT = killMarked(DEV_MARK);
 export const BROWSER_KILL_SCRIPT = killMarked(BROWSER_MARK);
 /** Shell function: is a marked process alive? (exit status 0 when one is). */
 const DEV_ALIVE_FN = `alive() { for p in /proc/[0-9]*; do n=\${p#/proc/}; [ "$n" = "$$" ] && continue; if tr '\\0' '\\n' <"$p/environ" 2>/dev/null | grep -qx '${DEV_MARK}'; then return 0; fi; done; return 1; }`;
+/** Marks a dev app's server processes (`AI_SDK_LETTA_DEV_APP=<name>`). */
+const DEV_APP_MARK_KEY = 'AI_SDK_LETTA_DEV_APP';
+const devAppMark = (name: string) => `${DEV_APP_MARK_KEY}=${name}`;
+const DEV_APP_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
+/** Where a dev app's stderr goes inside the services container (stdout carries MCP). */
+export const devAppLogFile = (name: string) => `/tmp/devapp-${name}.log`;
+const aliveFn = (mark: string) => `alive() { for p in /proc/[0-9]*; do n=\${p#/proc/}; [ "$n" = "$$" ] && continue; if tr '\\0' '\\n' <"$p/environ" 2>/dev/null | grep -qx '${mark}'; then return 0; fi; done; return 1; }`;
 /** Prints yes or no: is the dev server alive? */
 const DEV_ALIVE_SCRIPT = `${DEV_ALIVE_FN}; if alive; then echo yes; else echo no; fi`;
 /** Waits until something answers on the port (any HTTP status), the server exits, or time runs out. Prints `ready <status>`, `exited` or `timeout <status on [::1]>`. */
@@ -535,12 +542,61 @@ export class WebDevServices {
       return { ok: false, text: `Dev server not running: ${reason}. It was stopped.\n${where}\nCommand: ${input.command}\nLog:\n${log || '(empty)'}` };
     });
   }
-  private async logTail(container: ServicesContainer, lines: number): Promise<string> {
-    const out = await container.exec(['tail', '-n', String(lines), DEV_LOG]).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  private async logTail(container: ServicesContainer, lines: number, file = DEV_LOG): Promise<string> {
+    const out = await container.exec(['tail', '-n', String(lines), file]).catch(() => ({ code: 1, stdout: '', stderr: '' }));
     // eslint-disable-next-line no-control-regex
     const text = out.stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
     return text.length > WEBDEV_LIMITS.maxLogChars ? `[… earlier output omitted …]\n${text.slice(-WEBDEV_LIMITS.maxLogChars)}` : text.trimEnd();
   }
+  /* ---------------- dev apps (MCP Apps dev mode) ---------------- */
+
+  /**
+   * The command line of a dev app's MCP server (`mcp_app_dev_start`): `command`
+   * in `cwd` (resolved like `dev_server_start`), with stdin and stdout attached
+   * (they carry MCP) and stderr appended to {@link devAppLogFile}. Its
+   * processes are marked, so {@link stopDevApp} stops them inside the
+   * container. Starts the container if needed. Fails when the folder is missing.
+   */
+  async devAppLine(name: string, input: { cwd?: string; command: string }, signal?: AbortSignal): Promise<{ ok: true; line: CommandLine; folder: string } | { ok: false; text: string }> {
+    if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'A dev app name is 1–20 lowercase letters, digits or "-", starting with a letter');
+    if (!input.command.trim() || input.command.length > WEBDEV_LIMITS.maxCommandChars) throw new SandboxError('command_invalid', `The command must have 1–${WEBDEV_LIMITS.maxCommandChars} characters`);
+    const folder = this.resolveFolder(input.cwd);
+    const base = this.sandbox.workingDirectory;
+    return this.hold(async () => {
+      const container = await this.ready(signal);
+      const check = await container.exec(['sh', '-c', `if [ -d "$1" ]; then echo dir; else echo missing; ls -1Ap "$2" 2>/dev/null | head -40; fi`, 'sh', folder, base]);
+      const lines = check.stdout.split('\n').filter(Boolean);
+      if (lines[0] !== 'dir') {
+        const listing = lines.slice(1);
+        return { ok: false as const, text: `Not started: the folder ${folder} does not exist.\ncwd ${JSON.stringify(input.cwd ?? '')} is resolved from this conversation's folder, ${base}${listing.length ? `, which contains:\n${listing.map(l => `  ${l}`).join('\n')}` : ' (empty)'}.\nPass the server's folder relative to ${base}, or an absolute path under /workspace.` };
+      }
+      // A server of the same name left from an earlier start is stopped first.
+      await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
+      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', [DEV_APP_MARK_KEY]: name };
+      const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+      const log = devAppLogFile(name);
+      const line = container.interactive(['env', '-i', ...assignments, '/bin/sh', '-c', 'exec 2>>"$3"; echo "--- $(date -u +%FT%TZ) start: $2" >&2; cd "$1" || exit 1; exec /bin/bash -c "$2"', 'sh', folder, input.command, log]);
+      return { ok: true as const, line, folder };
+    });
+  }
+  /** Stop a dev app's server processes inside the container (closing its `exec -i` client does not). */
+  async stopDevApp(name: string): Promise<void> {
+    const container = this.resolved;
+    if (!container || !DEV_APP_NAME_RE.test(name)) return;
+    await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
+  }
+  /** The last lines of a dev app's stderr (its log), and whether it runs. */
+  async devAppLogs(name: string, lines = 60): Promise<string> {
+    if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'Invalid dev app name');
+    const container = this.container ? await this.container.catch(() => undefined) : undefined;
+    if (!container) return `No services container is running, so no dev app "${name}" either (start it with mcp_app_dev_start).`;
+    return this.hold(async () => {
+      const alive = (await container.exec(['sh', '-c', `${aliveFn(devAppMark(name))}; if alive; then echo yes; else echo no; fi`])).stdout.trim() === 'yes';
+      const log = await this.logTail(container, Math.min(WEBDEV_LIMITS.maxLogLines, Math.max(1, lines)), devAppLogFile(name));
+      return `${alive ? `The dev app "${name}" server is running.` : `The dev app "${name}" server is not running.`}\n${log ? `stderr (${devAppLogFile(name)}):\n${log}` : '(no stderr output)'}`;
+    });
+  }
+
   /** Stop the dev server (the container keeps running). */
   async stopDevServer(): Promise<string> {
     const container = this.container ? await this.container.catch(() => undefined) : undefined;
