@@ -1,5 +1,15 @@
 # ai-sdk-letta
 
+## 0.22.0
+
+### Minor Changes
+
+- 12403e7: MCP Apps: fewer approval prompts. Calls from a dev app's views (the agent's own code, in its own container without network) now run without asking, audited as before; the Apps dialog has a per-conversation toggle to ask again (`McpApps.setDevViewsAsk`, `PATCH /v1/apps/:app/dev`). Approval cards of installed apps offer "Allow always" (this tool) and "Allow all from this app" (every tool that asks) to admins: `decide(…, { approved: true, always: 'tool' | 'app' })`. Grants are kept in the apps' settings file, listed in the Apps dialog with a Reset (`POST /v1/apps/:app/grants/reset`), never loosen a tool the definition denies, and never apply to the agent's own calls. `ui/message` and model-context consent still ask.
+
+### Patch Changes
+
+- 6411b50: MCP App views in the GUI: one live view per app view by default (earlier calls collapse to "Show this one"; a view open in the panel, full screen or picture-in-picture follows the newest call), with a per-app setting in Apps. Inline views no longer jitter: view heights are damped (±2px, oscillation hold, one update per frame), and a call finishing no longer reloads its view. `viewTools` now includes each tool's `resourceUri`.
+
 ## 0.21.1
 
 No changes in this release.
