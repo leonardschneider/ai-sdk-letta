@@ -17,6 +17,6 @@ export { TeamDirectory, tailscaleIdentity, decodeHeaderValue, servedOrigin, auth
 export { DecisionBoard, DecisionConflict, DECISION_BOARD_LIMITS, type DecisionRecord, type DecisionStatus, type DecisionPerson, type PublicDecision } from './decisions.js';
 export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, viewOnlyAllowed, VIEW_ONLY_READS, type AdoptionBackend, type AdoptionRegistryOptions, type HostFactory } from './adoption.js';
 export { LiveConversations, LIVE_LIMITS, type LiveFs, type LiveOptions } from './live.js';
-export { AppGate, APP_GATE_LIMITS, sandboxProxyHtml, sandboxOrigin, contentText, publicApproval, type AppGateOptions, type AppInstance, type AppApproval, type AppApprovalKind, type AppAuditEvent } from './mcp-apps.js';
+export { AppGate, APP_GATE_LIMITS, VIEW_STATE_EXTENSION, sandboxProxyHtml, sandboxOrigin, contentText, publicApproval, type AppGateOptions, type AppInstance, type AppApproval, type AppApprovalKind, type AppAuditEvent } from './mcp-apps.js';
 export { ProjectFolder, PROJECT_LIMITS, PROJECT_DEFAULT_IGNORES, type ProjectEntry, type ProjectListing, type ProjectStatus } from './project.js';
 export { localModels, modelOptions, modelSettings, providerLabel, anthropicOAuth, publicModel, effortOf, EFFORT_ORDER, EFFORT_VALUE, MODEL_HANDLE, MODEL_CACHE_MS, type ModelOption, type ModelEffort, type PublicModel } from './models.js';

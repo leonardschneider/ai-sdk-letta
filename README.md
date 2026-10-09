@@ -1248,6 +1248,43 @@ MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
 - Dev apps live as long as the server: after a restart, ask the agent to
   start them again.
 
+#### App state
+
+App servers and views keep their state across restarts and reloads:
+
+- **Server state (`STATE_DIR`).** Every app server gets a folder that
+  survives restarts, named in `STATE_DIR`. Dev apps: `/workspace/.app-state/<name>`
+  in the services container, under the conversation's folder on the host
+  (created before each start; `mcp_app_dev_start` shows it). Installed apps:
+  `<state>/mcp-apps/<definition>/state/<app>` on the host, mounted read-write
+  at `/state` (`STATE_DIR=/state`), per agent and app; kept across restarts
+  and upgrades, and when the app is removed from the definition (delete the
+  folder to clear it). Apps should save games or documents there as files and
+  load them on start: memory is lost on every restart or reload.
+- **View state (`ui/state/save`, a host extension).** The host advertises
+  `experimental: { "io.ai-sdk-letta/viewState": {} }` in its host
+  capabilities, so a view can feature-detect it and still work in other
+  hosts. The view saves any JSON value with the request
+  `ui/state/save` `{ state }` (at most 64 KB serialized and 10 per second
+  per view; errors otherwise). The server keeps it per app and tool call in
+  `<state>/mcp-apps/<definition>/view-state.json` (private, atomic writes),
+  next to the call records, and audits `state_saved` with the size only. On
+  `ui/initialize` the view finds it in the host context under
+  `hostContext["io.ai-sdk-letta/viewState"].state`. A call with no state of
+  its own inherits the latest one saved by the same app and view in the
+  conversation, so a board survives across calls (and the single live view
+  follows the newest call with its state). Saving never asks: the state never
+  reaches the agent and is treated as untrusted. A view that wants the agent
+  to know something sends `ui/update-model-context`.
+
+```js
+const K = 'io.ai-sdk-letta/viewState';
+await app.connect();
+const supported = !!app.getHostCapabilities()?.experimental?.[K];
+let state = app.getHostContext()?.[K]?.state ?? { count: 0 };
+const save = () => supported && app.request({ method: 'ui/state/save', params: { state } }, z.object({}));
+```
+
 What a definition controls, and when:
 
 | Field | Applied |

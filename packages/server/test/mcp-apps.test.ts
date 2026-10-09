@@ -8,7 +8,7 @@ import { request } from 'node:http';
 import type { SDKMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
 import { LettaAgent, McpApps, ToolInteractions, defineAgent, mcpAppsDirectory, resolveMcpApps, statePaths, type ContentSource } from 'ai-sdk-letta';
-import { AppGate, ThreadRuntime, agentInfo, sandboxProxyHtml, startPreviewServer, startTeamServer, type RuntimeHost } from '../src/index.js';
+import { APP_GATE_LIMITS, AppGate, ThreadRuntime, agentInfo, sandboxProxyHtml, startPreviewServer, startTeamServer, type RuntimeHost } from '../src/index.js';
 import { tools } from './fixtures.js';
 
 const SERVER = join(import.meta.dirname, '..', '..', 'ai-sdk-letta', 'test', 'fixtures', 'mcp-app-server.mjs');
@@ -236,6 +236,52 @@ test('ui/update-model-context: asks on first use, keeps the latest value per vie
     assert.doesNotMatch(f.turns[0]!.reminder ?? '', /v1|v2/);
     assert.ok(f.turns[0]!.sources?.some(s => s.kind === 'app'));
     assert.deepEqual(f.gate.waitingContext('owner', f.thread), [], 'consumed');
+  } finally { await f.cleanup(); }
+});
+
+test('ui/state/save: kept per call without asking, restored on the next instance (also after a restart), inherited by later calls, capped, rate-limited, never sent to the agent', async () => {
+  const f = await fixture();
+  try {
+    const { instance } = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { instance: string };
+    const saved = f.gate.saveState('owner', instance, { state: { counter: 3, secret: 'view-only-7f3a' } });
+    assert.deepEqual(saved, { result: {} }, 'no approval');
+    assert.deepEqual(f.gate.pending('owner', f.thread), [], 'nothing asked');
+    // The next instance of the call starts with it (the app page puts it in the host context on ui/initialize).
+    const next = await f.gate.instance('owner', f.thread, { toolCallId: 'call-1' }) as { viewState?: unknown; viewStateFrom?: string };
+    assert.deepEqual(next.viewState, { counter: 3, secret: 'view-only-7f3a' });
+    assert.equal(next.viewStateFrom, undefined);
+    // Another call of the same view (no state of its own) inherits the latest one.
+    const conversationId = f.runtime.conversationOf('owner', f.thread)!;
+    await f.apps.callAsAgent('test__show', { label: 'later' }, { conversationId, toolCallId: 'call-2' });
+    const later = await f.gate.instance('owner', f.thread, { toolCallId: 'call-2' }) as { instance: string; viewState?: unknown; viewStateFrom?: string };
+    assert.deepEqual(later.viewState, { counter: 3, secret: 'view-only-7f3a' });
+    assert.equal(later.viewStateFrom, 'call-1');
+    // Kept on disk: a new McpApps on the same directory (a restart) restores it.
+    const restarted = new McpApps([], { directory: join(f.directory, 'apps') });
+    assert.deepEqual(restarted.viewStates.restore(f.apps.records.get('call-1', [conversationId])!)?.state, { counter: 3, secret: 'view-only-7f3a' });
+    // Invalid, too large, too fast.
+    assert.equal((f.gate.saveState('owner', instance, {}) as { error: { code: number } }).error.code, -32602);
+    const big = f.gate.saveState('owner', later.instance, { state: 'x'.repeat(64 * 1024) }) as { error: { message: string } };
+    assert.match(big.error.message, /limit is 65536/);
+    let refused = 0;
+    for (let i = 0; i < 15; i++) if ('error' in f.gate.saveState('owner', later.instance, { state: { i } })) refused++;
+    assert.ok(refused >= 5, `rate-limited (${refused} refused)`);
+    assert.equal(APP_GATE_LIMITS.stateSavesPerSecond, 10);
+    // Audited with the size only.
+    const audit = readFileSync(join(f.directory, 'audit.ndjson'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { event: string; outcome?: string; detail?: string });
+    const saves = audit.filter(e => e.event === 'state_saved');
+    assert.equal(saves[0]!.detail, `${JSON.stringify({ counter: 3, secret: 'view-only-7f3a' }).length} bytes`);
+    assert.ok(saves.some(e => e.outcome === 'refused:state_too_large'));
+    assert.ok(!audit.some(e => JSON.stringify(e).includes('view-only-7f3a')), 'the state itself is not audited');
+    // Never sent to the agent: the next turn has no trace of it.
+    await f.runtime.start('owner', { id: randomUUID(), threadId: f.thread, text: 'next', parentRunId: null });
+    await until(() => f.turns.length === 1 && f.turns[0]!.text.includes('next'));
+    assert.doesNotMatch(f.turns[0]!.text, /view-only-7f3a|counter/);
+    assert.doesNotMatch(f.turns[0]!.reminder ?? '', /view-only-7f3a/);
+    assert.deepEqual(f.gate.waitingContext('owner', f.thread), []);
+    // Closed instances save nothing.
+    f.gate.closeInstance('owner', instance);
+    assert.throws(() => f.gate.saveState('owner', instance, { state: 1 }), /not_found/);
   } finally { await f.cleanup(); }
 });
 

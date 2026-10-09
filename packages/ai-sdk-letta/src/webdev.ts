@@ -254,6 +254,8 @@ const DEV_APP_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
 const MCP_APP_HTTP_READY_MS = 60_000;
 /** Where a dev app's stderr goes inside the services container (stdout carries MCP). */
 export const devAppLogFile = (name: string) => `/tmp/devapp-${name}.log`;
+/** A dev app's persistent state folder (`STATE_DIR`): under the conversation's `/workspace`, kept on the host across restarts. */
+export const devAppStateDir = (name: string) => `/workspace/.app-state/${name}`;
 const aliveFn = (mark: string) => `alive() { for p in /proc/[0-9]*; do n=\${p#/proc/}; [ "$n" = "$$" ] && continue; if tr '\\0' '\\n' <"$p/environ" 2>/dev/null | grep -qx '${mark}'; then return 0; fi; done; return 1; }`;
 /** Prints yes or no: is the dev server alive? */
 const DEV_ALIVE_SCRIPT = `${DEV_ALIVE_FN}; if alive; then echo yes; else echo no; fi`;
@@ -564,7 +566,7 @@ export class WebDevServices {
    * processes are marked, so {@link stopDevApp} stops them inside the
    * container. Starts the container if needed. Fails when the folder is missing.
    */
-  async devAppLine(name: string, input: { cwd?: string; command: string }, signal?: AbortSignal): Promise<{ ok: true; line: CommandLine; folder: string } | { ok: false; text: string }> {
+  async devAppLine(name: string, input: { cwd?: string; command: string }, signal?: AbortSignal): Promise<{ ok: true; line: CommandLine; folder: string; stateDir: string } | { ok: false; text: string }> {
     if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'A dev app name is 1–20 lowercase letters, digits or "-", starting with a letter');
     if (!input.command.trim() || input.command.length > WEBDEV_LIMITS.maxCommandChars) throw new SandboxError('command_invalid', `The command must have 1–${WEBDEV_LIMITS.maxCommandChars} characters`);
     const folder = this.resolveFolder(input.cwd);
@@ -579,11 +581,13 @@ export class WebDevServices {
       }
       // A server of the same name left from an earlier start is stopped first.
       await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
-      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', [DEV_APP_MARK_KEY]: name };
+      const stateDir = devAppStateDir(name);
+      await container.exec(['mkdir', '-p', stateDir], { timeoutMs: 15_000 });
+      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', STATE_DIR: stateDir, [DEV_APP_MARK_KEY]: name };
       const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
       const log = devAppLogFile(name);
       const line = container.interactive(['env', '-i', ...assignments, '/bin/sh', '-c', 'exec 2>>"$3"; echo "--- $(date -u +%FT%TZ) start: $2" >&2; cd "$1" || exit 1; exec /bin/bash -c "$2"', 'sh', folder, input.command, log]);
-      return { ok: true as const, line, folder };
+      return { ok: true as const, line, folder, stateDir };
     });
   }
   /**
@@ -597,7 +601,7 @@ export class WebDevServices {
    * server's port (5173), the egress proxy's (3128), another dev app's port,
    * and a port something else already listens on.
    */
-  async devAppHttpStart(name: string, input: { cwd?: string; command: string; port: number; path: string }, signal?: AbortSignal): Promise<{ ok: true; endpoint: McpAppHttpEndpoint; folder: string } | { ok: false; text: string }> {
+  async devAppHttpStart(name: string, input: { cwd?: string; command: string; port: number; path: string }, signal?: AbortSignal): Promise<{ ok: true; endpoint: McpAppHttpEndpoint; folder: string; stateDir: string } | { ok: false; text: string }> {
     if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'A dev app name is 1–20 lowercase letters, digits or "-", starting with a letter');
     if (!input.command.trim() || input.command.length > WEBDEV_LIMITS.maxCommandChars) throw new SandboxError('command_invalid', `The command must have 1–${WEBDEV_LIMITS.maxCommandChars} characters`);
     if (!Number.isInteger(input.port) || input.port < 1024 || input.port > 65535) throw new SandboxError('command_invalid', 'The port must be an integer from 1024 to 65535');
@@ -620,7 +624,9 @@ export class WebDevServices {
       await container.exec(['sh', '-c', killMarked(devAppMark(name))], { timeoutMs: 15_000 }).catch(() => undefined);
       const free = (await container.exec(['node', '-e', PORT_WAIT_SCRIPT, 'free', String(input.port)], { timeoutMs: 15_000 })).stdout.trim();
       if (free === 'busy') return { ok: false as const, text: `Not started: something already listens on 127.0.0.1:${input.port} in the services container (another server you started?). Stop it, or choose another port.` };
-      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', PORT: String(input.port), HOST: '127.0.0.1', [DEV_APP_MARK_KEY]: name };
+      const stateDir = devAppStateDir(name);
+      await container.exec(['mkdir', '-p', stateDir], { timeoutMs: 15_000 });
+      const env = { ...sandboxEnvironment(this.sandbox.config), CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', PORT: String(input.port), HOST: '127.0.0.1', STATE_DIR: stateDir, [DEV_APP_MARK_KEY]: name };
       const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
       const log = devAppLogFile(name);
       const started = await container.exec(['env', '-i', ...assignments, '/bin/sh', '-c', 'exec >>"$3" 2>&1 </dev/null; echo "--- $(date -u +%FT%TZ) start (http :$4): $2"; cd "$1" || exit 1; exec /bin/bash -c "$2"', 'sh', folder, input.command, log, String(input.port)], { detach: true, timeoutMs: 15_000 });
@@ -637,7 +643,7 @@ export class WebDevServices {
       const entry = { port: input.port, mux: tunnel.mux, close: tunnel.close };
       this.devAppHttp.set(name, entry);
       tunnel.mux.onClose(() => { if (this.devAppHttp.get(name) === entry) this.devAppHttp.delete(name); });
-      return { ok: true as const, endpoint: tunnel.endpoint, folder };
+      return { ok: true as const, endpoint: tunnel.endpoint, folder, stateDir };
     });
   }
   /** The port of a running Streamable HTTP dev app (tests and status). */

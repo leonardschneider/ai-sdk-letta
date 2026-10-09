@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { splitMCPAppTools } from '@ai-sdk/mcp';
 import {
-  MCP_APPS_CONTEXT, MCP_APPS_IMAGE, McpApps, McpAppRecords, ProcessStdioTransport, SANDBOX_TOOL_PERMISSIONS, agentToolName, appSource, appVisible, createToolBridge, defineAgent, grantedCsp, mcpAppCsp, mcpAppModelOutput, mcpAppRunArgs,
+  MCP_APPS_CONTEXT, MCP_APPS_IMAGE, MCP_APP_LIMITS, MCP_APP_STATE_MOUNT, McpApps, McpAppRecords, McpAppViewStates, ProcessStdioTransport, SANDBOX_TOOL_PERMISSIONS, agentToolName, appSource, appVisible, createToolBridge, defineAgent, grantedCsp, mcpAppCsp, mcpAppModelOutput, mcpAppRunArgs,
   modelVisible, parseProvenanceTrailers, prepareMcpApp, provenanceTrailers, resolveMcpApps, sandboxTools, toolResourceUri, toolVisibility, turnProvenance, withSource,
-  type McpAppLauncher, type McpToolDefinition,
+  type McpAppLauncher, type McpToolDefinition, type PreparedMcpApp,
 } from '../src/index.js';
 
 const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), `ai-sdk-letta-${prefix}-`));
@@ -350,4 +350,74 @@ test('allow always: a grant turns ask into allow for views (not the agent), pers
     assert.equal(apps.policy('test', 'record'), 'deny');
     await assert.rejects(apps.callAsApp('test', 'record', {}), (e: Error & { code?: string }) => e.code === 'tool_denied');
   } finally { await apps.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+/* ------------------------------------------------------------------ */
+/* App state: STATE_DIR (servers) and saved view state                  */
+/* ------------------------------------------------------------------ */
+
+test('state: installed apps get a persistent /state mount (read-write) and STATE_DIR=/state', () => {
+  const args = mcpAppRunArgs('docker', 'n', { image: MCP_APPS_IMAGE, folder: '/s/pkg', stateDir: '/s/mcp-apps/agent/state/chess', labels: {} }).join(' ');
+  assert.ok(args.includes(`type=bind,src=/s/mcp-apps/agent/state/chess,dst=${MCP_APP_STATE_MOUNT} `), args);
+  assert.doesNotMatch(args, /dst=\/state,readonly/);
+  const apple = mcpAppRunArgs('apple-container', 'n', { image: MCP_APPS_IMAGE, stateDir: '/s/x', labels: {} }).join(' ');
+  assert.ok(apple.includes('type=bind,src=/s/x,dst=/state'));
+  assert.equal(MCP_APP_STATE_MOUNT, '/state');
+});
+
+test('state: the launcher gets <directory>/state/<app>, kept across restarts (new McpApps) and when the app is removed', async () => {
+  const dir = tmp('apps-state');
+  const seen: PreparedMcpApp[] = [];
+  const launcher: McpAppLauncher = async app => { seen.push(app); return { line: { command: process.execPath, args: [SERVER] }, stop: async () => {} }; };
+  const configs = resolveMcpApps([{ id: 'test', command: ['node', 'server.mjs'] }]);
+  try {
+    const first = new McpApps(configs, { directory: join(dir, 'mcp-apps', 'agent'), launcher });
+    await first.ready();
+    const stateDir = join(dir, 'mcp-apps', 'agent', 'state', 'test');
+    assert.equal(seen[0]!.stateDir, stateDir);
+    assert.ok(existsSync(stateDir));
+    writeFileSync(join(stateDir, 'board.json'), '{"moves":3}');
+    await first.close();
+    // Restarted (same definition): the same folder, the file still there.
+    const second = new McpApps(configs, { directory: join(dir, 'mcp-apps', 'agent'), launcher });
+    await second.ready();
+    assert.equal(seen[1]!.stateDir, stateDir);
+    assert.equal(readFileSync(join(stateDir, 'board.json'), 'utf8'), '{"moves":3}');
+    await second.close();
+    // The app removed from the definition: its state is kept (cleared only by deleting the folder).
+    const third = new McpApps([], { directory: join(dir, 'mcp-apps', 'agent'), launcher });
+    await third.ready(); await third.close();
+    assert.ok(existsSync(join(stateDir, 'board.json')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('view state: saved per call (atomic, private), restored after a restart, inherited by later calls of the same view, capped', () => {
+  const dir = tmp('view-state');
+  try {
+    const file = join(dir, 'view-state.json');
+    const states = new McpAppViewStates(file);
+    const call = (toolCallId: string, extra: Partial<{ conversationId: string; app: string; resourceUri: string }> = {}) => ({ conversationId: 'c1', toolCallId, app: 'chess', resourceUri: 'ui://chess/board.html', ...extra });
+    assert.equal(states.restore(call('a')), undefined, 'nothing saved yet');
+    assert.deepEqual(states.save(call('a'), { n: 1 }), { bytes: 7 });
+    states.save(call('a'), { n: 2 });
+    assert.deepEqual(states.restore(call('a')), { state: { n: 2 } });
+    // A restart reads the file again.
+    const again = new McpAppViewStates(file);
+    assert.deepEqual(again.restore(call('a')), { state: { n: 2 } });
+    assert.equal(again.size, 1);
+    // Fallback: a new call without its own state inherits the latest of the same app and view in its conversation.
+    assert.deepEqual(again.restore(call('b')), { state: { n: 2 }, inherited: 'a' });
+    again.save(call('b'), { n: 5 });
+    assert.deepEqual(again.restore(call('c')), { state: { n: 5 }, inherited: 'b' });
+    assert.deepEqual(again.restore(call('a')), { state: { n: 2 } }, 'its own state wins');
+    // Never across conversations, apps or views.
+    assert.equal(again.restore(call('d', { conversationId: 'c2' })), undefined);
+    assert.equal(again.restore(call('d', { app: 'other' })), undefined);
+    assert.equal(again.restore(call('d', { resourceUri: 'ui://chess/other.html' })), undefined);
+    // Over 64 KB: refused, nothing changes.
+    assert.throws(() => again.save(call('a'), { blob: 'x'.repeat(MCP_APP_LIMITS.maxViewStateBytes) }), /state_too_large|limit/);
+    assert.deepEqual(again.restore(call('a')), { state: { n: 2 } });
+    assert.equal(MCP_APP_LIMITS.maxViewStateBytes, 64 * 1024);
+    if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

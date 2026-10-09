@@ -3,7 +3,7 @@ import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client';
 import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
-import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, retryInstance, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
+import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, retryInstance, hostCapabilities, VIEW_STATE_SAVE, viewStateContext, viewStateParams, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
 
 /**
  * One MCP App view (spec 2026-01-26): the view's HTML in a sandbox proxy
@@ -125,15 +125,14 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
         if (action === 'message') callbacks.current.onSent();
         return answer.result as T;
       };
-      bridge = new AppBridge(null, { name: 'ai-sdk-letta', version: '1' }, {
-        serverTools: {}, serverResources: {}, logging: {}, openLinks: {}, message: { text: {} }, updateModelContext: { text: {}, structuredContent: {} },
-        sandbox: { csp: instance.csp },
-      }, { hostContext: hostContext({ theme: theme(), displayMode: modeRef.current, placement, width: width(), ...(placement === 'panel' ? { height: box.current?.clientHeight ?? 600 } : {}), toolCallId, tool: instance.tool, locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, touch: matchMedia('(pointer: coarse)').matches }) as never });
+      bridge = new AppBridge(null, { name: 'ai-sdk-letta', version: '1' }, hostCapabilities(instance.csp), { hostContext: { ...viewStateContext(instance), ...hostContext({ theme: theme(), displayMode: modeRef.current, placement, width: width(), ...(placement === 'panel' ? { height: box.current?.clientHeight ?? 600 } : {}), toolCallId, tool: instance.tool, locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, touch: matchMedia('(pointer: coarse)').matches }) } as never });
       bridgeRef.current = bridge;
       bridge.oncalltool = params => relay('call', params);
       bridge.onreadresource = params => relay('read', params);
       bridge.onmessage = async params => { await relay('message', params); return {}; };
       bridge.onupdatemodelcontext = async params => { await relay('context', params); return {}; };
+      // The view's own state, kept by the server for this call (never shown to the agent).
+      bridge.setRequestHandler(VIEW_STATE_SAVE, { params: viewStateParams }, async params => relay<Record<string, never>>('state', { state: params.state }).then(() => ({})));
       bridge.onloggingmessage = params => { void api(`/v1/apps/instances/${instance.instance}/log`, params).catch(() => {}); };
       bridge.onopenlink = async ({ url }) => {
         const href = openableLink(url, location.origin);
