@@ -326,6 +326,12 @@ function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefine
   return Promise.race([promise.catch(() => undefined), new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), ms); timer.unref?.(); })]).finally(() => clearTimeout(timer));
 }
 
+/** Key-like tokens (API keys, bearer tokens) hidden from logged and recorded error text. */
+export function redactSecrets(text: string): string {
+  return text.replace(/\b(sk|pk|rk|xox[abpr]|ghp|gho|github_pat|glpat|AKIA|AIza)[-_A-Za-z0-9]{12,}/g, '[redacted]')
+    .replace(/(bearer\s+|api[-_ ]?key["'=:\s]+|x-api-key["'=:\s]+|authorization["'=:\s]+)[^\s"',}]{8,}/gi, '$1[redacted]');
+}
+
 /** Transport observations for reconnects/failed-turn inspection only, never agent input. */
 export function displayRun(run: Run): UIMessage[] {
   const parts: UIMessage['parts'] = [];
@@ -1694,8 +1700,10 @@ export class ThreadRuntime {
         // Why: the harness's error (with its HTTP status and the provider's message), else what the runtime saw.
         if (code === 'runtime_failed') {
           const cause = failure ?? (outcome?.error ? new LettaTurnError(outcome.error, false) : error);
-          run.error = describeTurnError(cause).slice(0, 1000);
-          try { this.log(`[turn-failed] ${this.logLabel} ${run.threadId} ${code}: ${run.error.slice(0, 500)}`); } catch { /* logging never fails a turn */ }
+          const described = redactSecrets(describeTurnError(cause));
+          // The run record (shown in the app) keeps only what Letta reported; any other exception's text goes to the server log only.
+          if (cause instanceof LettaTurnError) run.error = described.slice(0, 1000);
+          try { this.log(`[turn-failed] ${this.logLabel} ${run.threadId} ${code}: ${described.slice(0, 600)}`); } catch { /* logging never fails a turn */ }
         }
         // Rejected before the model produced anything, and the backend confirmed it is idle: the outcome is known
         // (nothing ran), so the conversation stays usable; the error is shown.

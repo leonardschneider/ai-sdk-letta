@@ -101,10 +101,26 @@ export class LettaTurnError extends Error {
   override readonly name = 'LettaTurnError';
   constructor(readonly info: TurnErrorInfo, readonly beforeOutput: boolean) { super(info.message); }
 }
+/**
+ * The HTTP status and the provider's own message in a harness error text,
+ * e.g. `400 {"type":"error","error":{"type":"invalid_request_error","message":"..."}}`
+ * (possibly nested in JSON, with escaped quotes).
+ */
+export function providerError(text: string): { status?: number; message?: string } {
+  const flat = text.replace(/\\+"/g, '"');
+  const status = /(?:^|[\s"'])([45]\d\d) \{/.exec(flat)?.[1];
+  // The innermost provider message: the "message" right after an error "type" other than the harness's own wrapper.
+  const typed = [...flat.matchAll(/"type"\s*:\s*"([a-z_]+)"\s*,\s*"message"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].filter(m => m[1] !== 'local_backend_error' && m[1] !== 'error');
+  const message = typed.at(-1)?.[2];
+  return { ...(status ? { status: Number(status) } : {}), ...(message ? { message: bounded(message, 500) } : {}) };
+}
 /** A short, single-line description of why a turn failed (for logs and run records). */
 export function describeTurnError(error: unknown, max = ERROR_TEXT_MAX): string {
   const info = error instanceof LettaTurnError ? error.info : undefined;
-  const parts = info ? [info.code && info.code !== 'error' ? info.code : info.stopReason && info.stopReason !== 'error' ? info.stopReason : undefined, info.status ? `HTTP ${info.status}` : undefined, info.message, info.detail && info.detail !== info.message ? info.detail : undefined]
+  const provider = info ? providerError(`${info.message} ${info.detail ?? ''}`) : {};
+  const status = info?.status ?? provider.status;
+  // The provider's message first (readable), then the harness's full text.
+  const parts = info ? [info.code && info.code !== 'error' ? info.code : info.stopReason && info.stopReason !== 'error' ? info.stopReason : undefined, status ? `HTTP ${status}` : undefined, provider.message, info.message, info.detail && info.detail !== info.message ? info.detail : undefined]
     : [error instanceof Error ? `${error.name !== 'Error' ? `${error.name}: ` : ''}${error.message}` : typeof error === 'string' ? error : undefined];
   const cause = !info && error instanceof Error && error.cause ? describeTurnError(error.cause, max) : '';
   const text = [...parts, cause || undefined].filter((p): p is string => !!p && !!p.trim()).join(' · ').replace(/\s+/g, ' ').trim() || 'unknown error';
