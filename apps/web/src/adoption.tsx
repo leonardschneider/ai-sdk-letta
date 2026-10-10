@@ -47,7 +47,7 @@ const when = (value?: string) => {
  * adopted agents: switch agents, add one, remove the current one, or update
  * its instructions.
  */
-export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly, onModel }: { agents: readonly AgentInfo[]; current: AgentInfo; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void; onModel?(agent: AgentInfo): void }) {
+export function LocalAgentSwitcher({ agents, current, activity, onSwitch, onAdd, onRemove, onInstructions, onProject, onTools, onViewOnly, onModel }: { agents: readonly AgentInfo[]; current: AgentInfo; activity?: readonly { id: string; state: 'idle' | 'working' | 'waiting' }[]; onSwitch(id: string): void; onAdd(): void; onRemove(agent: AgentInfo): void; onInstructions(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onViewOnly?(agent: AgentInfo, value: boolean): void; onModel?(agent: AgentInfo): void }) {
   const viewOnly = !!current.viewOnly;
   const handle = current.adopted?.model ?? current.model;
   const effort = current.adopted?.effort ?? current.effort;
@@ -55,7 +55,7 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
   return <DropdownMenu.Root>
     <DropdownMenu.Trigger asChild>
       <button type="button" className="agent-switch" aria-label={`Agent: ${current.name}. Switch or add agents`} title={model ? `${current.name} · ${model}` : undefined}>
-        <span className="brand-mark" aria-hidden="true">✳︎</span><span className="agent-switch-name">{current.name}</span><ChevronDown size={15} className="agent-switch-chev" aria-hidden="true"/>
+        <span className="brand-mark" aria-hidden="true">✳︎</span><span className="agent-switch-name">{current.name}</span>{activity?.some(a => a.id !== current.id && a.state !== 'idle') && <span className="activity-dot agent-activity" data-state={activity.some(a => a.id !== current.id && a.state === 'waiting') ? 'waiting' : 'working'} title="Another agent is busy"/>}<ChevronDown size={15} className="agent-switch-chev" aria-hidden="true"/>
       </button>
     </DropdownMenu.Trigger>
     <DropdownMenu.Portal>
@@ -65,7 +65,7 @@ export function LocalAgentSwitcher({ agents, current, onSwitch, onAdd, onRemove,
         <DropdownMenu.RadioGroup value={current.id} onValueChange={id => { if (id !== current.id) onSwitch(id); }}>
           {agents.map(agent => <DropdownMenu.RadioItem key={agent.id} value={agent.id} className="menu-item">
             <span className="menu-check" aria-hidden="true"><DropdownMenu.ItemIndicator><Check size={15}/></DropdownMenu.ItemIndicator></span>
-            <span className="agent-menu-name">{agent.name}</span>{agent.adopted && <span className="role-badge small" title="An existing Letta agent, opened in place">Letta</span>}{agent.viewOnly && <span className="role-badge small" title="View only: it works in Letta Code">View only</span>}
+            <span className="agent-menu-name">{agent.name}</span>{(() => { const state = activity?.find(a => a.id === agent.id)?.state; return state && state !== 'idle' ? <span className="activity-dot agent-activity" data-state={state} title={state === 'waiting' ? 'Needs you' : 'Working'}><span className="sr-only">{state === 'waiting' ? 'needs you' : 'working'}</span></span> : null; })()}{agent.adopted && <span className="role-badge small" title="An existing Letta agent, opened in place">Letta</span>}{agent.viewOnly && <span className="role-badge small" title="View only: it works in Letta Code">View only</span>}
           </DropdownMenu.RadioItem>)}
         </DropdownMenu.RadioGroup>
         <DropdownMenu.Separator className="menu-sep"/>
