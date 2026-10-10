@@ -1380,6 +1380,12 @@ button.job-last:hover { color: var(--text); }
 .job-image { display: block; padding: 0; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: zoom-in; overflow: hidden; max-width: 100%; justify-self: start; }
 .job-image img { display: block; max-width: 100%; max-height: 320px; height: auto; }
 .job-result { margin: 0; font-size: 13.5px; color: var(--text); }
+.job-card[data-kind="command"] .job-goal { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-weight: 500; font-size: 13px; }
+.job-details { display: grid; gap: 6px; min-width: 0; }
+.job-details-toggle { justify-self: start; display: inline-flex; align-items: center; gap: 4px; padding: 2px 0; border: 0; background: none; color: var(--text-2); font: inherit; font-size: 12.5px; cursor: pointer; }
+.job-details-toggle:hover { color: var(--text); }
+.job-details-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.job-details-body { min-width: 0; }
 .activity-job { display: grid; gap: 1px; min-width: 0; }
 .activity-job-meta { font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .activity-detail.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

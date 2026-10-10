@@ -12,7 +12,7 @@ import { AppToolLine } from './apps.js';
 import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
-import { JobCard } from './jobs.js';
+import { CommandJobCard, JobCard, useCommandJob } from './jobs.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 import { EditAction, EditBubble, RewindContext } from './rewind.js';
 import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
@@ -250,8 +250,20 @@ function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'job_start') return <JobCard toolCallId={props.toolCallId} result={props.result}/>;
   if (props.toolName === 'job_update' || props.toolName === 'job_end') return null;
   // MCP App tools with a view: the view under the line (the line itself keeps its details).
+  // A long command: its live card (output, progress) in place of the line.
+  if (COMMAND_TOOLS.has(props.toolName)) return <CommandPart {...props}/>;
   if (isAppToolName(props.toolName)) return <AppToolLine toolCallId={props.toolCallId} toolName={props.toolName} result={props.result} {...(props.isError !== undefined ? { isError: props.isError } : {})} fallback={<ToolLine {...props} detailsLabel="What the agent got"/>}/>;
   return <ToolLine {...props}/>;
+}
+
+function CommandPart(props: ToolPartProps) {
+  const job = useCommandJob(props.toolCallId);
+  if (!job) return <ToolLine {...props}/>;
+  const phase = phaseOf(props.result, props.isError);
+  return <CommandJobCard job={job} details={<div data-tool-call-id={props.toolCallId} className="tool-detail">
+    <CommandDetail toolName={props.toolName} args={parseArgs(props.argsText)} result={props.result} phase={phase}/>
+    <Technical toolName={props.toolName} argsText={props.argsText} result={props.result}/>
+  </div>}/>;
 }
 
 function WebSearchPart({ toolCallId, argsText, result }: ToolPartProps) {

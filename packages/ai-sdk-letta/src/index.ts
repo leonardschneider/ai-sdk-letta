@@ -68,11 +68,12 @@ export {
   type RequestDecisionInput, type RequestDecisionOutput, type CancelDecisionInput, type CancelDecisionOutput,
 } from './decisions.js';
 export {
-  jobTools, jobStartTool, jobUpdateTool, jobEndTool, jobsEnabled, parseJobStart, parseJobUpdate, parseJobEnd, readJobImage, sniffJobImage, jobLine, JobError,
+  jobTools, jobStartTool, jobUpdateTool, jobEndTool, jobsEnabled, parseJobStart, parseJobUpdate, parseJobEnd, readJobImage, sniffJobImage, jobLine, agentJobActive, JobError,
   JOB_START_TOOL, JOB_UPDATE_TOOL, JOB_END_TOOL, JOB_TOOL_NAMES, JOB_TOOL_PERMISSIONS, JOBS_CONTEXT, JOB_LIMITS, JOB_IMAGE_TYPES, JOBS_NOTE,
   type JobDesk, type JobContext, type JobPaths, type JobTurn, type JobImage, type JobImageType, type JobStatus, type JobStartRequest, type JobUpdateRequest, type JobEndRequest,
   type JobStartInput, type JobUpdateInput, type JobEndInput, type JobOutput, type JobToolName,
 } from './jobs.js';
+export { commandJob, commandGoal, parseProgressLine, visibleLine, OutputLines, COMMAND_PROGRESS, type CommandJob, type CommandEnd, type CommandOutputChunk, type ParsedProgress } from './command-progress.js';
 export { adfToMarkdown, markdownToAdf, spliceMarkdown, splitBlocks, blockMarkdown, protectedElements, lostElements, validateAdf, isAdfDocument, adfHash, type AdfDocument, type AdfNode, type AdfMark, type MarkdownOptions, type ProtectedElement, type SpliceChange, type SpliceResult } from './adf.js';
 export { ADF_SCHEMA, ADF_SCHEMA_VERSION } from './adf-schema.js';
 export { CredentialStore, publicStatus, LOCAL_USER_ID, LOCAL_ACTOR, ACTOR_CONTEXT, type AtlassianCredentials, type AtlassianStatus, type TurnActor } from './credentials.js';

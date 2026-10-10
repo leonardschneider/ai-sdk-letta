@@ -5,6 +5,7 @@ import { homedir, hostname, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { tool, jsonSchema, type Experimental_SandboxSession, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
+import { COMMAND_PROGRESS, commandJob, type CommandJob, type CommandOutputChunk } from './command-progress.js';
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -500,7 +501,77 @@ export function formatCommandResult(result: CommandResult, limit: number = SANDB
  * running in the sandbox.
  * @throws {SandboxError} `cwd_not_found` or `sandbox_unavailable`; rethrows aborts
  */
-export async function runSandboxCommand(session: Experimental_SandboxSession, options: { command: string; cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal; captureBytes?: number }): Promise<CommandResult> {
+/** Live output of a running command: called with what it printed since the last call (UI only; never changes the result). */
+export type CommandOutputListener = (chunk: CommandOutputChunk) => void | Promise<void>;
+/** When and how often live output is read: from `delayMs` after the start, every `intervalMs`. */
+export type CommandPolling = { delayMs?: number; intervalMs?: number; tailBytes?: number };
+
+/**
+ * The script that reads a running command's new output (from {@link commandScript}'s files):
+ * both sizes, then at most `tailBytes` of each stream, the newest, from the given offsets.
+ * Prints nothing when the command's folder is gone (it ended).
+ */
+export function pollScript(runId: string, offsets: { stdout: number; stderr: number }, tailBytes: number = COMMAND_PROGRESS.tailBytes): string {
+  const marker = `<<ai-sdk-letta-poll:${runId}>>`;
+  // Up to the size measured first (the file keeps growing), at most the newest `tailBytes` of what is new.
+  const part = (file: string, size: string, from: number) => `if [ "$((${size}))" -gt ${from} ]; then tail -c +${from + 1} "$D/${file}" | head -c "$((${size} - ${from}))" | tail -c ${tailBytes}; fi`;
+  return [
+    `D=/tmp/.ai-sdk-letta-${runId}; [ -d "$D" ] || exit 0`,
+    `so=$(wc -c <"$D/o" 2>/dev/null) || so=0; se=$(wc -c <"$D/e" 2>/dev/null) || se=0`,
+    `printf '%s\\n' "${marker}:$((so)):$((se))"`,
+    part('o', 'so', Math.floor(offsets.stdout)),
+    `printf '\\n%s\\n' ${quote(`${marker}:stderr`)}`,
+    part('e', 'se', Math.floor(offsets.stderr)),
+  ].join('\n');
+}
+
+/** Parse {@link pollScript} output. `undefined`: nothing to read (the command ended, or not ours). */
+export function parsePollOutput(runId: string, stdout: string): CommandOutputChunk | undefined {
+  const marker = `<<ai-sdk-letta-poll:${runId}>>`;
+  const header = new RegExp(`^${marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:(\\d+):(\\d+)\\n`).exec(stdout);
+  if (!header) return undefined;
+  const body = stdout.slice(header[0].length);
+  const split = body.lastIndexOf(`\n${marker}:stderr\n`);
+  if (split < 0) return undefined;
+  return { stdout: body.slice(0, split), stderr: body.slice(split + marker.length + 9), stdoutBytes: Number(header[1]), stderrBytes: Number(header[2]) };
+}
+
+/**
+ * Read a running command's output every `intervalMs` from `delayMs` on, with
+ * separate runs on the same session (built-in providers run each call as its
+ * own `exec`, so they do not wait for the command). Returns `stop()`, which
+ * waits for the last read to finish.
+ */
+export function pollCommandOutput(session: Experimental_SandboxSession, runId: string, onOutput: CommandOutputListener, polling: CommandPolling = {}): { stop(): Promise<void> } {
+  const delayMs = polling.delayMs ?? COMMAND_PROGRESS.delayMs;
+  const intervalMs = polling.intervalMs ?? COMMAND_PROGRESS.intervalMs;
+  const tailBytes = polling.tailBytes ?? COMMAND_PROGRESS.tailBytes;
+  const control = new AbortController();
+  let stopped = false;
+  let wake: (() => void) | undefined;
+  const sleep = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(() => { wake = undefined; resolve(); }, ms); wake = () => { clearTimeout(timer); wake = undefined; resolve(); }; });
+  const offsets = { stdout: 0, stderr: 0 };
+  const loop = (async () => {
+    await sleep(delayMs);
+    while (!stopped) {
+      const started = Date.now();
+      try {
+        const limit = AbortSignal.any([control.signal, AbortSignal.timeout(Math.max(5000, intervalMs * 5))]);
+        const raw = await session.run({ command: pollScript(runId, offsets, tailBytes), abortSignal: limit });
+        const chunk = stopped ? undefined : parsePollOutput(runId, raw.stdout);
+        if (chunk) {
+          offsets.stdout = Math.max(offsets.stdout, chunk.stdoutBytes); offsets.stderr = Math.max(offsets.stderr, chunk.stderrBytes);
+          await onOutput(chunk);
+        }
+      } catch { /* a missed read; the next one catches up */ }
+      if (stopped) break;
+      await sleep(Math.max(0, intervalMs - (Date.now() - started)));
+    }
+  })();
+  return { stop: async () => { stopped = true; wake?.(); control.abort(); await loop; } };
+}
+
+export async function runSandboxCommand(session: Experimental_SandboxSession, options: { command: string; cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal; captureBytes?: number; onOutput?: CommandOutputListener; polling?: CommandPolling }): Promise<CommandResult> {
   const runId = randomUUID().replace(/-/g, '');
   const started = Date.now();
   const timeoutSeconds = Math.max(1, Math.round(options.timeoutMs / 1000));
@@ -510,8 +581,10 @@ export async function runSandboxCommand(session: Experimental_SandboxSession, op
   backstop.unref?.();
   const signal = options.signal ? AbortSignal.any([options.signal, control.signal]) : control.signal;
   let raw: { exitCode: number; stdout: string; stderr: string };
+  const poller = options.onOutput ? pollCommandOutput(session, runId, options.onOutput, options.polling) : undefined;
   try {
-    raw = await session.run({ command: commandScript({ ...options, runId, timeoutSeconds }), abortSignal: signal });
+    try { raw = await session.run({ command: commandScript({ ...options, runId, timeoutSeconds }), abortSignal: signal }); }
+    finally { await poller?.stop(); }
   } catch (error) {
     // Providers only kill their local client process; stop what runs in the sandbox.
     const cleanup = new AbortController();
@@ -875,9 +948,9 @@ export class SandboxManager {
    * `network: true`, in a new network-enabled sandbox on the same workspace
    * that is removed right after.
    */
-  async run(input: { command: string; cwd?: string; network?: boolean; signal?: AbortSignal }): Promise<{ result: CommandResult; note?: string }> {
+  async run(input: { command: string; cwd?: string; network?: boolean; signal?: AbortSignal; onOutput?: CommandOutputListener; polling?: CommandPolling }): Promise<{ result: CommandResult; note?: string }> {
     const cwd = resolveWorkingDirectory(input.cwd, this.hasProject, this.workingDirectory);
-    const options = { command: input.command, cwd, env: this.environment, timeoutMs: this.config.timeoutMs, signal: input.signal };
+    const options = { command: input.command, cwd, env: this.environment, timeoutMs: this.config.timeoutMs, signal: input.signal, ...(input.onOutput ? { onOutput: input.onOutput } : {}), ...(input.polling ? { polling: input.polling } : {}) };
     if (!input.network) return this.exclusive(async () => {
       input.signal?.throwIfAborted();
       const handle = await this.acquire(input.signal);
@@ -931,6 +1004,26 @@ const check = (command: string) => {
 const output = (result: CommandResult, timeoutMs: number, note?: string): SandboxToolOutput => ({ text: `${formatCommandResult(result, SANDBOX_LIMITS.maxOutputChars, timeoutMs)}${note ? `\n${note}` : ''}`, exitCode: result.exitCode });
 
 /**
+ * Run a command with its automatic job card (when the turn has jobs): live
+ * output is read from ~3 s on and shown in the card; the card ends with the
+ * command. The result, and so what the model gets, is the same as without.
+ */
+async function withCommandJob<T extends { result: CommandResult }>(context: unknown, toolCallId: string | undefined, command: string, timeoutMs: number, run: (onOutput?: CommandOutputListener) => Promise<T>): Promise<T> {
+  const job: CommandJob | undefined = toolCallId ? commandJob(context as Readonly<Record<string, unknown>> | undefined, toolCallId, command) : undefined;
+  if (!job) return run();
+  let ran: T;
+  try { ran = await run(chunk => job.output(chunk)); }
+  catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    await job.finish({ error: aborted || !(error instanceof SandboxError) ? 'cancelled' : 'failed', ...(error instanceof SandboxError ? { message: error.message } : {}) });
+    throw error;
+  }
+  const { result } = ran;
+  await job.finish({ exitCode: result.exitCode, timedOut: result.timedOut, timeoutMs, stdout: result.stdout, stderr: result.stderr });
+  return ran;
+}
+
+/**
  * Built-in shell tools. Add them with a `sandbox` option and permissions:
  * ```ts
  * tools: { ...sandboxTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS }, sandbox: { provider: 'docker' }
@@ -950,11 +1043,11 @@ export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>;
       try {
         check(command);
         const manager = managerOf(options.context);
-        if (manager) { const { result, note } = await manager.run({ command, cwd, signal: options.abortSignal }); return output(result, manager.config.timeoutMs, note); }
+        if (manager) { const { result, note } = await withCommandJob(options.context, options.toolCallId, command, manager.config.timeoutMs, onOutput => manager.run({ command, cwd, signal: options.abortSignal, ...(onOutput ? { onOutput } : {}) })); return output(result, manager.config.timeoutMs, note); }
         const session = (options as { experimental_sandbox?: Experimental_SandboxSession }).experimental_sandbox;
         if (!session) throw new SandboxError('sandbox_unavailable', 'No sandbox is configured for this agent');
         const timeoutMs = SANDBOX_LIMITS.defaultTimeoutMs;
-        const result = await runSandboxCommand(session, { command, cwd: resolveWorkingDirectory(cwd), env: sandboxEnvironment({ git: { name: 'Sandbox', email: 'sandbox@localhost' } }), timeoutMs, signal: options.abortSignal });
+        const { result } = await withCommandJob(options.context, options.toolCallId, command, timeoutMs, async onOutput => ({ result: await runSandboxCommand(session, { command, cwd: resolveWorkingDirectory(cwd), env: sandboxEnvironment({ git: { name: 'Sandbox', email: 'sandbox@localhost' } }), timeoutMs, signal: options.abortSignal, ...(onOutput ? { onOutput } : {}) }) }));
         return output(result, timeoutMs);
       } catch (error) { return errorOutput(error); }
     },
@@ -968,7 +1061,7 @@ export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>;
         check(command);
         const manager = managerOf(options.context);
         if (!manager) throw new SandboxError('sandbox_unavailable', 'Network commands are not available in this session');
-        const { result, note } = await manager.run({ command, cwd, network: true, signal: options.abortSignal });
+        const { result, note } = await withCommandJob(options.context, options.toolCallId, command, manager.config.timeoutMs, onOutput => manager.run({ command, cwd, network: true, signal: options.abortSignal, ...(onOutput ? { onOutput } : {}) }));
         return output(result, manager.config.timeoutMs, note);
       } catch (error) { return errorOutput(error); }
     },

@@ -42,9 +42,11 @@ export type JobImageType = typeof JOB_IMAGE_TYPES[number];
 export type JobStatus = 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 /** An image of a job, read and checked: its bytes and sniffed media type. */
 export type JobImage = { bytes: Uint8Array; mediaType: JobImageType };
-export type JobStartRequest = { goal: string; total?: number; unit?: string };
+/** `kind: 'command'`: an automatic job of a long `run_command` (its goal is the command). */
+export type JobStartRequest = { goal: string; total?: number; unit?: string; kind?: 'command' };
 /** `imageRef`: the file path the image was read from (not for data URLs), so the host can re-read it on later updates. */
-export type JobUpdateRequest = { done?: number; total?: number; message?: string; image?: JobImage; imageRef?: string };
+/** `ratePerSecond`, `etaSeconds`: what the work itself reports (tqdm), preferred over the measured values. */
+export type JobUpdateRequest = { done?: number; total?: number; message?: string; image?: JobImage; imageRef?: string; ratePerSecond?: number; etaSeconds?: number };
 export type JobEndRequest = { status: 'done' | 'failed' | 'cancelled'; result?: string };
 /** The turn a job call belongs to (bound by the runtime). */
 export type JobTurn = { conversationId: string; toolCallId: string };
@@ -60,6 +62,8 @@ export interface JobDesk {
   end(id: string, request: JobEndRequest, turn: JobTurn): void | Promise<void>;
   /** The file path a job's image was last read from: an update without `image` re-reads it (the picture follows the file). */
   imageRef?(id: string, turn: JobTurn): string | undefined;
+  /** Does the agent report its own job in this conversation now (running, updated recently)? Then commands get no automatic job. */
+  agentJobActive?(conversationId: string): boolean;
 }
 /**
  * Where image paths resolve (host paths): `/workspace/...` under `workspace`,
@@ -183,6 +187,9 @@ export function readJobImage(reference: string, paths?: JobPaths): JobImage {
     return { bytes: image, mediaType };
   } finally { closeSync(fd); }
 }
+
+/** Does the agent report its own job in this turn's conversation? */
+export const agentJobActive = (bound: JobContext) => { try { return bound.desk.agentJobActive?.(bound.conversationId) ?? false; } catch { return false; } };
 
 const contextOf = (context: Readonly<Record<string, unknown>> | undefined) => context?.[JOBS_CONTEXT] as JobContext | undefined;
 type ToolOptions = { toolCallId: string; context?: Readonly<Record<string, unknown>> };
