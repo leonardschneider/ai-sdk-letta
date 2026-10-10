@@ -1,7 +1,7 @@
 /** The activity view's model (pure): the header pill, groups, elapsed times. */
 
 export type ActivityState = 'idle' | 'working' | 'waiting';
-export type ActivityAction = 'stop' | 'stop-dev-server' | 'stop-app' | 'restart-app';
+export type ActivityAction = 'stop' | 'stop-dev-server' | 'stop-app' | 'restart-app' | 'stop-command';
 /** One item (see the server's `ActivityItem`). */
 export type ActivityItem = {
   id: string; group: 'turns' | 'waiting' | 'jobs' | 'services' | 'background'; kind: string; label: string; detail?: string;
@@ -56,12 +56,13 @@ export function timing(item: Pick<ActivityItem, 'kind' | 'since' | 'until'>, now
 
 /** Wording of an action button. */
 export const actionLabel = (action: ActivityAction, item: Pick<ActivityItem, 'kind'>) =>
-  action === 'stop' ? (item.kind === 'queued' ? 'Withdraw' : 'Stop') : action === 'stop-dev-server' ? 'Stop' : action === 'stop-app' ? 'Stop' : 'Restart';
+  action === 'stop' ? (item.kind === 'queued' ? 'Withdraw' : 'Stop') : action === 'stop-dev-server' || action === 'stop-command' ? 'Stop' : action === 'stop-app' ? 'Stop' : 'Restart';
 
 /** The API call of an action (path relative to the agent's API base). */
 export function actionPath(action: ActivityAction, item: Pick<ActivityItem, 'ref' | 'threadId'>): string | undefined {
   if (action === 'stop') return item.ref ? `/v1/runs/${encodeURIComponent(item.ref)}/cancel` : undefined;
   if (action === 'stop-dev-server') return item.threadId ? `/v1/threads/${encodeURIComponent(item.threadId)}/preview/stop-dev-server` : undefined;
+  if (action === 'stop-command') return item.ref && item.threadId ? `/v1/threads/${encodeURIComponent(item.threadId)}/jobs/${encodeURIComponent(item.ref)}/stop` : undefined;
   if (action === 'stop-app') return item.ref ? `/v1/apps/${encodeURIComponent(item.ref)}/stop` : undefined;
   return item.ref ? `/v1/apps/${encodeURIComponent(item.ref)}/restart` : undefined;
 }

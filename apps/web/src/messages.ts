@@ -69,6 +69,17 @@ export function withApp(message: ThreadMessageLike, app: MessageApp | undefined)
   return app ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, app } } } : message;
 }
 
+/** A notice that a background command ended (sent by the harness): which command and how it ended. */
+export type MessageBackground = { jobId: string; command: string; state: string; exitCode?: number };
+export function knownBackground(message: Pick<UIMessage, 'metadata'>): MessageBackground | undefined {
+  const value = (message.metadata as { background?: Partial<MessageBackground> } | undefined)?.background;
+  return value && typeof value.jobId === 'string' && typeof value.command === 'string' && typeof value.state === 'string'
+    ? { jobId: value.jobId.slice(0, 60), command: value.command.slice(0, 500), state: value.state.slice(0, 20), ...(typeof value.exitCode === 'number' ? { exitCode: value.exitCode } : {}) } : undefined;
+}
+export function withBackground(message: ThreadMessageLike, background: MessageBackground | undefined): ThreadMessageLike {
+  return background ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, background } } } : message;
+}
+
 /** The run a user message was sent as (its OTID in history), when it is one: what a rewind edits. */
 export function knownRun(message: Pick<UIMessage, 'metadata'>): string | undefined {
   const value = (message.metadata as { otid?: unknown } | undefined)?.otid;
@@ -141,7 +152,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
       return [{ type: 'tool-call', toolCallId: tool.toolCallId, toolName: tool.toolName ?? tool.type.slice(5), argsText: JSON.stringify(tool.input ?? {}), result: output ?? tool.errorText, isError: tool.state === 'output-error' || !!(tool.output && typeof tool.output === 'object' && 'error' in tool.output) }];
     }
     return [];
-  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withApp(withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownApp(visible[index]!) : undefined));
+  })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withApp(withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownApp(visible[index]!) : undefined)).map((item, index) => withBackground(item, visible[index]!.role === 'user' ? knownBackground(visible[index]!) : undefined));
   return mergeAssistantRuns(converted).map(markListened);
 }
 

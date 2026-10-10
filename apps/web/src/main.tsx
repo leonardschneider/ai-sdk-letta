@@ -11,7 +11,7 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, observedParts, userContent, withAuthor, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageSource } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withBackground, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageBackground, type MessageSource } from './messages.js';
 import { ClaimCard, DecisionBell, DecisionsContext, MemoryReviewCard, NoticeCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
 import { decideError, mayReview, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
@@ -57,7 +57,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome; background?: MessageBackground }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -303,7 +303,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
 
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
-  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource, decision?: DecisionOutcome) {
+  async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource, decision?: DecisionOutcome, background?: MessageBackground) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
     liveRun.current = id; setRunning(true); setLiveThread(currentRef.current.id); setLiveAuthor(author);
     const events: RuntimeEvent[] = [];
@@ -312,7 +312,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     let members = [...batch];
     // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
     const render = () => setMessages([...base,
-      withRun(withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision), id),
+      withBackground(withRun(withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision), id), background),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
       markListened(withTime({ id: `${id}-assistant`, role: 'assistant', content: observedParts(events), status: ended ? events.at(-1)?.type === 'failed' ? { type: 'incomplete', reason: events.at(-1)?.data.code === 'cancelled' ? 'cancelled' : 'error' } : events.at(-1)?.type === 'stopped' ? { type: 'incomplete', reason: 'cancelled' } : { type: 'complete', reason: 'stop' } : { type: 'running' } }, endedAt))]);
     render();
@@ -399,7 +399,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (view.live && liveRun.current === view.live.id) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision); return; }
+      if (view.live) { void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision, view.live.background); return; }
       if (liveRun.current) return;
       setMessages(base);
       showState(view);
@@ -456,7 +456,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       const base = historyMessages(view.messages); setMessages(base); setQueue(view.queue ?? []);
       showState(view);
       // After a refresh mid-run the image bytes are only in Letta history; show placeholders until it completes.
-      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision);
+      if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, Array.from({ length: view.live.images ?? 0 }, () => ''), (view.live.files ?? []).filter(f => !(view.live!.images && f.kind === 'image')).map(chip), view.live.author, view.live.batch, view.live.source, view.live.decision, view.live.background);
     } catch (e) {
       setCurrent(previous);
       toast(errorCode(e) === 'runtime_busy' ? 'The agent is replying in another conversation. Try again when it finishes.' : errorCode(e) === 'not_found' && team ? 'That conversation isn’t available in this agent.' : 'Couldn’t open that conversation. Check that the local server is running.', { tone: 'error' });

@@ -36,6 +36,11 @@ Main exports:
   `run_command` (no network) and `run_command_online` (always asks) in an isolated sandbox per
   conversation, through the AI SDK `Experimental_SandboxSession`. Providers are optional peers:
   `@lgrammel/apple-container-sandbox` or `ai-sdk-sandbox-docker`, or your own factory.
+- Background commands: `run_command` with `background: true` starts a long command detached in the
+  conversation's sandbox (output in `/workspace/.jobs/<id>/`, a wall-clock limit of
+  `sandbox.backgroundTimeoutMs`, 6 hours by default) and returns at once; `command_status`,
+  `command_output` and `command_stop` manage it. `BackgroundCommands` follows them across turns and
+  restarts; `@ai-sdk-letta/server` turns their ends into notification turns.
 - `SandboxManager`, `checkProjectFolder`, `gitConfigCredentials`, `detectSandboxProvider`, `prepareSandbox`:
   the sandbox lifecycle and safety checks.
 - `ToolInteractions`: the broker for approvals and `ask_user` questions.

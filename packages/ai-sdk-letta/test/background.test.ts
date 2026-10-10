@@ -41,7 +41,7 @@ function setup(options: { idleTimeoutMs?: number; backgroundTimeoutMs?: number; 
   const commands = new BackgroundCommands({ pollMs: 100, staleMs: 3000, ...(options.file ? { file: options.file } : {}) });
   const manager = new SandboxManager(resolveSandboxConfig({ provider: host.factory, idleTimeoutMs: options.idleTimeoutMs ?? 1000, ...(options.backgroundTimeoutMs ? { backgroundTimeoutMs: options.backgroundTimeoutMs } : {}) }), { workspace: () => dir, owner: 'agent.conv', background: { commands, conversationId: 'conv' } });
   const context = { [SANDBOX_CONTEXT]: manager };
-  const call = async <T>(name: keyof typeof sandboxTools, input: T, extra: Record<string, unknown> = {}) => await (sandboxTools[name].execute as (input: T, options: unknown) => Promise<{ text: string; isError?: boolean; jobId?: string }>)(input, { toolCallId: `call-${Math.random()}`, messages: [], context: { ...context, ...extra } });
+  const call = async <T>(name: keyof typeof sandboxTools, input: T, extra: Record<string, unknown> = {}) => await (sandboxTools[name].execute as unknown as (input: T, options: unknown) => Promise<{ text: string; isError?: boolean; jobId?: string }>)(input, { toolCallId: `call-${Math.random()}`, messages: [], context: { ...context, ...extra } });
   return { dir, host, commands, manager, call, done: async () => { await manager.close(); commands.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
