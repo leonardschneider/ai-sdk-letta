@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ActionBarPrimitive, MessagePrimitive, groupPartByType, useAuiState, type ToolCallMessagePartProps } from '@assistant-ui/react';
 import { Blocks, Check, ChevronRight, CircleAlert, Copy, CornerDownRight, Ear, FileText, Globe, LoaderCircle, MessageCircleQuestion, Search, ShieldAlert, ShieldCheck, ShieldX, SquareTerminal, Wrench } from 'lucide-react';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
@@ -12,7 +12,7 @@ import { AppToolLine } from './apps.js';
 import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
-import { CommandJobCard, JobCard, useCommandJob } from './jobs.js';
+import { CommandJobCard, JobCard, JobsContext, useCommandJob } from './jobs.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 import { EditAction, EditBubble, RewindContext } from './rewind.js';
 import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
@@ -171,6 +171,17 @@ function UserBubble() {
 const byType = groupPartByType({ 'tool-call': ['group-tools'], 'tool-call:ask_user': [], 'tool-call:request_decision': [], 'tool-call:web_search': [], 'tool-call:job_start': [], 'tool-call:job_update': [], 'tool-call:job_end': [] });
 /** MCP App tools (`<app>__<tool>`) stay ungrouped too: their views show in the conversation. */
 const groupTools: typeof byType = (part, context) => part.type === 'tool-call' && isAppToolName(part.toolName) ? [] : byType(part, context);
+/** Long commands with a live card stay ungrouped too, like jobs. */
+function useGroupTools(): typeof byType {
+  const { jobs } = useContext(JobsContext);
+  const cards = jobs.filter(j => j.kind === 'command').map(j => j.toolCallId).join('\n');
+  return useMemo(() => {
+    if (!cards) return groupTools;
+    const calls = new Set(cards.split('\n'));
+    const grouped: typeof byType = (part, context) => part.type === 'tool-call' && calls.has(part.toolCallId) ? [] : groupTools(part, context);
+    return grouped;
+  }, [cards]);
+}
 
 /** One part of a reply (text, a tool line, an app view): if it fails to render, an inline error card; the rest of the reply stays. */
 function PartBoundary({ children, resetKey }: { children: React.ReactNode; resetKey?: string }) {
@@ -178,7 +189,8 @@ function PartBoundary({ children, resetKey }: { children: React.ReactNode; reset
 }
 
 function AssistantParts() {
-  return <><MessagePrimitive.GroupedParts groupBy={groupTools} indicator="no-text">
+  const groupBy = useGroupTools();
+  return <><MessagePrimitive.GroupedParts groupBy={groupBy} indicator="no-text">
     {({ part, children }) => {
       switch (part.type) {
         case 'group-tools': return part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</>;
@@ -213,6 +225,7 @@ function ListenedLine({ listened, time }: { listened: Listened; time?: string })
   const reasoning = useAuiState(s => s.message.parts.filter(p => p.type === 'reasoning').map(p => p.type === 'reasoning' ? p.text : '').join('\n\n').trim());
   const tools = useAuiState(s => s.message.parts.filter(p => p.type === 'tool-call').length);
   const label = `Listened${time ? ` · ${formatTime(time)}` : ''}`;
+  const groupBy = useGroupTools();
   return <Disclosure className="listened-line" tone="listened" label={`${label}. Show what the agent noted`}
     summary={<><Ear size={14} className="line-icon" aria-hidden="true"/><span className="line-label">Listened</span>
       {tools > 0 && <span className="line-meta">{tools === 1 ? 'used 1 tool' : `used ${tools} tools`}</span>}
@@ -221,7 +234,7 @@ function ListenedLine({ listened, time }: { listened: Listened; time?: string })
       {listened.reason && <p className="listened-note"><span className="listened-label">Note</span>{listened.reason}</p>}
       {reasoning && <div className="listened-thoughts"><span className="listened-label">Thoughts</span><p>{reasoning}</p></div>}
       {!listened.reason && !reasoning && <p className="muted">The agent read this and chose not to reply. It recorded no thoughts.</p>}
-      {tools > 0 && <MessagePrimitive.GroupedParts groupBy={groupTools}>
+      {tools > 0 && <MessagePrimitive.GroupedParts groupBy={groupBy}>
         {({ part, children }) => part.type === 'group-tools' ? part.indices.length > 1 ? <ToolGroup count={part.indices.length} running={part.counts.running > 0} indices={part.indices}>{children}</ToolGroup> : <>{children}</> : part.type === 'tool-call' ? <PartBoundary resetKey={part.toolCallId}><ToolPart {...part}/></PartBoundary> : <></>}
       </MessagePrimitive.GroupedParts>}
     </div>
