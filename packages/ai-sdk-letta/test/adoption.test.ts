@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { ListMessagesResult } from '@letta-ai/letta-agent-sdk';
 import {
   acquireIdentity, forgetIdentity, claimsOf, defineAgent, AdoptionStore, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity,
-  adoptedInstructionsSection, withoutInstructionsSection, instructionsUpdate, projectHistory, adoptedDefinition, checkAdoptedProject, withProjectDescriptions, sandboxTools, SandboxError, adoptedToolsRefusal, defaultAdoptedTools, webDevEnabled, mcpAppDevEnabled, WEBDEV_IMAGE, SANDBOX_IMAGE, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
+  adoptedInstructionsSection, withoutInstructionsSection, instructionsSectionOf, instructionsUpdate, projectHistory, adoptedDefinition, checkAdoptedProject, withProjectDescriptions, sandboxTools, SandboxError, adoptedToolsRefusal, defaultAdoptedTools, webDevEnabled, mcpAppDevEnabled, WEBDEV_IMAGE, SANDBOX_IMAGE, MemoryJournal, MemoryGuard, isProtectedPath, DEFAULT_MEMORY, provenanceLabel,
   type JiminyVerdict, type MemoryReviewer,
 } from '../src/index.js';
 
@@ -212,6 +212,16 @@ test('the instructions update appends one section, shows a diff, and can be reve
   const again = instructionsUpdate(update.next, adoptedInstructionsSection(['read_file'], 'Memory policy.'));
   assert.equal(again.next.split('ai-sdk-letta: begin').length, 2);
   assert.equal(instructionsUpdate(update.next, section).changed, false);
+});
+
+test('an update replaces only the text between the markers', () => {
+  const first = instructionsUpdate('You are chess.\n', adoptedInstructionsSection(['read_file'], 'Memory policy.')).next;
+  const edited = `Intro by the user.\n${first}\nNotes the user added after.\n`;
+  const update = instructionsUpdate(edited, adoptedInstructionsSection(['read_file', 'job_start'], 'Memory policy.'));
+  assert.ok(update.next.startsWith('Intro by the user.\nYou are chess.\n\n<!-- ai-sdk-letta: begin -->'));
+  assert.ok(update.next.endsWith('<!-- ai-sdk-letta: end -->\n\nNotes the user added after.\n'));
+  assert.match(instructionsSectionOf(update.next)!, /job_start/);
+  assert.equal(instructionsSectionOf('no section'), undefined);
 });
 
 /* ---------------- history ---------------- */
