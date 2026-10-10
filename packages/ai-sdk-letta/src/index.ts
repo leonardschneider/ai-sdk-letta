@@ -49,7 +49,7 @@ export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT,
 export {
   sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT, WEBDEV_DOCKERFILE, WEBDEV_IMAGE, MCP_APPS_DOCKERFILE, MCP_APPS_IMAGE,
   SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, projectNote, withProjectDescriptions, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
-  commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
+  commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, pollScript, parsePollOutput, pollCommandOutput, type CommandOutputListener, type CommandPolling, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
 export {
@@ -68,11 +68,12 @@ export {
   type RequestDecisionInput, type RequestDecisionOutput, type CancelDecisionInput, type CancelDecisionOutput,
 } from './decisions.js';
 export {
-  jobTools, jobStartTool, jobUpdateTool, jobEndTool, jobsEnabled, parseJobStart, parseJobUpdate, parseJobEnd, readJobImage, sniffJobImage, jobLine, JobError,
+  jobTools, jobStartTool, jobUpdateTool, jobEndTool, jobsEnabled, parseJobStart, parseJobUpdate, parseJobEnd, readJobImage, sniffJobImage, jobLine, agentJobActive, JobError,
   JOB_START_TOOL, JOB_UPDATE_TOOL, JOB_END_TOOL, JOB_TOOL_NAMES, JOB_TOOL_PERMISSIONS, JOBS_CONTEXT, JOB_LIMITS, JOB_IMAGE_TYPES, JOBS_NOTE,
   type JobDesk, type JobContext, type JobPaths, type JobTurn, type JobImage, type JobImageType, type JobStatus, type JobStartRequest, type JobUpdateRequest, type JobEndRequest,
   type JobStartInput, type JobUpdateInput, type JobEndInput, type JobOutput, type JobToolName,
 } from './jobs.js';
+export { commandJob, commandGoal, parseProgressLine, visibleLine, OutputLines, COMMAND_PROGRESS, type CommandJob, type CommandEnd, type CommandOutputChunk, type ParsedProgress } from './command-progress.js';
 export { adfToMarkdown, markdownToAdf, spliceMarkdown, splitBlocks, blockMarkdown, protectedElements, lostElements, validateAdf, isAdfDocument, adfHash, type AdfDocument, type AdfNode, type AdfMark, type MarkdownOptions, type ProtectedElement, type SpliceChange, type SpliceResult } from './adf.js';
 export { ADF_SCHEMA, ADF_SCHEMA_VERSION } from './adf-schema.js';
 export { CredentialStore, publicStatus, LOCAL_USER_ID, LOCAL_ACTOR, ACTOR_CONTEXT, type AtlassianCredentials, type AtlassianStatus, type TurnActor } from './credentials.js';

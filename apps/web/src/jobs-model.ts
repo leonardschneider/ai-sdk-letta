@@ -5,6 +5,8 @@ export type JobProgress = { percent?: number; ratePerSecond?: number; etaSeconds
 /** A job as the server sends it (`GET /v1/threads/:id/jobs`, and `job` events of a live run). */
 export type JobView = {
   id: string; threadId: string; toolCallId: string; goal: string; unit?: string; total?: number; done?: number;
+  /** `command`: the automatic job of a long command; it shows in place of the command's line. */
+  kind?: 'command';
   status: JobStatus; result?: string; lines: string[]; image?: { mediaType: string; version: number };
   startedAt: string; updatedAt: string; endedAt?: string; version: number; progress: JobProgress;
 };
@@ -63,6 +65,11 @@ export function mergeJob(list: readonly JobView[], job: JobView): JobView[] {
   if (index < 0) return [...list, job];
   if (list[index]!.version > job.version) return list as JobView[];
   const next = [...list]; next[index] = job; return next;
+}
+
+/** The automatic job of a command call, if it ran long enough to get one. */
+export function commandJobOf(jobs: readonly JobView[], toolCallId: string): JobView | undefined {
+  return jobs.find(j => j.kind === 'command' && j.toolCallId === toolCallId);
 }
 
 /** The job a `job_start` call made: by its tool call ID, else by the `jobId` its result names. */

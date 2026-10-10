@@ -123,6 +123,7 @@ function jobDesk(definition: AgentDefinition) {
     update: (id, request, turn) => board ? board.desk.update(id, request, turn) : unavailable(),
     end: (id, request, turn) => board ? board.desk.end(id, request, turn) : unavailable(),
     imageRef: (id, turn) => board?.desk.imageRef?.(id, turn),
+    agentJobActive: conversationId => board?.desk.agentJobActive?.(conversationId) ?? false,
   } : undefined;
   return { desk, bind: (runtime: ThreadRuntime, directory: string) => {
     if (!enabled) return undefined;

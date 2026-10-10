@@ -26,6 +26,10 @@ export const JOB_BOARD_LIMITS = Object.freeze({
 export type JobRecord = {
   id: string; threadId: string; conversationId: string; toolCallId: string;
   goal: string; unit?: string; total?: number; done?: number;
+  /** `command`: the automatic job of a long command (its goal is the command). */
+  kind?: 'command';
+  /** Rate and time left as the work reported them (tqdm), at `updatedAt`. */
+  reported?: { ratePerSecond?: number; etaSeconds?: number };
   status: JobStatus; result?: string;
   /** Latest log lines (the newest last). */
   lines: string[];
@@ -37,7 +41,7 @@ export type JobRecord = {
   version: number;
 };
 /** A job as the app shows it, with its progress computed by the host. */
-export type PublicJob = Omit<JobRecord, 'conversationId' | 'firstAt' | 'firstDone' | 'image'> & {
+export type PublicJob = Omit<JobRecord, 'conversationId' | 'firstAt' | 'firstDone' | 'image' | 'reported'> & {
   image?: { mediaType: JobImageType; version: number };
   progress: JobProgress;
 };
@@ -49,7 +53,7 @@ export type JobProgress = { percent?: number; ratePerSecond?: number; etaSeconds
  * the first progress sample, or since the start), and the time left at that
  * rate. Ended jobs measure up to their end.
  */
-export function jobProgress(job: Pick<JobRecord, 'done' | 'total' | 'startedAt' | 'endedAt' | 'firstAt' | 'firstDone' | 'status'>, now = Date.now()): JobProgress {
+export function jobProgress(job: Pick<JobRecord, 'done' | 'total' | 'startedAt' | 'endedAt' | 'firstAt' | 'firstDone' | 'status'> & Partial<Pick<JobRecord, 'reported' | 'updatedAt'>>, now = Date.now()): JobProgress {
   const start = Date.parse(job.startedAt);
   const end = job.endedAt ? Date.parse(job.endedAt) : now;
   const elapsedSeconds = Math.max(0, (end - start) / 1000);
@@ -59,6 +63,12 @@ export function jobProgress(job: Pick<JobRecord, 'done' | 'total' | 'startedAt' 
     const from = job.firstAt && job.firstDone !== undefined && job.done > job.firstDone ? { at: Date.parse(job.firstAt), done: job.firstDone } : { at: start, done: 0 };
     const seconds = (end - from.at) / 1000;
     if (seconds >= 1) ratePerSecond = (job.done - from.done) / seconds;
+  }
+  // What the work reports (tqdm) wins; its time left counts down from the report.
+  if (job.reported?.ratePerSecond !== undefined) ratePerSecond = job.reported.ratePerSecond;
+  if (job.status === 'running' && job.reported?.etaSeconds !== undefined) {
+    const since = job.updatedAt ? Math.max(0, (now - Date.parse(job.updatedAt)) / 1000) : 0;
+    return { elapsedSeconds, ...(percent !== undefined ? { percent } : {}), ...(ratePerSecond !== undefined ? { ratePerSecond } : {}), etaSeconds: Math.max(0, job.reported.etaSeconds - since) };
   }
   const etaSeconds = job.status === 'running' && ratePerSecond && ratePerSecond > 0 && job.total !== undefined && job.done !== undefined && job.total > job.done ? (job.total - job.done) / ratePerSecond : undefined;
   return { elapsedSeconds, ...(percent !== undefined ? { percent } : {}), ...(ratePerSecond !== undefined ? { ratePerSecond } : {}), ...(etaSeconds !== undefined ? { etaSeconds } : {}) };
@@ -148,7 +158,7 @@ export class JobBoard {
         for (const id of drop) try { unlinkSync(join(this.images, id)); } catch { /* none */ }
       }
       const at = new Date(this.now()).toISOString();
-      const job: JobRecord = { id: `job-${randomUUID()}`, threadId, conversationId: turn.conversationId, toolCallId: turn.toolCallId, goal: request.goal, ...(request.unit ? { unit: request.unit } : {}), ...(request.total !== undefined ? { total: request.total } : {}),
+      const job: JobRecord = { id: `job-${randomUUID()}`, threadId, conversationId: turn.conversationId, toolCallId: turn.toolCallId, goal: request.goal, ...(request.kind === 'command' ? { kind: 'command' as const } : {}), ...(request.unit ? { unit: request.unit } : {}), ...(request.total !== undefined ? { total: request.total } : {}),
         status: 'running', lines: [], startedAt: at, updatedAt: at, version: 1 };
       this.state.jobs.push(job); this.save(); this.changed(job);
       return { id: job.id };
@@ -176,6 +186,7 @@ export class JobBoard {
       this.save(); this.changed(job);
     },
     imageRef: (id: string, turn: JobTurn) => { try { return this.job(id, turn.conversationId).image?.path; } catch { return undefined; } },
+    agentJobActive: (conversationId: string) => this.state.jobs.some(j => j.conversationId === conversationId && j.kind !== 'command' && j.status === 'running' && this.fresh(j)),
   };
 
   /** Apply a job's waiting update now. */
@@ -185,13 +196,15 @@ export class JobBoard {
     if (pending?.timer) clearTimeout(pending.timer);
     const job = this.state.jobs.find(j => j.id === id);
     if (!pending || !job || job.status !== 'running') return;
-    const { done, total, message, image, imageRef } = pending.request;
+    const { done, total, message, image, imageRef, ratePerSecond, etaSeconds } = pending.request;
     const at = new Date(this.now()).toISOString();
     if (total !== undefined) job.total = total;
     if (done !== undefined) {
       if (job.firstAt === undefined) { job.firstAt = at; job.firstDone = done; }
       job.done = done;
     }
+    if (ratePerSecond !== undefined || etaSeconds !== undefined) job.reported = { ...(ratePerSecond !== undefined && Number.isFinite(ratePerSecond) && ratePerSecond >= 0 ? { ratePerSecond } : {}), ...(etaSeconds !== undefined && Number.isFinite(etaSeconds) && etaSeconds >= 0 ? { etaSeconds } : {}) };
+    else if (done !== undefined) delete job.reported;
     if (message) job.lines = [...job.lines, ...message.split('\n')].slice(-JOB_LIMITS.maxLines);
     if (image) {
       try { this.writeImage(id, image); job.image = { mediaType: image.mediaType, version: (job.image?.version ?? 0) + 1, ...(imageRef ? { path: imageRef } : {}) }; } catch { /* the previous image stays */ }
@@ -221,6 +234,6 @@ export class JobBoard {
 }
 
 export function publicJob(job: JobRecord, now = Date.now()): PublicJob {
-  const { conversationId: _c, firstAt: _f, firstDone: _d, image, ...rest } = job;
+  const { conversationId: _c, firstAt: _f, firstDone: _d, image, reported: _r, ...rest } = job;
   return { ...rest, lines: [...job.lines], ...(image ? { image: { mediaType: image.mediaType, version: image.version } } : {}), progress: jobProgress(job, now) };
 }

@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { Check, ChevronRight, CircleAlert, CircleSlash, Hourglass, LoaderCircle } from 'lucide-react';
 import { api, apiPath } from './api.js';
 import { useLightbox } from './images.js';
-import { jobOfCall, mergeJob, progressLine, statusText, type JobView } from './jobs-model.js';
+import { commandJobOf, jobOfCall, mergeJob, progressLine, statusText, type JobView } from './jobs-model.js';
 
 /** The open conversation's jobs, for the job cards. */
 export type JobsState = { jobs: readonly JobView[]; threadId?: string };
@@ -49,7 +49,17 @@ export function JobCard({ toolCallId, result }: { toolCallId: string; result: un
   return <JobBody job={job}/>;
 }
 
-function JobBody({ job }: { job: JobView }) {
+/** A long command's live card, in place of its tool line; `details` (the command and its output) open under it. */
+export function useCommandJob(toolCallId: string): JobView | undefined {
+  const { jobs } = useContext(JobsContext);
+  return commandJobOf(jobs, toolCallId);
+}
+export function CommandJobCard({ job, details }: { job: JobView; details: React.ReactNode }) {
+  return <JobBody job={job} details={details}/>;
+}
+
+function JobBody({ job, details }: { job: JobView; details?: React.ReactNode }) {
+  const [showDetails, setShowDetails] = useState(false);
   const [open, setOpen] = useState(false);
   const lightbox = useLightbox();
   const Icon = ICON[job.status];
@@ -61,7 +71,8 @@ function JobBody({ job }: { job: JobView }) {
   const [shown, setShown] = useState(imageUrl);
   useEffect(() => { if (!imageUrl || imageUrl === shown) return; const img = new Image(); img.onload = () => setShown(imageUrl); img.onerror = () => setShown(imageUrl); img.src = imageUrl; }, [imageUrl, shown]);
   const tailId = `job-tail-${job.id}`;
-  return <section className="job-card" data-status={job.status} data-job-id={job.id} aria-label={`Job: ${job.goal}`}>
+  const detailsId = `job-details-${job.id}`;
+  return <section className="job-card" data-status={job.status} data-kind={job.kind} data-job-id={job.id} aria-label={`${job.kind === 'command' ? 'Command' : 'Job'}: ${job.goal}`}>
     <header className="job-head">
       <span className="job-icon" data-status={job.status} aria-hidden="true"><Icon size={14} className={job.status === 'running' ? 'spin' : undefined}/></span>
       <strong className="job-goal">{job.goal}</strong>
@@ -84,6 +95,11 @@ function JobBody({ job }: { job: JobView }) {
       <img src={shown} alt={`Live image: ${job.goal}`}/>
     </button>}
     {job.result && <p className="job-result">{job.result}</p>}
+    {details && <div className="job-details">
+      <button type="button" className="job-details-toggle" aria-expanded={showDetails} aria-controls={detailsId} onClick={() => setShowDetails(o => !o)}>
+        <ChevronRight size={12} className="chev" aria-hidden="true"/>{showDetails ? 'Hide the command' : 'Command and output'}</button>
+      {showDetails && <div id={detailsId} className="job-details-body">{details}</div>}
+    </div>}
   </section>;
 }
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { durationText, jobOfCall, mergeJob, progressLine, rateText, statusText, type JobView } from '../src/jobs-model.js';
+import { commandJobOf, durationText, jobOfCall, mergeJob, progressLine, rateText, statusText, type JobView } from '../src/jobs-model.js';
 import { grouped } from '../src/activity-model.js';
 
 const job = (over: Partial<JobView> = {}): JobView => ({ id: 'job-1', threadId: 't', toolCallId: 'call-1', goal: 'Play', status: 'running', lines: [], startedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', version: 1, progress: {}, ...over });
@@ -31,4 +31,11 @@ test('merge: newer versions win, older never; the card finds its job', () => {
 test('activity: a Jobs group after Turns', () => {
   const groups = grouped([{ id: 'a', group: 'jobs', kind: 'job', label: 'Play' }, { id: 'b', group: 'turns', kind: 'turn', label: 'Replying' }]);
   assert.deepEqual(groups.map(g => g.label), ['Turns', 'Jobs']);
+});
+
+test('command jobs: found by their call, only when they are command jobs', () => {
+  const base = { threadId: 't', goal: '$ ls', status: 'running' as const, lines: [], startedAt: '', updatedAt: '', version: 1, progress: {} };
+  const jobs = [{ ...base, id: 'a', toolCallId: 'c1' }, { ...base, id: 'b', toolCallId: 'c2', kind: 'command' as const }];
+  assert.equal(commandJobOf(jobs, 'c1'), undefined);
+  assert.equal(commandJobOf(jobs, 'c2')?.id, 'b');
 });
