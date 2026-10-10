@@ -10,7 +10,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  appSource, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
+  appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
@@ -101,7 +101,9 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
    * active; `delivered` says whether its message is in the history. The
    * conversation is usable again; nothing was replayed.
    */
-  checked?: { at: string; delivered?: boolean } };
+  checked?: { at: string; delivered?: boolean; automatic?: boolean };
+  /** Why a failed turn failed (bounded, single line: the harness's error, HTTP status and provider message when given). */
+  error?: string };
 /**
  * A run's state. `stopped`: someone pressed Stop, or a turn limit was
  * reached (see `TurnLimits`), and the backend confirmed the run ended: the
@@ -174,7 +176,11 @@ export type RuntimeOptions = {
    * not list their calls as side effects that stay. Built-in tools are
    * known already (file, decision, web search, Atlassian reads).
    */
-  rewindInternalTools?: readonly string[] };
+  rewindInternalTools?: readonly string[];
+  /** Where a failed turn's one-line reason is written (`[turn-failed] <agent> <thread> <code>: <reason>`). @default console.error (stderr) */
+  log?: (line: string) => void;
+  /** Names the agent in those lines. @default agentName, else "agent" */
+  logLabel?: string };
 /** Most queued messages delivered together as one turn (every message a conversation's queue can hold). */
 export const MAX_BATCH = 10;
 /** Most turns waiting in one conversation's queue. */
@@ -395,6 +401,8 @@ export class ThreadRuntime {
   /** The agent's reply mode setting, when its sessions can listen (shared runtimes). */
   readonly replyMode?: ReplyModeSetting;
   private readonly agentName?: string;
+  private readonly log: (line: string) => void;
+  private readonly logLabel: string;
   private readonly typingMs: number;
   private readonly rewindInternal: ReadonlySet<string>;
   private readonly members: () => number;
@@ -438,6 +446,8 @@ export class ThreadRuntime {
       this.replyMode = options.replyMode;
     }
     this.agentName = options.agentName;
+    this.log = options.log ?? (line => console.error(line));
+    this.logLabel = options.logLabel ?? options.agentName ?? 'agent';
     this.members = options.members ?? (() => 1);
     this.typingMs = options.typingMs ?? 5000;
     this.rewindInternal = new Set(options.rewindInternalTools ?? []);
@@ -1158,12 +1168,14 @@ export class ThreadRuntime {
     if (latest && latest.status !== 'running' && !usableRun(latest)) return {
       messages: this.observed(id),
       // Why it is read-only (the app offers Check and unlock).
-      lastRunId: latest.id, live: null, status: latest.status, usable: false, source: 'transport-observations', code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'delivery_uncertain'), ...queue,
+      lastRunId: latest.id, live: null, status: latest.status, usable: false, source: 'transport-observations', code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'delivery_uncertain'), ...(latest.error ? { error: latest.error } : {}), ...queue,
     };
     // A stopped turn: the app marks its (partial) reply as stopped, and why.
     const stopped = latest?.status === 'stopped' ? { stopped: { runId: latest.batchOf ?? latest.id, code: String([...latest.events].reverse().find(event => event.type === 'stopped')?.data.code ?? 'cancelled') } } : {};
+    // A turn that failed with a known outcome (rejected before the model produced anything): the app says so, with its reason.
+    const failed = latest?.status === 'failed' && latest.checked?.automatic ? { failed: { runId: latest.batchOf ?? latest.id, code: String([...latest.events].reverse().find(event => event.type === 'failed')?.data.code ?? 'runtime_failed'), ...(latest.error ? { error: latest.error } : {}) } } : {};
     // `usable`: whether the conversation takes new turns (a stopped turn, or one Check and unlock settled, is usable whatever its status).
-    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, usable: !latest || usableRun(latest), source: 'backend-history', ...stopped, ...(latest?.checked ? { checked: { ...latest.checked } } : {}), ...queue };
+    return { ...await this.history(owner, id), live: null, status: latest?.status ?? null, usable: !latest || usableRun(latest), source: 'backend-history', ...stopped, ...failed, ...(latest?.checked ? { checked: { ...latest.checked } } : {}), ...queue };
   }
   private emit(run: Run, type: string, data: Record<string, unknown>) {
     // Sequence numbers continue from the last event (compacted runs have fewer events than their last number).
@@ -1577,6 +1589,8 @@ export class ThreadRuntime {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let streamed = false;
+    // What ended the turn, when the stream said (its error part, or the finish reason).
+    let failure: unknown;
     let disconnect = () => {};
     try {
       disconnect = session.agent.interactions.connect((request, signal) => new Promise((resolve, reject) => {
@@ -1652,10 +1666,13 @@ export class ThreadRuntime {
           // An unattended turn needed a person: remember the first such call (the agent then ends the turn).
           if (run.source && !run.refused && (failure.reason === 'approval_required' || failure.reason === 'question_required')) { run.refused = { code: failure.reason, tool: part.toolName }; this.emit(run, 'refused', { ...run.refused }); }
         }
-        else if (part.type === 'error' || part.type === 'abort') throw new RuntimeFault('runtime_failed');
+        else if (part.type === 'error') { failure = part.error; throw new RuntimeFault('runtime_failed'); }
+        else if (part.type === 'abort') throw new RuntimeFault('runtime_failed');
       }
       if (lane.pending?.runId === run.id) throw new RuntimeFault('interaction_incomplete');
-      if (control.signal.aborted || await result.finishReason !== 'stop') throw new RuntimeFault('runtime_failed');
+      if (control.signal.aborted) throw new RuntimeFault('runtime_failed');
+      const finish = await result.finishReason;
+      if (finish !== 'stop') { failure ??= new Error(`The turn ended with finish reason "${finish}"`); throw new RuntimeFault('runtime_failed'); }
       const letta = (await result.providerMetadata)?.letta as { listened?: unknown; reason?: unknown } | undefined;
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
       run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
@@ -1674,14 +1691,24 @@ export class ThreadRuntime {
         this.emit(run, 'stopped', { code, ...(outcome.delivered !== undefined ? { delivered: outcome.delivered } : {}) });
       } else {
         run.status = control.signal.aborted ? 'cancelled' : 'failed';
-        this.emit(run, 'failed', { code });
+        // Why: the harness's error (with its HTTP status and the provider's message), else what the runtime saw.
+        if (code === 'runtime_failed') {
+          const cause = failure ?? (outcome?.error ? new LettaTurnError(outcome.error, false) : error);
+          run.error = describeTurnError(cause).slice(0, 1000);
+          try { this.log(`[turn-failed] ${this.logLabel} ${run.threadId} ${code}: ${run.error.slice(0, 500)}`); } catch { /* logging never fails a turn */ }
+        }
+        // Rejected before the model produced anything, and the backend confirmed it is idle: the outcome is known
+        // (nothing ran), so the conversation stays usable; the error is shown.
+        const known = run.status === 'failed' && outcome?.end === 'failed' && outcome.settled === true;
+        if (known) run.checked = { at: run.endedAt, ...(outcome.delivered !== undefined ? { delivered: outcome.delivered } : {}), automatic: true };
+        this.emit(run, 'failed', { code, ...(run.error ? { error: run.error } : {}), ...(known ? { usable: true } : {}) });
       }
     } finally {
       // The other messages of a combined turn end with it (they were delivered together).
       for (const other of turn.others) {
         other.status = run.status; other.endedAt = run.endedAt;
         const last = run.events.at(-1);
-        if (run.status === 'completed') this.emit(other, 'completed', {}); else if (run.status === 'stopped') this.emit(other, 'stopped', { ...(last?.data ?? {}) }); else this.emit(other, 'failed', { code: String(last?.data.code ?? 'runtime_failed') });
+        if (run.status === 'completed') this.emit(other, 'completed', {}); else if (run.status === 'stopped') this.emit(other, 'stopped', { ...(last?.data ?? {}) }); else { if (run.checked) other.checked = { ...run.checked }; if (run.error) other.error = run.error; this.emit(other, 'failed', { ...(last?.data ?? {}), code: String(last?.data.code ?? 'runtime_failed') }); }
       }
       // Keep the pre-run display snapshot current for browser reconnects without
       // closing a running SDK session or replaying any transcript into the agent.

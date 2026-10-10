@@ -69,7 +69,7 @@ export type PendingTurn = { createdAt: string; otid?: string };
  * message with `otid` is in the backend history (when the turn had one).
  * `through`: the newest backend message ID when it was settled.
  */
-export type SettledTurn = { outcome: 'stopped' | 'reconciled'; delivered?: boolean; otid?: string; through?: string; settledAt: string };
+export type SettledTurn = { outcome: 'stopped' | 'reconciled' | 'failed'; delivered?: boolean; otid?: string; through?: string; settledAt: string };
 /** Handle returned by {@link acquireIdentity}. Holds an exclusive lock until `release()`. */
 export type IdentityLease = Awaited<ReturnType<typeof acquireIdentity>>;
 
@@ -216,7 +216,7 @@ export async function acquireIdentity(directory: string, definition: { id: strin
     const settledTurn = (id: string): SettledTurn | undefined => {
       if (!exists(settledPath(id))) return undefined;
       const stored = read(settledPath(id)) as Partial<SettledTurn>;
-      return { outcome: stored.outcome === 'reconciled' ? 'reconciled' : 'stopped', ...(typeof stored.delivered === 'boolean' ? { delivered: stored.delivered } : {}), settledAt: typeof stored.settledAt === 'string' ? stored.settledAt : '',
+      return { outcome: stored.outcome === 'reconciled' || stored.outcome === 'failed' ? stored.outcome : 'stopped', ...(typeof stored.delivered === 'boolean' ? { delivered: stored.delivered } : {}), settledAt: typeof stored.settledAt === 'string' ? stored.settledAt : '',
         ...(typeof stored.otid === 'string' ? { otid: stored.otid } : {}), ...(typeof stored.through === 'string' ? { through: stored.through } : {}) };
     };
     return { identity, release, selectConversation, createConversation, assertNoPendingTurn, pendingTurn, beginTurn, completeTurn, settleTurn, settledTurn };

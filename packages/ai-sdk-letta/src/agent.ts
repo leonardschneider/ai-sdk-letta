@@ -61,7 +61,7 @@ export interface TurnInfo { otid?: string; actor?: TurnActor; unattended?: Unatt
  * usable; when it throws (or is missing), the delivery stays uncertain and
  * the agent refuses further turns.
  */
-export interface DeliveryHooks { begin(otid?: string): void; complete(): void; settle?(turn: { otid?: string }): Promise<{ delivered?: boolean } | void> }
+export interface DeliveryHooks { begin(otid?: string): void; complete(): void; settle?(turn: { otid?: string; outcome?: 'stopped' | 'failed' }): Promise<{ delivered?: boolean } | void> }
 /**
  * How a turn ended, once its stream and any stop settled (see
  * {@link LettaAgent.lastTurn}):
@@ -74,7 +74,42 @@ export interface DeliveryHooks { begin(otid?: string): void; complete(): void; s
  * - `failed`: the turn failed or its outcome is uncertain; the agent refuses
  *   further turns.
  */
-export type TurnOutcome = { end: 'completed' | 'stopped' | 'failed'; reason?: TurnStopReason; delivered?: boolean };
+export type TurnOutcome = { end: 'completed' | 'stopped' | 'failed'; reason?: TurnStopReason; delivered?: boolean;
+  /** A failed turn whose outcome is known: the backend rejected it before the model produced anything, and confirmed it is idle. The agent stays usable. */
+  settled?: boolean;
+  /** Why the turn failed, when the backend said (see {@link LettaTurnError}). */
+  error?: TurnErrorInfo };
+/** What the backend said about a failed turn (bounded; never the turn's content). */
+export type TurnErrorInfo = { message: string; code?: string; stopReason?: string; status?: number; detail?: string };
+const ERROR_TEXT_MAX = 1000;
+const bounded = (value: unknown, max = ERROR_TEXT_MAX): string | undefined => typeof value === 'string' && value.trim() ? (value.length > max ? `${value.slice(0, max - 1)}…` : value) : undefined;
+/** The HTTP status and provider message in a Letta API error (as the harness forwards it), when present. */
+function apiErrorFields(api: unknown): { status?: number; detail?: string } {
+  if (!api || typeof api !== 'object') return {};
+  const record = api as Record<string, unknown>;
+  const status = [record.status, record.status_code, record.statusCode].find((v): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 100 && v < 600);
+  const nested = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : undefined;
+  const detail = bounded(record.detail) ?? bounded(record.message) ?? bounded(nested?.message) ?? bounded(typeof record.error === 'string' ? record.error : undefined);
+  return { ...(status !== undefined ? { status } : {}), ...(detail ? { detail } : {}) };
+}
+/**
+ * A turn the backend ended with an error (the harness's `error` message and
+ * its failed `result`). `beforeOutput`: the model produced nothing (no text,
+ * reasoning or tool call) before it failed, for example an API 400.
+ */
+export class LettaTurnError extends Error {
+  override readonly name = 'LettaTurnError';
+  constructor(readonly info: TurnErrorInfo, readonly beforeOutput: boolean) { super(info.message); }
+}
+/** A short, single-line description of why a turn failed (for logs and run records). */
+export function describeTurnError(error: unknown, max = ERROR_TEXT_MAX): string {
+  const info = error instanceof LettaTurnError ? error.info : undefined;
+  const parts = info ? [info.code && info.code !== 'error' ? info.code : info.stopReason && info.stopReason !== 'error' ? info.stopReason : undefined, info.status ? `HTTP ${info.status}` : undefined, info.message, info.detail && info.detail !== info.message ? info.detail : undefined]
+    : [error instanceof Error ? `${error.name !== 'Error' ? `${error.name}: ` : ''}${error.message}` : typeof error === 'string' ? error : undefined];
+  const cause = !info && error instanceof Error && error.cause ? describeTurnError(error.cause, max) : '';
+  const text = [...parts, cause || undefined].filter((p): p is string => !!p && !!p.trim()).join(' · ').replace(/\s+/g, ' ').trim() || 'unknown error';
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
 /** Longest wait, after a turn is stopped, for the Letta stream to confirm that its run ended. */
 export const STOP_CONFIRM_MS = 60_000;
 /** The error a turn stopped by a {@link TurnLimits} limit is aborted with (`reason`: which one). */
@@ -506,13 +541,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     const state: TurnState = { started: false, settle: outcome => {
       if (done) return;
       done = true;
-      if (outcome.end === 'failed') this.unusable = true;
+      if (outcome.end === 'failed' && !outcome.settled) this.unusable = true;
       resolve(outcome);
     } };
     return state;
   }
-  /** The turn failed or its outcome is uncertain: refuse further turns. */
-  private fail(state: TurnState) { this.unusable = true; state.settle({ end: 'failed' }); }
+  /** The turn failed or its outcome is uncertain: refuse further turns (unless a known failure is being settled, see settleFailure). */
+  private fail(state: TurnState) { if (state.settling) return; this.unusable = true; state.settle({ end: 'failed', ...(state.error ? { error: state.error } : {}) }); }
   /** Limits of one turn: the agent's, tightened by the call's (see {@link LettaCallOptions.limits}). */
   private turnLimits(call?: Partial<TurnLimits>): TurnLimits {
     if (call === undefined) return this.limits;
@@ -635,6 +670,10 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       let reasoningOpen = false;
       const endText = () => { if (textOpen) { emit({ type: 'text-end', id: String(textId) }); textOpen = false; } };
       const endReasoning = () => { if (reasoningOpen) { emit({ type: 'reasoning-end', id: `reasoning-${reasoningId}` }); reasoningOpen = false; } };
+      // The model produced something (text, reasoning, a tool call): a later failure is no longer "before output".
+      let produced = false;
+      // The harness's error message (its detail; the result that follows only says "error").
+      let reported: TurnErrorInfo | undefined;
       try {
         signal.throwIfAborted();
         session = this.open(signal, { silence, ...(actor ? { actor } : {}), ...(unattended ? { unattended } : {}) });
@@ -657,6 +696,13 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             continue;
           }
           clock.progress();
+          if (event.type === 'assistant' || event.type === 'reasoning' || event.type === 'tool_call') produced = true;
+          if (event.type === 'error') {
+            const api = apiErrorFields(event.apiError);
+            reported = { message: bounded(event.message) ?? 'error', ...(event.errorCode ? { code: event.errorCode } : {}), ...(event.stopReason ? { stopReason: event.stopReason } : {}),
+              ...(api.status !== undefined ? { status: api.status } : {}), ...(bounded(event.errorDetail) && event.errorDetail !== event.message ? { detail: bounded(event.errorDetail) } : api.detail && api.detail !== event.message ? { detail: api.detail } : {}) };
+            continue;
+          }
           if (event.type === 'assistant') {
             endReasoning();
             if (!event.content) continue;
@@ -705,7 +751,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
             if (typeof event.event.prompt_tokens === 'number') tokens.inputTokens.total = event.event.prompt_tokens;
             if (typeof event.event.completion_tokens === 'number') tokens.outputTokens.total = event.event.completion_tokens;
           } else if (event.type === 'result') {
-            if (!event.success || calls.size || memoryCalls.size || silentCalls.size) throw new Error('Letta turn failed or left incomplete tools');
+            if (!event.success) {
+              const info: TurnErrorInfo = reported ?? { message: bounded(event.errorDetail) ?? bounded(event.error) ?? 'Letta turn failed', ...(event.errorCode ? { code: event.errorCode } : {}), ...(event.stopReason ? { stopReason: event.stopReason } : {}) };
+              throw new LettaTurnError(info, !produced && !calls.size && !memoryCalls.size && !silentCalls.size);
+            }
+            if (calls.size || memoryCalls.size || silentCalls.size) throw new Error('Letta turn failed or left incomplete tools');
             endText(); endReasoning(); completed = true;
             // A turn that wrote a reply is a reply, even if the agent also called stay_silent.
             // A turn that may be silent and ended without a word (for example, after only using a tool) was listened to as well.
@@ -717,10 +767,14 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
           }
         }
         if (confirmed) signal.throwIfAborted();
-        throw new Error('Letta stream closed before completion');
+        throw reported ? new LettaTurnError(reported, !produced) : new Error('Letta stream closed before completion');
       } catch (error) {
+        if (error instanceof LettaTurnError) state.error = error.info;
+        // The backend rejected the turn before the model produced anything (an API 400, a validation error): its outcome
+        // can be known. It is settled below once the backend confirms it is idle; until then (and if that fails) it is uncertain.
+        if (error instanceof LettaTurnError && error.beforeOutput && !signal.aborted && this.delivery?.settle) state.settling = true;
         // A stop is settled below once the backend confirmed it; anything else leaves the delivery uncertain.
-        if (!signal.aborted || (begun && !confirmed)) this.fail(state);
+        else if (!signal.aborted || (begun && !confirmed)) this.fail(state);
         throw error;
       } finally {
         clock.stop(); unwatch();
@@ -734,6 +788,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
         // Letta confirmed the turn finished: its delivery is complete, whatever the reader does next.
         if (completed) { try { this.delivery?.complete(); state.settle({ end: 'completed' }); } catch { this.fail(state); } }
         else if (signal.aborted && (!begun || confirmed)) void this.settleStop(state, stopReason(signal), begun, otid);
+        else if (state.settling) void this.settleFailure(state, otid);
       }
     };
     return {
@@ -786,6 +841,19 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
     } catch { this.fail(state); }
   }
 
+  /**
+   * A turn the backend rejected before the model produced anything: once the
+   * backend is idle (the delivery's `settle` hook confirms it and records the
+   * turn), its outcome is known and the agent stays usable. When that fails,
+   * the delivery stays uncertain.
+   */
+  private async settleFailure(state: TurnState, otid?: string) {
+    try {
+      const settled = await this.delivery!.settle!({ ...(otid ? { otid } : {}), outcome: 'failed' });
+      state.settle({ end: 'failed', settled: true, ...(state.error ? { error: state.error } : {}), ...(settled && typeof settled.delivered === 'boolean' ? { delivered: settled.delivered } : {}) });
+    } catch { state.settling = false; this.fail(state); }
+  }
+
   /** Run one turn and wait for the full result. A turn stopped by a {@link TurnLimits} limit rejects with a {@link TurnLimitError}. */
   async generate(options: Call<TOOLS>) {
     const turn = await this.prepare(options);
@@ -818,7 +886,7 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
       onAbort: () => { if (!turn.state.started) turn.state.settle({ end: 'stopped', reason: stopReason(turn.signal), delivered: false }); done(); },
       onFinish: result => {
         try {
-          if (this.unusable || result.finishReason !== 'stop') { this.fail(turn.state); return; }
+          if (this.unusable || result.finishReason !== 'stop') { if (!turn.state.settling) this.fail(turn.state); return; }
           this.history = [...turn.messages, ...result.response.messages];
         } finally { done(); }
       },
@@ -827,7 +895,11 @@ export class LettaAgent<TOOLS extends ToolSet = ToolSet> implements Agent<never,
 }
 
 /** How a turn's outcome is reported (see {@link LettaAgent.lastTurn}). `started`: its model run began (its stream reports the end). */
-type TurnState = { started: boolean; settle(outcome: TurnOutcome): void };
+type TurnState = { started: boolean; settle(outcome: TurnOutcome): void;
+  /** A failure whose outcome is being confirmed (see settleFailure): not uncertain yet. */
+  settling?: boolean;
+  /** What the backend said about the failure. */
+  error?: TurnErrorInfo };
 /** A validated turn, ready to send. */
 type PreparedTurn = { message: SendMessage; signal: AbortSignal; control: AbortController; otid?: string; silence: boolean; actor?: TurnActor; unattended?: UnattendedPolicy; limits: TurnLimits; state: TurnState };
 /** Why a stopped turn's signal fired. */

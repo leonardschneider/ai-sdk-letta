@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-export { LettaAgent, TurnLimitError, STOP_CONFIRM_MS, type TurnOutcome, type TurnInfo, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
+export { LettaAgent, TurnLimitError, LettaTurnError, describeTurnError, STOP_CONFIRM_MS, type TurnOutcome, type TurnErrorInfo, type TurnInfo, speakerNote, unattendedNote, reminderNote, historyKey, userTurnContent, parseUserTurn, storeUserTurn, MAX_INPUT_CHARACTERS, type ParsedTurn, type LettaCallOptions, type LettaTurnMetadata, type LettaAgentOptions, type AgentPresentation, type DeliveryHooks, type TurnSession, type TurnOptions } from './agent.js';
 export {
   resolveReplyMode, mentionsAgent, mentionNames, turnNote, combinedText, speakerLabel, REPLY_MODES, REPLY_MODE_SETTINGS, REPLY_MODE_OVERRIDES, STAY_SILENT_TOOL, STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA,
   type ReplyMode, type ReplyModeSetting, type ReplyModeOverride, type TurnSpeaker, type TurnNoteOptions,

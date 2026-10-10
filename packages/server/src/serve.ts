@@ -265,7 +265,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     // Web app development and MCP Apps: each runtime's services (kept across sessions), on one shared preview listener (started below).
     const previewMembers = new Set<PreviewMember>();
     const dev = devServices(definition, stateDirectory, log);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps), join(directory, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     const { webDev, apps } = dev;
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
@@ -290,7 +290,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
         const wiring = memoryWiring(adopted, folder);
         // Its own web development services and MCP App servers (web_dev, mcp_app_dev), on the shared preview listener.
         const services = devServices(adopted, stateDirectory, log);
-        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps), join(folder, 'state.json'), owner, { ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
         const member = services.bind(hosted, { owner, directory: folder, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port });
         previewMembers.add(member);
         const hostedBoard = desk.bind(hosted, folder, owner);
@@ -343,7 +343,7 @@ export async function startApiServer<TOOLS extends ToolSet>(definition: AgentDef
     const token = readFileSync(tokenPath, 'utf8').trim();
     const owner = options.owner ?? 'local-api';
     const port = options.port ?? DEFAULT_PORT + 1;
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, undefined, undefined, options.webSearch), join(directory, 'state.json'), owner);
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, undefined, undefined, options.webSearch), join(directory, 'state.json'), owner, { logLabel: definition.id });
     let stop: (() => Promise<void>) | undefined;
     const server = tokenApiApp(runtime, token, owner, port, () => stop!()).listen(port, '127.0.0.1');
     const bound = await listen(server, port);
@@ -454,7 +454,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       unlocks.push(serviceLock(folder));
       const decisions = decisionDesk(definition, true);
       const memory = memoryWiring(definition, folder, () => directory.members(definition.id).map(m => ({ id: m.id, name: m.name, login: m.login })));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name,
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name, logLabel: definition.id,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
       runtimes.push(runtime);

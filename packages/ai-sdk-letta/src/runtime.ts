@@ -722,11 +722,11 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           limits,
           delivery: { begin: otid => beginTurn(conversationId, otid), complete: () => completeTurn(conversationId),
             // A stopped turn: once the backend is idle (the harness cancelled the run and closed its tools), record it as settled.
-            settle: async ({ otid }) => {
+            settle: async ({ otid, outcome }) => {
               await waitIdle(live);
               const records = (await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS), 200)).messages;
               const delivered = otid ? records.some(message => (message as unknown as { otid?: unknown }).otid === otid) : undefined;
-              settleTurn(conversationId, { outcome: 'stopped', ...(delivered !== undefined ? { delivered } : {}), ...(otid ? { otid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
+              settleTurn(conversationId, { outcome: outcome === 'failed' ? 'failed' : 'stopped', ...(delivered !== undefined ? { delivered } : {}), ...(otid ? { otid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
               return delivered !== undefined ? { delivered } : {};
             } },
           // Whatever the agent changed in the resources during the turn becomes one commit.

@@ -1142,6 +1142,11 @@ body[data-resizing] iframe { pointer-events: none; }
 /* A reply stopped by Stop or a turn limit (the conversation stays usable). */
 .stopped-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-3); padding: 0 2px 6px; }
 .stopped-line svg { flex-shrink: 0; opacity: .8; }
+.failed-line { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; color: var(--text-3); padding: 0 2px 6px; }
+.failed-line svg { flex-shrink: 0; margin-top: 2px; color: var(--warning, #b45309); }
+.failed-details { margin-top: 2px; }
+.failed-details summary { cursor: pointer; width: fit-content; }
+.failed-details code { display: block; white-space: pre-wrap; word-break: break-word; font-size: 11.5px; max-height: 8em; overflow: auto; padding: 4px 6px; border-radius: 4px; background: var(--surface-2, rgba(127,127,127,.08)); }
 .notice .check-note { font-style: normal; color: var(--text-2); }
 .command-timeout { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .command-timeout-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-2); }
