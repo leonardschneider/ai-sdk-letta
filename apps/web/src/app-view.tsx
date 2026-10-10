@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client';
-import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, X } from 'lucide-react';
+import { LoaderCircle, Maximize2, Minimize2, PanelRight, PictureInPicture2, RotateCw, ScrollText, X } from 'lucide-react';
 import { api, errorCode } from './api.js';
-import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, retryInstance, hostCapabilities, VIEW_STATE_SAVE, viewStateContext, viewStateParams, type AppApprovalView, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
+import { acceptFrameMessage, approvalError, hostContext, INLINE_HEIGHT, SizeDamper, nextDisplayMode, openableLink, retryInstance, hostCapabilities, VIEW_STATE_SAVE, viewStateContext, viewStateParams, appDownReason, STARTING_RETRY, VIEW_HEARTBEAT_MS, type AppApprovalView, type AppDown, type AppInstance, type DisplayMode, type NoInstance, type Placement } from './apps-model.js';
 
 /**
  * One MCP App view (spec 2026-01-26): the view's HTML in a sandbox proxy
@@ -70,7 +70,9 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
   const box = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number>(INLINE_HEIGHT.initial);
   // `missing`: the server had no record of the call (yet); a later phase of the call asks again.
-  const [state, setState] = useState<{ phase: 'loading' | 'ready' | 'failed'; error?: string; instance?: AppInstance; missing?: boolean }>({ phase: 'loading' });
+  const [state, setState] = useState<{ phase: 'loading' | 'ready' | 'failed'; error?: string; instance?: AppInstance; missing?: boolean; down?: AppDown }>({ phase: 'loading' });
+  const [restarting, setRestarting] = useState(false);
+  const [logs, setLogs] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const [declared, setDeclared] = useState<string[] | undefined>();
   const bridgeRef = useRef<AppBridge | undefined>(undefined);
@@ -85,19 +87,28 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
     const control = new AbortController();
     let bridge: AppBridge | undefined;
     let instanceId: string | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const onTheme = () => { void bridge?.sendHostContextChange({ theme: theme() }); };
     (async () => {
       let instance: AppInstance;
       try {
         // A call that is starting is recorded a moment later: ask again while it runs (a finished call is there at once).
-        let answer: AppInstance | NoInstance;
-        for (let attempt = 0; ; attempt++) {
-          answer = await api<AppInstance | NoInstance>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement });
-          if ((answer as AppInstance).instance || disposed || !retryInstance(versionRef.current, attempt)) break;
+        let answer: AppInstance | NoInstance | AppDown;
+        for (let attempt = 0, starting = 0; ; attempt++) {
+          answer = await api<AppInstance | NoInstance | AppDown>(`/v1/threads/${encodeURIComponent(threadId)}/apps/instances`, { toolCallId, placement });
+          if (disposed) return;
+          // The app restarts by itself (stopped after its idle timeout): say so, and ask again until it runs.
+          if (answer.status === 'starting' && 'app' in answer && starting++ < STARTING_RETRY.attempts) {
+            setState({ phase: 'loading', down: answer as AppDown });
+            await new Promise(resolve => setTimeout(resolve, STARTING_RETRY.everyMs));
+            continue;
+          }
+          if ((answer as AppInstance).instance || !retryInstance(versionRef.current, attempt)) break;
           await new Promise(resolve => setTimeout(resolve, 250));
         }
         if (disposed) return;
+        if ((answer.status === 'unavailable' || answer.status === 'starting') && 'appStatus' in answer) { setState({ phase: 'failed', down: answer as AppDown, error: appDownReason(answer as AppDown) }); return; }
         if (!(answer as AppInstance).instance) { setState({ phase: 'failed', missing: true, error: versionRef.current === 'running' ? 'Waiting for the app…' : 'No view for this call: it did not run, or it is no longer available.' }); return; }
         instance = answer as AppInstance;
       }
@@ -168,6 +179,8 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       if (disposed) return;
       setDeclared(bridge.getAppCapabilities()?.availableDisplayModes as string[] | undefined);
       setState({ phase: 'ready', instance });
+      // On screen: a heartbeat keeps its dev app's container from stopping for idleness.
+      heartbeat = setInterval(() => { void api(`/v1/apps/instances/${instance.instance}/heartbeat`, {}).catch(() => {}); }, VIEW_HEARTBEAT_MS);
       // Spec: complete tool input after initialization, then the result (or the cancellation).
       await bridge.sendToolInput({ arguments: instance.input });
       const finish = async (record: AppInstance) => {
@@ -190,6 +203,7 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
     })().catch(error => { if (!disposed) setState(s => s.phase === 'ready' ? s : { phase: 'failed', error: error instanceof Error && error.message ? 'The app’s view failed to start.' : 'Couldn’t load the app.' }); });
     return () => {
       disposed = true;
+      clearInterval(heartbeat);
       pending.current = { resultSent: false };
       control.abort();
       media.removeEventListener('change', onTheme);
@@ -225,6 +239,22 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
     return () => observer.disconnect();
   }, [mode, placement, state.phase]);
 
+  const down = state.down;
+  const restart = async () => {
+    if (!down) return;
+    setRestarting(true); setLogs(undefined);
+    setState(s => ({ ...s, phase: 'loading', down: { ...down, appStatus: 'starting' } }));
+    try { await api(`/v1/threads/${encodeURIComponent(threadId)}/apps/${encodeURIComponent(down.app.id)}/restart`, {}); }
+    catch { /* the next instance says why */ }
+    finally { setRestarting(false); }
+    // The view loads again by itself (failed again: the card says why).
+    setAttempt(a => a + 1);
+  };
+  const showLogs = async () => {
+    if (!down) return;
+    try { setLogs((await api<{ logs: string }>(`/v1/threads/${encodeURIComponent(threadId)}/apps/${encodeURIComponent(down.app.id)}/logs`)).logs || '(no output)'); }
+    catch { setLogs('Couldn’t read the logs.'); }
+  };
   const fixed = placement === 'panel' || mode !== 'inline';
   const canFullscreen = !declared || declared.includes('fullscreen');
   const canPip = !!declared?.includes('pip');
@@ -244,8 +274,17 @@ export default function AppFrame({ threadId, toolCallId, placement, mode, onMode
       </span>
     </div>
     <div ref={box} className="appview-stage" style={fixed ? undefined : { height }}>
-      {state.phase === 'loading' && <div className="appview-wait" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/>Loading {name}…</div>}
-      {state.phase === 'failed' && <div className="appview-wait" role="alert">{state.error}</div>}
+      {state.phase === 'loading' && <div className="appview-wait" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/>{down ? `Starting ${down.app.name}…` : `Loading ${name}…`}</div>}
+      {state.phase === 'failed' && !down && <div className="appview-wait" role="alert">{state.error}</div>}
+      {state.phase === 'failed' && down && <div className="appview-down" role="alert" data-app-status={down.appStatus} data-stop-reason={down.stopReason}>
+        <p className="appview-down-title"><strong>{down.app.name} is not running.</strong> {appDownReason(down)}</p>
+        <div className="appview-down-actions">
+          {down.restartable !== false && <button type="button" className="btn primary small" disabled={restarting} onClick={() => void restart()}><RotateCw size={13} aria-hidden="true"/> Restart app</button>}
+          {down.app.dev && <button type="button" className="btn ghost small" onClick={() => void showLogs()}><ScrollText size={13} aria-hidden="true"/> Logs</button>}
+        </div>
+        {down.restartable === false && <p className="muted">It can be restarted once its conversation is open again, or by the agent.</p>}
+        {logs !== undefined && <pre className="appview-logs" aria-label="App logs">{logs}</pre>}
+      </div>}
       <iframe ref={frame} className="appview-frame" title={`${name} (MCP App)`} hidden={state.phase === 'failed'}
         sandbox="allow-scripts allow-same-origin allow-forms" referrerPolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-write 'none'"/>
     </div>
