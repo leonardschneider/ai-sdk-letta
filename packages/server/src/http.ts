@@ -260,6 +260,28 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   });
   /** A view instance for a recorded tool call of the thread: `{ toolCallId, placement }`. */
   app.post('/v1/threads/:id/apps/instances', async (req, res) => res.status(201).json(await gate().instance(owner, req.params.id, req.body)));
+  /** Restart an app from a view or the Apps dialog: a dev app of the thread (members), or an installed app (admins). Waits for the start; returns its status. View-only agents have no apps (404). */
+  app.post('/v1/threads/:id/apps/:app/restart', async (req, res) => res.json(await gate().restart(owner, req.params.id, req.params.app, author(req), { admin: access ? access.mayAct(req, {}) : true })));
+  /** A dev app's server log (stderr), for the thread's own dev apps. */
+  app.get('/v1/threads/:id/apps/:app/logs', async (req, res) => res.json(await gate().logs(owner, req.params.id, req.params.app)));
+  /** Restart or stop an app from the Apps dialog (admins). Restart waits for the start and returns the status. */
+  const lifecycle = (action: 'restart' | 'stop') => async (req: express.Request, res: express.Response) => {
+    if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    const apps = gate().apps; const id = String(req.params.app);
+    if (!apps.status().some(a => a.id === id)) throw new RuntimeFault('not_found', 404);
+    try { if (action === 'stop') await apps.stopApp(id); else await apps.restart(id); }
+    catch (error) { throw new RuntimeFault((error as { code?: string }).code === 'app_unavailable' ? 'app_unavailable' : 'restart_failed', 409); }
+    runtime.appsChanged();
+    const status = apps.status().find(a => a.id === id)!;
+    res.json({ id: status.id, status: status.status, ...(status.stopReason ? { stopReason: status.stopReason } : {}), ...(status.error ? { error: status.error } : {}) });
+  };
+  app.post('/v1/apps/:app/restart', lifecycle('restart'));
+  app.post('/v1/apps/:app/stop', lifecycle('stop'));
+  /** A dev app's server log (admins, from the Apps dialog). */
+  app.get('/v1/apps/:app/logs', async (req, res) => {
+    if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403);
+    try { res.json({ logs: (await gate().apps.devLogs(req.params.app)).slice(-20_000) }); } catch { throw new RuntimeFault('not_found', 404); }
+  });
   /** Approvals of the thread's app actions (the cards), and context waiting for the next turn. */
   app.get('/v1/threads/:id/apps/approvals', (req, res) => res.json({ approvals: gate().pending(owner, req.params.id), context: gate().waitingContext(owner, req.params.id) }));
   /** Decide an app action: `{ approved, always?: 'tool' | 'app' }` ("Allow always": admins only). Only the person who sent the turn... or anyone in the single-user app; on a team server, members of the agent (admins for others' views). */
@@ -284,6 +306,7 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
       case 'context': return res.json(g.context(owner, id, req.body, author(req)));
       case 'state': return res.json(g.saveState(owner, id, req.body, author(req)));
       case 'log': g.log(owner, id, req.body, author(req)); return res.json({ ok: true });
+      case 'heartbeat': return res.json(g.heartbeat(owner, id));
       case 'close': g.closeInstance(owner, id); return res.json({ ok: true });
       default: throw new RuntimeFault('not_found', 404);
     }

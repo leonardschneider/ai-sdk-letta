@@ -32,7 +32,7 @@ import { envTurnLimits, resolveTurnLimits, SDK_TURN_TIMEOUT_MS, type TurnLimits 
 import { dreamHookCommand, dreamHookSupported, parseDreamRequest, reviewDreamRequest, type DreamRequest } from './dream-review.js';
 import type { UnattendedPolicy } from './tools.js';
 import { MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpApps, type McpAppsOptions } from './mcp-apps.js';
-import { MCP_APP_DEV_TOOL_NAMES, mcpAppDevEnabled, mcpAppDevToolTimeouts } from './mcp-app-dev.js';
+import { MCP_APP_DEV_TOOL_NAMES, bindDevApps, mcpAppDevEnabled, mcpAppDevToolTimeouts } from './mcp-app-dev.js';
 
 /**
  * The application-owned tool an agent calls to listen without replying. It
@@ -588,6 +588,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         }
         // MCP Apps: their model-visible tools join the agent's (named <app>__<tool>, with the definition's policy).
         await apps?.ready();
+        // Dev apps of this conversation (kept across idle stops and restarts) start again through its services.
+        if (apps && webDev && appDev) bindDevApps(apps, conversationId, webDev);
         // With a conversation: its dev apps' tools too. The session's tool list is fixed when it opens:
         // when they change (mcp_app_dev_start/reload/stop), toolsStale() tells the host to reopen it before the next turn.
         const appTools = apps?.agentTools(conversationId);

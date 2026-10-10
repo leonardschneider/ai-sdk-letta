@@ -1820,6 +1820,19 @@ export class ThreadRuntime {
   }
   /** A conversation's web development status changed (dev server, origins): open pages refresh. */
   webDevChanged() { this.changed(); }
+  /**
+   * Open the thread's session if none is open (and no turn runs): its dev
+   * apps kept from before a restart can start again through its services.
+   * Refused like any open (for example `view_only`).
+   */
+  async openForApps(owner: string, threadId: string): Promise<void> {
+    const thread = this.thread(owner, threadId);
+    const lane = this.lane(threadId);
+    if (lane.active || (lane.current && lane.current.conversationId === thread.conversationId)) return;
+    for (let i = 0; lane.locked && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 100));
+    if (lane.active || (lane.current && lane.current.conversationId === thread.conversationId)) return;
+    await this.exclusive(lane, () => this.openIn(lane, thread));
+  }
   /** Something about MCP Apps changed (an approval, an app started): open pages refresh. */
   appsChanged() { this.changed(); }
   /** May a new turn be sent in this thread (now, or after the running one)? False behind an uncertain turn (see {@link usableRun}). */

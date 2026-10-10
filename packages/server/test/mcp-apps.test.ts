@@ -506,8 +506,11 @@ test('views of an adopted agent\'s dev app after a restart: the records and thre
     // The GUI restarts: new runtime, gate and apps on the same state; the agent starts its dev app again (generation 1).
     const second = await boot();
     assert.equal(second.apps.records.size, ids.length, 'the records are read back');
-    // Before the dev app runs again: the call is known; its view waits for the app (not "no view").
-    await assert.rejects(second.gate.instance('local-gui', thread, { toolCallId: ids[0] }), /app_unknown|app_unavailable/);
+    // Before the dev app runs again: the call is known; its view says why the app is not running (not "no view"): its spec was kept (stopped by the restart).
+    const before = await second.gate.instance('local-gui', thread, { toolCallId: ids[0] }) as { status: string; stopReason?: string; app: { id: string } };
+    assert.equal(before.status, 'unavailable');
+    assert.equal(before.stopReason, 'restart');
+    assert.equal(before.app.id, 'dev_chessos');
     await startDev(second.apps, conversationId);
     for (const [index, id] of ids.entries()) {
       const answer = await second.gate.instance('local-gui', thread, { toolCallId: id, placement: index ? 'inline' : 'panel' }) as { instance?: string; status: string; input: { label: string } };

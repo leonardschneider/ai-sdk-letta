@@ -192,6 +192,16 @@ export class AppGate {
     const config = this.apps.config(record.app);
     if (!config) throw new RuntimeFault('app_unknown', 404);
     if (!this.apps.enabled(record.app)) throw new RuntimeFault('app_disabled', 409);
+    // A dev app kept from before a restart starts through its conversation's services: open its session first.
+    await this.bindDev(owner, threadId, record.app, true);
+    // A dev app stopped after its idle timeout (or a restart) starts again by itself; the page asks again while it starts.
+    if (this.apps.autoRestarts(record.app) || this.appState(record.app)?.appStatus === 'starting') {
+      const status = await this.apps.ensureDev(record.app, this.restartWaitMs);
+      if (status === 'starting' || this.apps.autoRestarts(record.app)) return { status: 'starting', ...this.appState(record.app) };
+    }
+    const state = this.appState(record.app);
+    // Not running (failed, exited, stopped by someone): why, and whether it can be restarted (the page shows Restart and Logs).
+    if (state && state.appStatus !== 'running') return { status: 'unavailable', ...state };
     let view;
     try { view = await this.apps.view(record.app, record.resourceUri); }
     catch (error) { throw new RuntimeFault(error instanceof McpAppError ? error.code : 'app_unavailable', 409); }
@@ -217,6 +227,56 @@ export class AppGate {
       ...(saved ? { viewState: saved.state, ...(saved.inherited ? { viewStateFrom: saved.inherited } : {}) } : {}),
     };
   }
+  /** How long {@link instance} waits for a dev app that restarts by itself before answering `starting`. */
+  restartWaitMs = 30_000;
+  /** What the page shows of an app that is not running. */
+  private appState(appId: string) {
+    const s = this.apps.status().find(a => a.id === appId);
+    if (!s) return undefined;
+    return { app: { id: s.id, name: s.name, ...(s.dev ? { dev: true } : {}) }, appStatus: s.status, ...(s.stopReason ? { stopReason: s.stopReason } : {}), ...(s.error ? { error: s.error.slice(0, 500) } : {}), ...(s.restartable ? { restartable: true } : {}) };
+  }
+  /**
+   * Restart an app for a thread (`POST /v1/threads/:id/apps/:app/restart`):
+   * a dev app of one of the thread's conversations, or an installed app
+   * (`admin: false` refuses installed apps: they serve every conversation).
+   * Waits for the start; returns the app's status.
+   */
+  async restart(owner: string, threadId: string, appId: string, author?: RunAuthor, access: { admin?: boolean } = {}): Promise<Record<string, unknown>> {
+    this.options.runtime.threadSummary(owner, threadId) ?? (() => { throw new RuntimeFault('not_found', 404); })();
+    const status = this.apps.status().find(a => a.id === appId);
+    if (!status) throw new RuntimeFault('app_unknown', 404);
+    if (status.dev ? !this.options.runtime.conversationsOf(owner, threadId).includes(status.dev.conversationId) : access.admin === false) throw new RuntimeFault(status.dev ? 'app_unknown' : 'admin_required', status.dev ? 404 : 403);
+    if (!this.apps.enabled(appId)) throw new RuntimeFault('app_disabled', 409);
+    if (status.dev) await this.bindDev(owner, threadId, appId, false);
+    try { await this.apps.restart(appId); }
+    catch (error) { throw new RuntimeFault(error instanceof McpAppError ? error.code : 'app_unavailable', 409); }
+    const after = this.appState(appId)!;
+    this.audit({ event: 'app_restart', app: appId, threadId, toolCallId: '', outcome: after.appStatus }, author);
+    this.options.runtime.appsChanged();
+    return { status: after.appStatus, ...after };
+  }
+  /** A dev app read back after a restart has no services yet: open the thread's session (which binds them). `quiet`: failures leave it unbound. */
+  private async bindDev(owner: string, threadId: string, appId: string, quiet: boolean) {
+    const s = this.apps.status().find(a => a.id === appId);
+    if (!s?.dev || s.restartable || s.status !== 'stopped') return;
+    try { await this.options.runtime.openForApps(owner, threadId); }
+    catch (error) { if (!quiet) throw error instanceof RuntimeFault ? error : new RuntimeFault('app_unavailable', 409); }
+  }
+  /** A dev app's server log (stderr) for a thread (its own dev apps only). */
+  async logs(owner: string, threadId: string, appId: string): Promise<{ logs: string }> {
+    this.options.runtime.threadSummary(owner, threadId) ?? (() => { throw new RuntimeFault('not_found', 404); })();
+    const status = this.apps.status().find(a => a.id === appId);
+    if (!status?.dev || !this.options.runtime.conversationsOf(owner, threadId).includes(status.dev.conversationId)) throw new RuntimeFault('not_found', 404);
+    await this.bindDev(owner, threadId, appId, true);
+    try { return { logs: (await this.apps.devLogs(appId)).slice(-20_000) }; } catch { throw new RuntimeFault('not_found', 404); }
+  }
+  /** An open view on screen (`heartbeat`, about every minute): its dev app's services container does not stop for idleness. */
+  heartbeat(owner: string, instanceId: string): { ok: true } {
+    const instance = this.live(owner, instanceId);
+    if (!instance.served) throw new RuntimeFault('not_found', 404);
+    return { ok: true };
+  }
+
   /** Drop instances beyond the limit (oldest first) and expired unserved ones. */
   private prune() {
     const now = Date.now();
@@ -249,6 +309,8 @@ export class AppGate {
     if (!instance || instance.owner !== owner || instance.closed) throw new RuntimeFault('not_found', 404);
     // The thread must still be there (not archived).
     this.options.runtime.threadSummary(owner, instance.threadId) ?? (() => { throw new RuntimeFault('not_found', 404); })();
+    // Every request of an open view keeps its dev app's container alive.
+    this.apps.touchDev(instance.app);
     return instance;
   }
 

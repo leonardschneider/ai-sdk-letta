@@ -338,6 +338,9 @@ export class WebDevServices {
   /** Is it closed for good? */
   get isClosed(): boolean { return this.closed; }
 
+  private stopListeners = new Set<(reason: 'idle' | 'close' | 'manual') => void>();
+  /** Listen to the container stopping (`idle`: after the idle timeout). Returns an unsubscribe function. */
+  onStop(listener: (reason: 'idle' | 'close' | 'manual') => void): () => void { this.stopListeners.add(listener); return () => this.stopListeners.delete(listener); }
   /** Listen to status changes. Returns an unsubscribe function. */
   onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private changed() { for (const listener of this.listeners) { try { listener(); } catch { /* ignore */ } } }
@@ -389,9 +392,11 @@ export class WebDevServices {
    * Stop everything: browser, tunnels, dev server and the container (the
    * next tool call starts a new one). `reason` is for logs.
    */
-  async stop(_reason: 'idle' | 'close' | 'manual' = 'manual'): Promise<void> {
+  async stop(reason: 'idle' | 'close' | 'manual' = 'manual'): Promise<void> {
     clearTimeout(this.idle);
     const container = this.container;
+    // Told first, before the tunnels close: dev apps stop with the container (and keep their spec), not as failures.
+    if (container) for (const listener of [...this.stopListeners]) { try { listener(reason); } catch { /* observer */ } }
     this.container = undefined; this.started = false; this.dev = undefined; this.resolved = undefined;
     const browser = this.browser; this.browser = undefined;
     await browser?.then(client => client.close(), () => {}).catch(() => {});
@@ -409,7 +414,7 @@ export class WebDevServices {
     if (this.closed) return;
     this.closed = true;
     await this.stop('close');
-    this.listeners.clear();
+    this.listeners.clear(); this.stopListeners.clear();
   }
 
   /* ---------------- tunnels ---------------- */
