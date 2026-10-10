@@ -1,5 +1,21 @@
 # @ai-sdk-letta/server
 
+## 0.24.0
+
+### Minor Changes
+
+- 5e403b3: Activity view: see at a glance whether an agent is idle, working or waiting for you. The conversation header (always visible, also with the sidebar hidden or on a phone) shows a status pill: "Idle", "Working · 2" (pulsing) or "Needs you · 1" (amber), with a marker when another agent is busy. It opens a popover (a bottom sheet on phones) with running turns and their current step, queued messages, prompts, decisions, memory reviews and app approvals waiting for you, services (the services container with its idle countdown, the dev server, the headless browser, dev and installed apps), Jiminy reviews, dreaming and scheduled tasks — each with its elapsed time, a link to its conversation, and Stop / Restart where the app already could. The agent switcher marks busy agents, and the sidebar shows a spinner on conversations with a running turn for every agent. New routes: `GET /v1/activity` (per agent, also `/api/agents/:id/v1/activity`), `GET /api/activity?since=` (counts per agent, long poll on the change channel; no Letta call) and `POST /v1/threads/:id/preview/stop-dev-server`. `WebDevStatus` gains `idleStopsAt` and `browser`; `WebDevRegistry.conversations()` and `MemoryGuard.reviewing()` are new.
+- 086106b: Stopped MCP Apps restart easily. Dev apps keep their spec when their services container stops after its idle timeout, and across server restarts (`dev-apps.json`). Opening a view or calling a tool restarts them by themselves; failed apps show why, with Restart and Logs. New routes: `POST /v1/threads/:id/apps/:app/restart`, `GET /v1/threads/:id/apps/:app/logs`, `POST /v1/apps/:app/restart|stop`, `GET /v1/apps/:app/logs`, and a view heartbeat that keeps the container running while a view is on screen. The Apps dialog shows each app's status with Restart, Stop and Logs.
+
+### Patch Changes
+
+- 86f7901: Claude models work with MCP App development: its tools are now named `app_dev_*` (was `mcp_app_*`), because Anthropic rejects every request with a tool whose name starts with `mcp_` ("Third-party apps now draw from your extra usage", HTTP 400). Why a turn failed is now logged (`[turn-failed] <agent> <thread> <code>: <error>`, with the HTTP status and the provider's message), kept on the run (`run.error`) and shown under the failed reply ("Details"). A turn Letta rejected before the model produced anything no longer locks the conversation: once Letta is idle, the turn is settled and the conversation stays usable.
+- Updated dependencies [5e403b3]
+- Updated dependencies [086106b]
+- Updated dependencies [86f7901]
+- Updated dependencies [4cb1bc1]
+  - ai-sdk-letta@0.24.0
+
 ## 0.23.0
 
 ### Minor Changes
