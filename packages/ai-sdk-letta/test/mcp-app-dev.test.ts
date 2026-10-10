@@ -79,7 +79,7 @@ test('dev tools: names, permissions (all allow)', () => {
 
 test('dev tools: start → tools for that conversation only, linter output, stderr to the log file', async () => {
   const { apps, run, lines } = setup();
-  const started = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  const started = await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   assert.equal(started.isError, undefined, started.text);
   assert.match(started.text, /Dev app "clock" running \(generation 1\): 2 tool\(s\), 1 view\(s\)/);
   assert.match(started.text, /show_time \[visibility: model, app\] → you call it as dev_clock__show_time/);
@@ -100,9 +100,9 @@ test('dev tools: start → tools for that conversation only, linter output, stde
   assert.deepEqual([...apps.agentTools('conv-b').names.keys()], []);
   assert.deepEqual([...apps.agentTools().names.keys()], []);
   // Another conversation cannot take the name, nor see the app.
-  const taken = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'x', transport: 'stdio' }, setupContext(apps, 'conv-b'));
+  const taken = await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'x', transport: 'stdio' }, setupContext(apps, 'conv-b'));
   assert.equal(taken.isError, true); assert.match(taken.text, /another conversation/);
-  const foreign = await run('mcp_app_dev_call', { name: 'clock', tool: 'show_time' }, setupContext(apps, 'conv-b'));
+  const foreign = await run('app_dev_call', { name: 'clock', tool: 'show_time' }, setupContext(apps, 'conv-b'));
   assert.equal(foreign.isError, true); assert.match(foreign.text, /no dev app "clock" in this conversation/);
   await apps.close();
 });
@@ -111,7 +111,7 @@ const setupContext = (apps: McpApps, conversationId: string) => ({ [WEBDEV_CONTE
 
 test('dev tools: a missing folder is refused with a listing', async () => {
   const { run, apps } = setup();
-  const result = await run('mcp_app_dev_start', { name: 'clock', cwd: 'nope', command: 'node server.js', transport: 'stdio' });
+  const result = await run('app_dev_start', { name: 'clock', cwd: 'nope', command: 'node server.js', transport: 'stdio' });
   assert.equal(result.isError, true);
   assert.match(result.text, /folder \/workspace\/Chat\/nope does not exist[\s\S]*clock\//);
   assert.deepEqual(apps.devApps('conv-a'), []);
@@ -119,10 +119,10 @@ test('dev tools: a missing folder is refused with a listing', async () => {
 
 test('dev tools: reload reports changes; status; stop removes the tools', async () => {
   const { run, apps, state, execs } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   state.tools = [{ ...viewTool, description: 'Show the time, now with zones' }, { name: 'set_alarm', inputSchema: { type: 'object' } }];
   state.html = `${HTML}<!-- v2 -->`;
-  const reloading = run('mcp_app_dev_reload', { name: 'clock' });
+  const reloading = run('app_dev_reload', { name: 'clock' });
   assert.deepEqual(apps.devGenerations(), { dev_clock: 1 }, 'while it restarts, open views keep the previous generation');
   const reloaded = await reloading;
   assert.equal(reloaded.isError, undefined, reloaded.text);
@@ -131,30 +131,30 @@ test('dev tools: reload reports changes; status; stop removes the tools', async 
   assert.match(reloaded.text, /added set_alarm; removed refresh; changed show_time; views changed ui:\/\/clock\/view\.html/);
   assert.match(reloaded.text, /reach you at your next turn/);
   assert.deepEqual([...apps.agentTools('conv-a').names.keys()].sort(), ['dev_clock__set_alarm', 'dev_clock__show_time']);
-  const status = await run('mcp_app_dev_status', {});
+  const status = await run('app_dev_status', {});
   assert.match(status.text, /clock: running · generation 2 since .* · \/workspace\/Chat\/clock \$ node server\.js/);
   assert.match(status.text, /tool set_alarm \[model, app\] as dev_clock__set_alarm/);
   const before = execs.length;
-  const stopped = await run('mcp_app_dev_stop', { name: 'clock' });
+  const stopped = await run('app_dev_stop', { name: 'clock' });
   assert.match(stopped.text, /stopped/);
   assert.ok(execs.slice(before).some(argv => argv.join(' ').includes('AI_SDK_LETTA_DEV_APP=clock') && argv.join(' ').includes('kill')), 'its processes are killed in the container');
   assert.deepEqual([...apps.agentTools('conv-a').names.keys()], []);
-  assert.match((await run('mcp_app_dev_status', {})).text, /No dev apps/);
+  assert.match((await run('app_dev_status', {})).text, /No dev apps/);
   assert.deepEqual(apps.devGenerations(), {});
-  assert.equal((await run('mcp_app_dev_reload', { name: 'clock' })).isError, true);
+  assert.equal((await run('app_dev_reload', { name: 'clock' })).isError, true);
   await apps.close();
 });
 
 test('dev tools: call returns content, structuredContent and _meta (also app-only tools)', async () => {
   const { run, apps, state } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
-  const called = await run('mcp_app_dev_call', { name: 'clock', tool: 'refresh', args: { zone: 'CET' } });
+  await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  const called = await run('app_dev_call', { name: 'clock', tool: 'refresh', args: { zone: 'CET' } });
   assert.equal(called.isError, undefined, called.text);
   assert.match(called.text, /It is noon \(refresh\)/);
   assert.match(called.text, /structuredContent:\n\{\n {2}"time": "12:00",\n {2}"zone": "CET"/);
   assert.match(called.text, /_meta:\n\{"ui\/x":1\}/);
   assert.deepEqual(state.calls, [{ name: 'refresh', args: { zone: 'CET' } }]);
-  const unknown = await run('mcp_app_dev_call', { name: 'clock', tool: 'nope' });
+  const unknown = await run('app_dev_call', { name: 'clock', tool: 'nope' });
   assert.equal(unknown.isError, true); assert.match(unknown.text, /tool_unknown/);
   await apps.close();
 });
@@ -162,8 +162,8 @@ test('dev tools: call returns content, structuredContent and _meta (also app-onl
 test('dev tools: check lists findings with rule, level and fix', async () => {
   const { run, apps, state } = setup();
   state.tools = [{ name: 'show', inputSchema: { type: 'object' }, _meta: { 'ui/resourceUri': URI } }];
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
-  const checked = await run('mcp_app_dev_check', { name: 'clock' });
+  await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  const checked = await run('app_dev_check', { name: 'clock' });
   assert.match(checked.text, /Check: \d+ error\(s\)/);
   assert.match(checked.text, /\[error\] flat-resource-uri \(tool show\): .*\n {4}fix: /);
   await apps.close();
@@ -171,8 +171,8 @@ test('dev tools: check lists findings with rule, level and fix', async () => {
 
 test('dev tools: logs tail the dev app\'s stderr file', async () => {
   const { run, apps, execs } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
-  const logs = await run('mcp_app_dev_logs', { name: 'clock', lines: 10 });
+  await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  const logs = await run('app_dev_logs', { name: 'clock', lines: 10 });
   assert.match(logs.text, /The dev app "clock" server is running\.\nstderr \(\/tmp\/devapp-clock\.log\):\nlistening on stdio\nwarning: yellow/);
   assert.ok(execs.some(argv => argv[0] === 'tail' && argv[2] === '10' && argv[3] === '/tmp/devapp-clock.log'));
   await apps.close();
@@ -180,16 +180,16 @@ test('dev tools: logs tail the dev app\'s stderr file', async () => {
 
 test('dev tools: unavailable without web development or MCP Apps, or for a failed server', async () => {
   const { run, contextFor, apps } = setup();
-  const noWebDev = await run('mcp_app_dev_start', { name: 'clock', command: 'x' }, { [MCP_APPS_CONTEXT]: contextFor('conv-a')[MCP_APPS_CONTEXT] });
+  const noWebDev = await run('app_dev_start', { name: 'clock', command: 'x' }, { [MCP_APPS_CONTEXT]: contextFor('conv-a')[MCP_APPS_CONTEXT] });
   assert.equal(noWebDev.isError, true); assert.match(noWebDev.text, /sandbox_unavailable/);
-  const noApps = await run('mcp_app_dev_status', {}, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT] });
+  const noApps = await run('app_dev_status', {}, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT] });
   assert.equal(noApps.isError, true); assert.match(noApps.text, /app_unavailable/);
-  assert.match((await run('mcp_app_dev_start', { name: 'Bad Name', command: 'x' })).text, /dev app name/);
+  assert.match((await run('app_dev_start', { name: 'Bad Name', command: 'x' })).text, /dev app name/);
   // A server that does not speak MCP: the start fails with the error, nothing joins the tools.
   const failing = new McpApps([], { directory: join(tmp('mcpdev-state'), 'apps'), connector: async () => { throw new Error('Connection closed'); } });
-  const failed = await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'echo hi', transport: 'stdio' }, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT], [MCP_APPS_CONTEXT]: { apps: failing, conversationId: 'conv-a' } });
+  const failed = await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'echo hi', transport: 'stdio' }, { [WEBDEV_CONTEXT]: contextFor('conv-a')[WEBDEV_CONTEXT], [MCP_APPS_CONTEXT]: { apps: failing, conversationId: 'conv-a' } });
   assert.equal(failed.isError, true);
-  assert.match(failed.text, /did not start \(generation 1\): Connection closed[\s\S]*mcp_app_dev_logs/);
+  assert.match(failed.text, /did not start \(generation 1\): Connection closed[\s\S]*app_dev_logs/);
   assert.deepEqual([...failing.agentTools('conv-a').names.keys()], []);
   await failing.close(); await apps.close();
 });
@@ -204,21 +204,21 @@ test('definition: dev mode needs webDevTools and a built-in sandbox; enables app
   assert.equal(mcpAppDevEnabled(withoutDev, webDevEnabled(withoutDev)), false);
 });
 
-test('mcp_app_guide: bounded, attributed, the object form of callServerTool, and each dev tool points to it', async () => {
+test('app_dev_guide: bounded, attributed, the object form of callServerTool, and each dev tool points to it', async () => {
   const { run, apps } = setup();
-  const guide = await run('mcp_app_guide', {});
+  const guide = await run('app_dev_guide', {});
   assert.equal(guide.isError, undefined);
   assert.ok(guide.text.length < 7000, `about 1.5k tokens (${guide.text.length} chars)`);
   for (const needle of ['Persist server state (games, documents) as files under $STATE_DIR', '## Restoring the view', "'ui/state/save'", 'io.ai-sdk-letta/viewState', 'ui/update-model-context']) assert.ok(guide.text.includes(needle), needle);
-  for (const needle of ['create-mcp-app', 'Apache-2.0', 'CC-BY-4.0', '@modelcontextprotocol/ext-apps@2.0.3', 'registerAppTool', 'registerAppResource', '_meta: { ui: { resourceUri', 'text/html;profile=mcp-app', 'new App(', 'app.connect()', "callServerTool({ name: 'add_note', arguments:", 'run_command_online', 'mcp_app_dev_reload']) assert.ok(guide.text.includes(needle), needle);
-  assert.equal(MCP_APP_DEV_TOOL_PERMISSIONS.mcp_app_guide, 'allow');
-  assert.match((mcpAppDevTools.mcp_app_dev_start as { description: string }).description, /mcp_app_guide/);
+  for (const needle of ['create-mcp-app', 'Apache-2.0', 'CC-BY-4.0', '@modelcontextprotocol/ext-apps@2.0.3', 'registerAppTool', 'registerAppResource', '_meta: { ui: { resourceUri', 'text/html;profile=mcp-app', 'new App(', 'app.connect()', "callServerTool({ name: 'add_note', arguments:", 'run_command_online', 'app_dev_reload']) assert.ok(guide.text.includes(needle), needle);
+  assert.equal(MCP_APP_DEV_TOOL_PERMISSIONS.app_dev_guide, 'allow');
+  assert.match((mcpAppDevTools.app_dev_start as { description: string }).description, /app_dev_guide/);
   await apps.close();
 });
 
 test('dev apps: calls from their views run without asking by default; asking can be turned back on per conversation (kept)', async () => {
   const { run, apps } = setup();
-  await run('mcp_app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
+  await run('app_dev_start', { name: 'clock', cwd: 'clock', command: 'node server.js', transport: 'stdio' });
   assert.equal(apps.policy('dev_clock', 'refresh'), 'allow', 'the agent\'s own code: runs, like run_command');
   assert.equal(apps.policy('dev_clock', 'show_time', 'agent'), 'allow');
   apps.setDevViewsAsk('dev_clock', true);

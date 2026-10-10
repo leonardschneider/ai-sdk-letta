@@ -164,9 +164,9 @@ test('web_dev and mcp_app_dev: off by default, need a docker or apple-container 
   const both = adoptedDefinition(record, docker);
   assert.equal(both.sandbox?.image, WEBDEV_IMAGE);
   assert.ok(webDevEnabled(both)); assert.ok(mcpAppDevEnabled(both, true));
-  assert.equal(both.permissions.allow_web_origin, 'ask'); assert.equal(both.permissions.dev_server_start, 'allow'); assert.equal(both.permissions.mcp_app_dev_start, 'allow');
+  assert.equal(both.permissions.allow_web_origin, 'ask'); assert.equal(both.permissions.dev_server_start, 'allow'); assert.equal(both.permissions.app_dev_start, 'allow');
   const web = adoptedDefinition({ ...record, tools: ['sandbox', 'web_dev'] }, docker);
-  assert.ok(webDevEnabled(web)); assert.equal(mcpAppDevEnabled(web, true), false); assert.equal('mcp_app_guide' in web.tools, false);
+  assert.ok(webDevEnabled(web)); assert.equal(mcpAppDevEnabled(web, true), false); assert.equal('app_dev_guide' in web.tools, false);
   const plain = adoptedDefinition({ ...record, tools: ['sandbox'] }, docker);
   assert.equal(plain.sandbox?.image, SANDBOX_IMAGE); assert.equal('dev_server_start' in plain.tools, false);
   assert.equal(adoptedDefinition(record, { sandbox: { ...docker.sandbox, image: 'mine:1' } }).sandbox?.image, 'mine:1', 'an image the host names stays');
@@ -174,7 +174,7 @@ test('web_dev and mcp_app_dev: off by default, need a docker or apple-container 
   assert.equal('dev_server_start' in adoptedDefinition({ ...record, tools: ['web_dev', 'mcp_app_dev'] }, docker).tools, false, 'without the sandbox set: none');
   // The instructions section points at the guides.
   const section = adoptedInstructionsSection(Object.keys(both.tools), 'Memory policy.');
-  assert.match(section, /Call web_dev_guide once/); assert.match(section, /Call mcp_app_guide once/);
+  assert.match(section, /Call web_dev_guide once/); assert.match(section, /Call app_dev_guide once/);
   assert.equal(adoptedInstructionsSection(Object.keys(plain.tools), 'Memory policy.').includes('web_dev_guide once'), false);
 });
 

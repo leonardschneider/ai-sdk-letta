@@ -726,7 +726,7 @@ export type McpAppStatus = {
   tools: McpAppToolInfo[]; origins: string[];
   /** Each view's declared CSP domains, and those granted (declared and approved). */
   views: { uri: string; declared: McpAppCspDomains; granted: Required<McpAppCspDomains>; fingerprint?: string }[];
-  /** A dev app (`mcp_app_dev_start`): the conversation it belongs to, its folder and command, and how many times it was (re)started. */
+  /** A dev app (`app_dev_start`): the conversation it belongs to, its folder and command, and how many times it was (re)started. */
   dev?: { conversationId: string; folder: string; command: string; generation: number; startedAt: string; transport?: 'http' | 'stdio'; port?: number; path?: string };
   /** Why a stopped app stopped (see {@link McpAppStopReason}). */
   stopReason?: McpAppStopReason;
@@ -1213,7 +1213,7 @@ export class McpApps {
   devApps(conversationId: string): string[] { return [...this.live.entries()].filter(([, live]) => live.dev?.conversationId === conversationId).map(([id]) => id); }
   /** A dev app's spec, if `appId` is one. */
   devSpec(appId: string): Readonly<DevApp> | undefined { return this.live.get(appId)?.dev; }
-  /** The running client of an app (the linter and `mcp_app_dev_call`). */
+  /** The running client of an app (the linter and `app_dev_call`). */
   client(appId: string): McpAppClient { return this.running(appId).client; }
   /**
    * Start a dev app for a conversation (`dev_<name>`), or restart it with a
@@ -1240,7 +1240,7 @@ export class McpApps {
     try {
       const runtime = live.runtime = await spec.launch(deadline);
       if (this.closed) { await runtime.stop(); throw new Error('closed'); }
-      const client = live.client = await withDeadline(this.connector(runtimeTarget(runtime), () => { if (live.client === client) { live.status = 'stopped'; live.stopReason = 'exited'; live.error = 'The dev app server exited (see mcp_app_dev_logs).'; this.persistDev(); this.changed(); } }), deadline, 'start_timeout');
+      const client = live.client = await withDeadline(this.connector(runtimeTarget(runtime), () => { if (live.client === client) { live.status = 'stopped'; live.stopReason = 'exited'; live.error = 'The dev app server exited (see app_dev_logs).'; this.persistDev(); this.changed(); } }), deadline, 'start_timeout');
       live.serverInfo = client.serverInfo;
       const listed = await withDeadline(client.listTools(), deadline, 'start_timeout');
       live.tools = (Array.isArray(listed?.tools) ? listed.tools : []).filter(t => t && typeof t.name === 'string' && /^[\w.:/-]{1,128}$/.test(t.name)).slice(0, MCP_APP_LIMITS.maxTools);
@@ -1250,7 +1250,7 @@ export class McpApps {
       live.status = 'running';
       this.options.log?.(`Dev app ${id}: generation ${live.dev.generation} started · ${live.tools.length} tool(s), ${live.views.size} view(s).`);
     } catch (error) {
-      const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (${live.runtime?.http ? `does it serve Streamable HTTP at ${live.runtime.http.url}?` : 'does it speak MCP over stdio?'} see mcp_app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
+      const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (${live.runtime?.http ? `does it serve Streamable HTTP at ${live.runtime.http.url}?` : 'does it speak MCP over stdio?'} see app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
       await this.stopOne(live);
       live.status = 'failed'; live.error = message;
       // The previous tools stay known (not the agent's while it fails): its views say why, with Restart and Logs.
@@ -1281,7 +1281,7 @@ export class McpApps {
   async restart(appId: string, signal?: AbortSignal): Promise<McpAppStatus['status']> {
     const live = this.live.get(appId);
     if (!live) throw new McpAppError('app_unknown', `No MCP App "${appId}"`);
-    if (!this.restartable(appId)) throw new McpAppError('app_unavailable', 'This dev app can be restarted once its conversation is open again (or by the agent: mcp_app_dev_start)');
+    if (!this.restartable(appId)) throw new McpAppError('app_unavailable', 'This dev app can be restarted once its conversation is open again (or by the agent: app_dev_start)');
     if (live.restarting) { await live.restarting.catch(() => {}); return live.status; }
     const work = live.dev ? this.reloadDev(appId, signal) : (async () => { await this.stopOne(live); await this.start(this.configs.find(c => c.id === appId)!); })();
     live.restarting = work.finally(() => { live.restarting = undefined; });

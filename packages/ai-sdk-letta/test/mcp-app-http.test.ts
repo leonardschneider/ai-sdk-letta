@@ -147,7 +147,7 @@ function httpSetup(options: { ready?: string; busy?: boolean } = {}) {
   };
   const apps = new McpApps([], { directory: join(tmp('mcphttp-state'), 'apps'), connector });
   const context = { [WEBDEV_CONTEXT]: services, [MCP_APPS_CONTEXT]: { apps, conversationId: 'conv-a' } };
-  const run = async (input: Record<string, unknown>, name: keyof typeof mcpAppDevTools = 'mcp_app_dev_start') => await mcpAppDevTools[name].execute!(input as never, { toolCallId: 'c', messages: [], context } as never) as { text: string; isError?: boolean };
+  const run = async (input: Record<string, unknown>, name: keyof typeof mcpAppDevTools = 'app_dev_start') => await mcpAppDevTools[name].execute!(input as never, { toolCallId: 'c', messages: [], context } as never) as { text: string; isError?: boolean };
   return { services, apps, execs, targets, answers, run };
 }
 
@@ -169,11 +169,11 @@ test('dev start over http (the default): detached with PORT/HOST, readiness, tun
     assert.equal(services.devAppPort('notes'), port);
     assert.equal(apps.status().find(s => s.id === 'dev_notes')?.status, 'running');
     // Reload: a new server start and a new tunnel.
-    const reloaded = await run({ name: 'notes' }, 'mcp_app_dev_reload');
+    const reloaded = await run({ name: 'notes' }, 'app_dev_reload');
     assert.equal(reloaded.isError, undefined, reloaded.text);
     assert.equal(answers.length, 2);
     const endpoint = targets[1] as McpAppHttpEndpoint;
-    const stopped = await run({ name: 'notes' }, 'mcp_app_dev_stop');
+    const stopped = await run({ name: 'notes' }, 'app_dev_stop');
     assert.match(stopped.text, /stopped/);
     assert.equal(services.devAppPort('notes'), undefined);
     await assert.rejects(endpoint.fetch(endpoint.url), /fetch failed/);

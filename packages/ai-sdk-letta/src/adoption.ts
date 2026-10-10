@@ -269,7 +269,7 @@ export function adoptedInstructionsSection(tools: readonly string[], memoryPolic
     ...(project ? [projectNote(project)] : []),
     // Web and MCP App development: the agent learns to call their guides first (its own system prompt never gets the app's notes otherwise).
     ...(tools.includes('web_dev_guide') ? [WEB_DEV_NOTE] : []),
-    ...(tools.includes('mcp_app_guide') ? [MCP_APP_DEV_NOTE] : []),
+    ...(tools.includes('app_dev_guide') ? [MCP_APP_DEV_NOTE] : []),
     memoryPolicy, INSTRUCTIONS_END].join('\n');
 }
 

@@ -1,5 +1,5 @@
 /**
- * The MCP App development guide: the text `mcp_app_guide` returns, and the
+ * The MCP App development guide: the text `app_dev_guide` returns, and the
  * short note added to the instructions of agents with the dev app tools.
  *
  * Adapted from the official ext-apps skill `create-mcp-app` (v2.0.3,
@@ -16,9 +16,9 @@
  */
 
 /** Added to the instructions of agents with the dev app tools (the example app adds it with MCP_APP_DEV=1). */
-export const MCP_APP_DEV_NOTE = 'MCP Apps: you can build MCP Apps (MCP servers whose tools show interactive views in the chat). Call mcp_app_guide once before you build or change one, and follow it. Persist app server state (games, documents) as files under $STATE_DIR and reload it on start, since memory is lost on restart; in views, save small UI state with ui/state/save when the host advertises io.ai-sdk-letta/viewState. Keep ui/message text short and human-readable.';
+export const MCP_APP_DEV_NOTE = 'MCP Apps: you can build MCP Apps (MCP servers whose tools show interactive views in the chat). Call app_dev_guide once before you build or change one, and follow it. Persist app server state (games, documents) as files under $STATE_DIR and reload it on start, since memory is lost on restart; in views, save small UI state with ui/state/save when the host advertises io.ai-sdk-letta/viewState. Keep ui/message text short and human-readable.';
 
-/** The guide, returned by `mcp_app_guide` (about 1.5k tokens). */
+/** The guide, returned by `app_dev_guide` (about 1.5k tokens). */
 export const MCP_APP_GUIDE = `# Building MCP Apps here
 
 Adapted from ext-apps skill "create-mcp-app" v2.0.3 (Apache-2.0/CC-BY-4.0).
@@ -33,10 +33,10 @@ zod@^4.2.0, esbuild@^0.25 (bundles the view). Not @modelcontextprotocol/sdk.
 
 ## How this host runs your app
 
-- mcp_app_dev_start runs your server in the services container (no
+- app_dev_start runs your server in the services container (no
   network; no build or install). It serves **Streamable HTTP** on
   127.0.0.1:$PORT (PORT=3000, HOST set; "port" to change, not 5173/3128)
-  at /mcp ("path"). Output: mcp_app_dev_logs. Or "transport":"stdio".
+  at /mcp ("path"). Output: app_dev_logs. Or "transport":"stdio".
 - Python FastMCP: \`mcp.run(transport="http", host="127.0.0.1", port=3000)\`.
 - Install with run_command_online (the user approves): \`npm install\`.
   Then build with run_command (no network).
@@ -156,11 +156,11 @@ const save = () => on && app.request({ method: 'ui/state/save', params: { state:
 
 1. Scaffold the folder (above), run_command_online \`npm install\`,
    run_command \`npm run build\`.
-2. mcp_app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
-   It checks the contract: fix every error (mcp_app_dev_check again).
-   Failed to start: read mcp_app_dev_logs.
-3. mcp_app_dev_call tests any tool (also "app" ones) without the user.
+2. app_dev_start {"name":"notes","cwd":"notes","command":"node server.js"}.
+   It checks the contract: fix every error (app_dev_check again).
+   Failed to start: read app_dev_logs.
+3. app_dev_call tests any tool (also "app" ones) without the user.
 4. Call your dev_<name>__<tool> (next turn): the view renders in the chat;
    the user can open it in the side panel.
-5. Change, rebuild, mcp_app_dev_reload: open views render again.
+5. Change, rebuild, app_dev_reload: open views render again.
 `;

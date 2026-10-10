@@ -46,7 +46,7 @@ function fixture(environment?: { sandbox?: { provider: 'docker'; git: { name: st
       peek: async (conversationId: string): Promise<UIMessage[]> => { peeked.push(conversationId); return [{ id: 'h1', role: 'user', parts: [{ type: 'text', text: `hello ${conversationId}` }] }, { id: 'h2', role: 'assistant', parts: [{ type: 'dynamic-tool', toolName: 'Bash', toolCallId: 'c', state: 'output-available', input: {}, output: 'ok' } as never] }]; },
     }, join(folder, 'state.json'), 'local-gui');
     const tools = (definition as { tools?: object }).tools ?? {};
-    return { runtime, ...('dev_server_start' in tools ? { webDev: true } : {}), ...('mcp_app_dev_start' in tools ? { apps: true } : {}), close: async () => { closed.push(definition.id); } };
+    return { runtime, ...('dev_server_start' in tools ? { webDev: true } : {}), ...('app_dev_start' in tools ? { apps: true } : {}), close: async () => { closed.push(definition.id); } };
   };
   const options = { stateDirectory: dir, owner: 'local-gui', reserved: { definitionIds: ['example-assistant'], agentIds: () => [] as string[] }, backend: fake.backend, build, ...(environment ? { environment } : {}) };
   const registry = new AdoptionRegistry(options as never);

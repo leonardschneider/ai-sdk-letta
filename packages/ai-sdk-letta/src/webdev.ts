@@ -565,7 +565,7 @@ export class WebDevServices {
   /* ---------------- dev apps (MCP Apps dev mode) ---------------- */
 
   /**
-   * The command line of a dev app's MCP server (`mcp_app_dev_start`): `command`
+   * The command line of a dev app's MCP server (`app_dev_start`): `command`
    * in `cwd` (resolved like `dev_server_start`), with stdin and stdout attached
    * (they carry MCP) and stderr appended to {@link devAppLogFile}. Its
    * processes are marked, so {@link stopDevApp} stops them inside the
@@ -596,7 +596,7 @@ export class WebDevServices {
     });
   }
   /**
-   * Start a dev app's Streamable HTTP MCP server (`mcp_app_dev_start` with
+   * Start a dev app's Streamable HTTP MCP server (`app_dev_start` with
    * transport "http"): `command` runs detached in `cwd` with `PORT=<port>`
    * and `HOST=127.0.0.1`, stdout and stderr appended to
    * {@link devAppLogFile}, its processes marked (see {@link stopDevApp}).
@@ -666,7 +666,7 @@ export class WebDevServices {
   async devAppLogs(name: string, lines = 60): Promise<string> {
     if (!DEV_APP_NAME_RE.test(name)) throw new SandboxError('command_invalid', 'Invalid dev app name');
     const container = this.container ? await this.container.catch(() => undefined) : undefined;
-    if (!container) return `No services container is running, so no dev app "${name}" either (start it with mcp_app_dev_start).`;
+    if (!container) return `No services container is running, so no dev app "${name}" either (start it with app_dev_start).`;
     return this.hold(async () => {
       const alive = (await container.exec(['sh', '-c', `${aliveFn(devAppMark(name))}; if alive; then echo yes; else echo no; fi`])).stdout.trim() === 'yes';
       const log = await this.logTail(container, Math.min(WEBDEV_LIMITS.maxLogLines, Math.max(1, lines)), devAppLogFile(name));
