@@ -3,6 +3,7 @@
  * person, services, background work), from objects the server already holds.
  * Cheap: no Letta call, no disk read beyond the runtime's own state.
  */
+import { commandGoal } from 'ai-sdk-letta';
 import type { ThreadRuntime } from './runtime.js';
 
 /** One item of the activity view. `since` is when it started (ISO), `threadId` the conversation it belongs to. */
@@ -23,7 +24,7 @@ export type ActivityItem = {
   /** Jobs: progress (`done` of `total` `unit`, `percent`), for the bar. */
   progress?: { done?: number; total?: number; unit?: string; percent?: number; ratePerSecond?: number; etaSeconds?: number };
   /** What can be done from the view: `stop` (a turn, a queued message), `stop-dev-server`, `stop-app`, `restart-app`. */
-  actions?: ('stop' | 'stop-dev-server' | 'stop-app' | 'restart-app')[];
+  actions?: ('stop' | 'stop-dev-server' | 'stop-app' | 'restart-app' | 'stop-command')[];
   /** Turns, queued messages and prompts: the run. Apps: the app ID. */
   ref?: string;
 };
@@ -67,12 +68,23 @@ export function agentActivity(runtime: ThreadRuntime, owner: string): AgentActiv
     items.push({ id: `decision:${decision.id}`, group: 'waiting', kind: memory ? 'memory-review' : 'decision', label: decision.kind === 'web-research' ? 'Review web research' : memory ? 'Memory review' : 'Decision', detail: decision.question.slice(0, 200), threadId: thread.id, title: thread.title, since: decision.createdAt, ref: decision.id });
   }
   // Jobs the agent runs (visible background work): goal, progress, latest log line. A job nobody updated for a while is listed but no longer counts as work.
+  // Background commands show through their card (with Stop); one without a card (no job tools) gets a line of its own.
+  const carded = new Set<string>();
   for (const job of runtime.jobs?.running() ?? []) {
     const thread = titled(job.threadId);
     if (!thread || thread.archived) continue;
     const { percent, ratePerSecond, etaSeconds } = job.progress;
-    items.push({ id: `job:${job.id}`, group: 'jobs', kind: 'job', label: job.goal, ...(job.lines.length ? { detail: job.lines.at(-1)!.slice(0, 200) } : {}), threadId: thread.id, title: thread.title, since: job.startedAt, status: runtime.jobs!.fresh(job) ? 'running' : 'quiet',
-      progress: { ...(job.done !== undefined ? { done: job.done } : {}), ...(job.total !== undefined ? { total: job.total } : {}), ...(job.unit ? { unit: job.unit } : {}), ...(percent !== undefined ? { percent } : {}), ...(ratePerSecond !== undefined ? { ratePerSecond } : {}), ...(etaSeconds !== undefined ? { etaSeconds } : {}) }, ref: job.id });
+    const command = runtime.background?.byCard(job.id);
+    const background = command?.state === 'running';
+    if (background) carded.add(command.id);
+    items.push({ id: `job:${job.id}`, group: 'jobs', kind: 'job', label: job.goal, ...(job.lines.length ? { detail: job.lines.at(-1)!.slice(0, 200) } : {}), threadId: thread.id, title: thread.title, since: job.startedAt, status: background || runtime.jobs!.fresh(job) ? 'running' : 'quiet',
+      progress: { ...(job.done !== undefined ? { done: job.done } : {}), ...(job.total !== undefined ? { total: job.total } : {}), ...(job.unit ? { unit: job.unit } : {}), ...(percent !== undefined ? { percent } : {}), ...(ratePerSecond !== undefined ? { ratePerSecond } : {}), ...(etaSeconds !== undefined ? { etaSeconds } : {}) }, ref: job.id, ...(background ? { actions: ['stop-command' as const] } : {}) });
+  }
+  for (const command of runtime.background?.list({ state: 'running' }) ?? []) {
+    if (carded.has(command.id)) continue;
+    const thread = titled(runtime.threadOfConversationAny(command.conversationId));
+    if (!thread || thread.archived) continue;
+    items.push({ id: `command:${command.id}`, group: 'jobs', kind: 'job', label: commandGoal(command.command), detail: 'Background command', threadId: thread.id, title: thread.title, since: command.startedAt, status: 'running', actions: ['stop-command'], ref: command.id });
   }
   if (runtime.apps) {
     for (const approval of runtime.apps.pendingAll()) {

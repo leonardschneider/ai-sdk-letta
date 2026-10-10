@@ -52,6 +52,7 @@ export const RESOURCE_LIMITS = Object.freeze({
 export const RESOURCES_GITIGNORE = `# Managed by ai-sdk-letta. Python environment, sandbox home and caches are not versioned.
 .venv/
 .home/
+.jobs/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -1002,7 +1003,7 @@ export class ResourceStore {
         } catch { /* none */ }
         const ledger: { name: string; path: string; sha256: string; bytes: number }[] = [];
         for (const entry of readdirSync(source, { withFileTypes: true })) {
-          if (['.meta', '.text', '.venv', '.home'].includes(entry.name) || entry.name.startsWith('.tmp-') || entry.isSymbolicLink()) continue;
+          if (['.meta', '.text', '.venv', '.home', '.jobs'].includes(entry.name) || entry.name.startsWith('.tmp-') || entry.isSymbolicLink()) continue;
           let name = entry.name;
           if (existsSync(join(target, name))) name = this.freeName(folder, name);
           renameSync(join(source, entry.name), join(target, name));

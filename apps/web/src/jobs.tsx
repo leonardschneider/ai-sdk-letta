@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, ChevronRight, CircleAlert, CircleSlash, Hourglass, LoaderCircle } from 'lucide-react';
+import { Check, ChevronRight, CircleAlert, CircleSlash, Hourglass, LoaderCircle, Square } from 'lucide-react';
 import { api, apiPath } from './api.js';
 import { useLightbox } from './images.js';
 import { commandJobOf, jobOfCall, mergeJob, progressLine, statusText, type JobView } from './jobs-model.js';
@@ -58,6 +58,14 @@ export function CommandJobCard({ job, details }: { job: JobView; details: React.
   return <JobBody job={job} details={details}/>;
 }
 
+/** Stop a background command from its card. */
+function StopCommand({ job }: { job: JobView }) {
+  const [busy, setBusy] = useState(false);
+  return <button type="button" className="btn small job-stop" disabled={busy} title="Stop this background command (the agent is told)"
+    onClick={() => { setBusy(true); void api(`/v1/threads/${encodeURIComponent(job.threadId)}/jobs/${encodeURIComponent(job.id)}/stop`, {}).catch(() => {}).finally(() => setBusy(false)); }}>
+    <Square size={11} aria-hidden="true"/>{busy ? 'Stopping…' : 'Stop'}</button>;
+}
+
 function JobBody({ job, details }: { job: JobView; details?: React.ReactNode }) {
   const [showDetails, setShowDetails] = useState(false);
   const [open, setOpen] = useState(false);
@@ -76,7 +84,8 @@ function JobBody({ job, details }: { job: JobView; details?: React.ReactNode }) 
     <header className="job-head">
       <span className="job-icon" data-status={job.status} aria-hidden="true"><Icon size={14} className={job.status === 'running' ? 'spin' : undefined}/></span>
       <strong className="job-goal">{job.goal}</strong>
-      <span className="job-status" data-status={job.status}>{statusText(job)}</span>
+      <span className="job-status" data-status={job.status}>{job.background && job.status === 'running' ? 'In the background' : statusText(job)}</span>
+      {job.background && job.status === 'running' && <StopCommand job={job}/>}
     </header>
     {(percent !== undefined || line) && <div className="job-progress">
       {percent !== undefined

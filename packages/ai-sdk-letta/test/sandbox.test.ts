@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Experimental_SandboxSession } from 'ai';
 import { createJustBashNetworkSandboxSession } from '@ai-sdk/sandbox-just-bash';
 import {
-  AttachmentStore, FILE_TOOL_PERMISSIONS, KILL_SCRIPT, SANDBOX_CONTEXT, SANDBOX_LIMITS, SANDBOX_TOOL_PERMISSIONS, SandboxError, SandboxManager, checkProjectFolder, commandScript, createToolBridge,
+  AttachmentStore, FILE_TOOL_PERMISSIONS, KILL_SCRIPT, SANDBOX_CONTEXT, SANDBOX_LIMITS, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SandboxError, SandboxManager, checkProjectFolder, commandScript, createToolBridge,
   defineAgent, fileTools, formatCommandResult, gitConfigCredentials, parseCommandOutput, resolveSandboxConfig, resolveWorkingDirectory, runSandboxCommand, sandboxEnabled, sandboxEnvironment, sandboxTools,
   type SandboxFactory, type SandboxRequest,
 } from '../src/index.js';
@@ -155,16 +155,16 @@ test('working directories stay inside /workspace (and /project when mounted); ".
 const base = { id: 'sandbox-test', name: 'Sandbox Test', model: 'test/model', instructions: 'Test.' };
 
 test('permissions: run_command defaults to allow, network commands to ask and can never be allow', () => {
-  assert.deepEqual({ ...SANDBOX_TOOL_PERMISSIONS }, { run_command: 'allow', run_command_online: 'ask' });
+  assert.deepEqual({ ...SANDBOX_TOOL_PERMISSIONS }, { run_command: 'allow', run_command_online: 'ask', command_status: 'allow', command_output: 'allow', command_stop: 'allow' });
   assert.ok(Object.isFrozen(SANDBOX_TOOL_PERMISSIONS));
   const definition = defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS }, sandbox: { provider: 'docker' } });
   assert.equal(definition.permissions.run_command, 'allow');
   assert.equal(definition.permissions.run_command_online, 'ask');
   assert.ok(sandboxEnabled(definition));
   assert.throws(() => defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { run_command: 'allow', run_command_online: 'allow' }, sandbox: { provider: 'docker' } }), /run_command_online uses the network/);
-  assert.throws(() => defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { run_command: 'allow' }, sandbox: { provider: 'docker' } }), /Missing permission for tool\(s\): run_command_online/, 'fail-closed: every tool needs a permission');
+  assert.throws(() => defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { run_command: 'allow' }, sandbox: { provider: 'docker' } }), /Missing permission for tool\(s\): .*run_command_online/, 'fail-closed: every tool needs a permission');
   // Denied, or no sandbox: not enabled.
-  assert.equal(sandboxEnabled(defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { run_command: 'deny', run_command_online: 'deny' }, sandbox: { provider: 'docker' } })), false);
+  assert.equal(sandboxEnabled(defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS, run_command: 'deny', run_command_online: 'deny' }, sandbox: { provider: 'docker' } })), false);
   assert.equal(sandboxEnabled(defineAgent({ ...base, tools: { ...sandboxTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS } })), false);
 });
 
@@ -192,7 +192,7 @@ test('the shell tools are never exposed without a sandbox, even when listed and 
   const definition = defineAgent({ ...base, tools, permissions });
   assert.equal(sandboxEnabled(definition), false);
   // The runtime passes this restriction when no sandbox is configured.
-  const bridge = createToolBridge({ tools: definition.tools, permissions: definition.permissions, persist: () => {}, allowedTools: Object.keys(tools).filter(name => !name.startsWith('run_command')) });
+  const bridge = createToolBridge({ tools: definition.tools, permissions: definition.permissions, persist: () => {}, allowedTools: Object.keys(tools).filter(name => !(SANDBOX_TOOL_NAMES as readonly string[]).includes(name)) });
   assert.deepEqual(bridge.allowedTools.sort(), ['list_files', 'read_file', 'search_files']);
   const denied = await bridge.execute('run_command', 'call-1', { command: 'id' });
   assert.equal(denied.isError, true);

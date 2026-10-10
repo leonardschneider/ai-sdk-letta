@@ -6,13 +6,14 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:p
 import { tool, jsonSchema, type Experimental_SandboxSession, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import { COMMAND_PROGRESS, commandJob, type CommandJob, type CommandOutputChunk } from './command-progress.js';
+import { BACKGROUND_LIMITS, BACKGROUND_MARK, BackgroundCommands, backgroundScript, type BackgroundRecord } from './background.js';
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
 /** Names of the built-in sandbox tools. */
-export const SANDBOX_TOOL_NAMES = ['run_command', 'run_command_online'] as const;
+export const SANDBOX_TOOL_NAMES = ['run_command', 'run_command_online', 'command_status', 'command_output', 'command_stop'] as const;
 export type SandboxToolName = typeof SANDBOX_TOOL_NAMES[number];
 
 /**
@@ -146,8 +147,10 @@ export interface SandboxConfig {
    * commands. @default 120000
    */
   timeoutMs?: number;
-  /** Stop the conversation's sandbox after this long without commands. @default 600000 */
+  /** Stop the conversation's sandbox after this long without commands (never while a background command runs). @default 600000 */
   idleTimeoutMs?: number;
+  /** Wall-clock limit of one background command (`run_command` with `background: true`), at most 48 hours. @default 21600000 (6 hours) */
+  backgroundTimeoutMs?: number;
   /** Identity for git commits made in the sandbox. @default { name: 'Sandbox', email: 'sandbox@localhost' } */
   git?: { name: string; email: string };
   /** Memory for the built-in providers (e.g. `'2G'`). @default '2G' */
@@ -164,6 +167,7 @@ export interface ResolvedSandboxConfig {
   readonly image: string;
   readonly timeoutMs: number;
   readonly idleTimeoutMs: number;
+  readonly backgroundTimeoutMs: number;
   readonly git: { readonly name: string; readonly email: string };
   readonly memory: string;
   readonly cpus: number;
@@ -201,6 +205,8 @@ export function resolveSandboxConfig(input: SandboxConfig): ResolvedSandboxConfi
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > SANDBOX_LIMITS.maxTimeoutMs) throw bad(`timeoutMs must be 1000–${SANDBOX_LIMITS.maxTimeoutMs}`);
   const idleTimeoutMs = input.idleTimeoutMs ?? SANDBOX_LIMITS.defaultIdleMs;
   if (!Number.isInteger(idleTimeoutMs) || idleTimeoutMs < 1000 || idleTimeoutMs > 24 * 3600_000) throw bad('idleTimeoutMs must be 1000 ms to 24 hours');
+  const backgroundTimeoutMs = input.backgroundTimeoutMs ?? BACKGROUND_LIMITS.defaultLimitMs;
+  if (!Number.isInteger(backgroundTimeoutMs) || backgroundTimeoutMs < 1000 || backgroundTimeoutMs > BACKGROUND_LIMITS.maxLimitMs) throw bad('backgroundTimeoutMs must be 1000 ms to 48 hours');
   const git = input.git ?? { name: 'Sandbox', email: 'sandbox@localhost' };
   const plain = (value: unknown, max: number) => typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\0-\x1f<>]/.test(value);
   if (!plain(git.name, 100) || !plain(git.email, 200) || !/^[^@\s]+@[^@\s]+$/.test(git.email)) throw bad('git must be { name, email } with a plain name and an email address');
@@ -218,7 +224,7 @@ export function resolveSandboxConfig(input: SandboxConfig): ResolvedSandboxConfi
     if (MOUNT_UNSAFE.test(spec.path)) throw bad('project path must not contain commas, equal signs or control characters');
     project = Object.freeze({ path: resolve(spec.path), readOnly: spec.readOnly === true });
   }
-  return Object.freeze({ provider: input.provider, ...(project ? { project } : {}), image, timeoutMs, idleTimeoutMs, git: Object.freeze({ name: git.name.trim(), email: git.email.trim() }), memory, cpus, ...(input.binary ? { binary: input.binary } : {}) });
+  return Object.freeze({ provider: input.provider, ...(project ? { project } : {}), image, timeoutMs, idleTimeoutMs, backgroundTimeoutMs, git: Object.freeze({ name: git.name.trim(), email: git.email.trim() }), memory, cpus, ...(input.binary ? { binary: input.binary } : {}) });
 }
 
 /* ------------------------------------------------------------------ */
@@ -392,11 +398,16 @@ export function resolveWorkingDirectory(cwd: string | undefined, project = false
 
 /**
  * Shell that kills every process in the sandbox except PID 1 (the sandbox's
- * keep-alive) and the shell running it. Commands run one at a time, so this
- * also stops anything a command left in the background, even with a cleared
- * environment or a new session. Pure shell builtins: it starts no processes.
+ * keep-alive), the shell running it, and background commands (marked with
+ * {@link BACKGROUND_MARK} in their environment). Commands run one at a
+ * time, so this also stops anything a command left in the background, even
+ * with a cleared environment or a new session. Pure shell builtins: it
+ * starts no processes. (The sandbox's `sh` is dash, whose `read` takes the
+ * whole NUL-separated environment as one line; the mark comes first anyway.
+ * A command that sets the mark itself only outlives later commands: the
+ * sandbox still stops when idle, since only recorded background commands hold it.)
  */
-export const KILL_SCRIPT = 'for p in /proc/[0-9]*; do [ -r "$p/status" ] || continue; n=${p#/proc/}; [ "$n" = 1 ] && continue; [ "$n" = "$$" ] && continue; q=; while read -r k v; do if [ "$k" = PPid: ]; then q=$v; break; fi; done <"$p/status" 2>/dev/null; [ "$q" = "$$" ] && continue; kill -9 "$n" 2>/dev/null; done; true';
+export const KILL_SCRIPT = `for p in /proc/[0-9]*; do [ -r "$p/status" ] || continue; n=\${p#/proc/}; [ "$n" = 1 ] && continue; [ "$n" = "$$" ] && continue; q=; while read -r k v; do if [ "$k" = PPid: ]; then q=$v; break; fi; done <"$p/status" 2>/dev/null; [ "$q" = "$$" ] && continue; l=; IFS= read -r l <"$p/environ" 2>/dev/null; case "$l" in *${BACKGROUND_MARK}*) continue;; esac; kill -9 "$n" 2>/dev/null; done; true`;
 
 /**
  * The POSIX shell script that runs one command in the sandbox: an empty
@@ -798,16 +809,24 @@ export class SandboxManager {
   private closed = false;
   private readonly online = new Set<SandboxHandle>();
   private queue: Promise<unknown> = Promise.resolve();
+  /** Background commands of the agent, and this conversation's key in them (`<agentId>.<conversationId>`). */
+  readonly background?: { commands: BackgroundCommands; owner: string; conversationId: string };
+  private unwatch?: () => void;
 
   /**
    * @param options.workspace returns the host folder to mount at `/workspace` (created and checked by the caller).
    * @param options.folder returns the conversation's folder, relative to `/workspace`: commands start there.
    * @throws {SandboxError} if the project folder is unsafe or holds credentials
    */
-  constructor(config: ResolvedSandboxConfig, options: { workspace: () => string; folder?: () => string | undefined; owner?: string }) {
+  constructor(config: ResolvedSandboxConfig, options: { workspace: () => string; folder?: () => string | undefined; owner?: string; background?: { commands: BackgroundCommands; conversationId: string } }) {
     this.config = config;
     this.workspace = options.workspace;
     this.folder = options.folder;
+    if (options.background && options.owner) {
+      this.background = { commands: options.background.commands, owner: options.owner, conversationId: options.background.conversationId };
+      // When the last background command ends, the idle timer starts again.
+      this.unwatch = options.background.commands.watch(options.owner, () => { if (!this.busy && !this.closed && this.current) this.release(true); });
+    }
     this.labels = { [SANDBOX_LABEL]: '1', [`${SANDBOX_LABEL}.pid`]: String(process.pid), [`${SANDBOX_LABEL}.host`]: hostname(), ...(options.owner ? { [`${SANDBOX_LABEL}.owner`]: options.owner.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) } : {}) };
     if (config.project) {
       const path = checkProjectFolder(config.project.path);
@@ -839,6 +858,8 @@ export class SandboxManager {
   get containerLabels(): Readonly<Record<string, string>> { return this.labels; }
   /** Is the conversation's sandbox running (or starting)? */
   get running(): boolean { return this.current !== undefined; }
+  /** Does a background command of this conversation run now (the sandbox then stays up)? */
+  get holding(): boolean { return !!this.background?.commands.running(this.background.owner); }
   /** Does `/project` exist in this sandbox? */
   get hasProject(): boolean { return this.project !== undefined; }
   /** Default working directory of commands: the conversation's folder. */
@@ -893,6 +914,8 @@ export class SandboxManager {
     this.busy++;
     clearTimeout(this.idle);
     try {
+      // A sandbox kept for background commands after the conversation's session closed is taken back.
+      if (!this.current && this.background) { const parked = this.background.commands.adopt<SandboxHandle>(this.background.owner); if (parked) this.current = parked; }
       if (!this.current) {
         const pending = this.create(false);
         this.current = pending;
@@ -902,14 +925,16 @@ export class SandboxManager {
       return await (signal ? Promise.race([handle, new Promise<never>((_, reject) => { signal.throwIfAborted(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); })]) : handle);
     } catch (error) { this.release(); throw error; }
   }
-  private release() {
-    this.busy = Math.max(0, this.busy - 1);
+  private release(rearm = false) {
+    if (!rearm) this.busy = Math.max(0, this.busy - 1);
     if (this.busy || this.closed || !this.current) return;
     clearTimeout(this.idle);
-    this.idle = setTimeout(() => { void this.stop(); }, this.config.idleTimeoutMs);
+    // Never idle-stopped while a background command runs; its end re-arms the timer.
+    if (this.holding) return;
+    this.idle = setTimeout(() => { if (!this.holding) void this.stop(); }, this.config.idleTimeoutMs);
     this.idle.unref?.();
   }
-  /** Stop the conversation's sandbox now (the next command starts a new one). */
+  /** Stop the conversation's sandbox now (the next command starts a new one). Running background commands are stopped with it. */
   async stop(): Promise<void> {
     clearTimeout(this.idle);
     const current = this.current;
@@ -964,9 +989,43 @@ export class SandboxManager {
     finally { this.online.delete(handle); await handle.stop().catch(() => {}); }
   }
 
-  /** Stop every sandbox of this conversation. Idempotent. */
+  /**
+   * Start a background command: detached in the conversation's sandbox
+   * (marked, so later commands' cleanup spares it), output to
+   * `/workspace/.jobs/<id>/`, stopped at `limitMs` (default
+   * `backgroundTimeoutMs`). Returns once it was launched.
+   * @throws {SandboxError} `sandbox_unavailable` without background support, at the per-conversation limit, or when the launch fails
+   */
+  async runBackground(input: { command: string; cwd?: string; notify?: boolean; limitMs?: number; toolCallId?: string; job?: CommandJob; signal?: AbortSignal }): Promise<BackgroundRecord> {
+    const background = this.background;
+    if (!background) throw new SandboxError('sandbox_unavailable', 'Background commands are not available in this session');
+    if (background.commands.runningCount(background.owner) >= BACKGROUND_LIMITS.maxRunningPerConversation) throw new SandboxError('sandbox_unavailable', `At most ${BACKGROUND_LIMITS.maxRunningPerConversation} background commands can run at once in a conversation; stop one with command_stop first`);
+    const cwd = resolveWorkingDirectory(input.cwd, this.hasProject, this.workingDirectory);
+    const id = `bg-${randomUUID().slice(0, 8)}`;
+    const limitMs = Math.min(input.limitMs ?? this.config.backgroundTimeoutMs, BACKGROUND_LIMITS.maxLimitMs);
+    const script = backgroundScript({ id, command: input.command, cwd, env: this.environment, limitSeconds: Math.round(limitMs / 1000) });
+    return this.exclusive(async () => {
+      input.signal?.throwIfAborted();
+      const handle = await this.acquire(input.signal);
+      try {
+        let raw: { exitCode: number; stdout: string; stderr: string };
+        try { raw = await handle.session.run({ command: script, abortSignal: AbortSignal.any([...(input.signal ? [input.signal] : []), AbortSignal.timeout(30_000)]) }); }
+        catch (error) { if (input.signal?.aborted) throw error; throw new SandboxError('sandbox_unavailable', 'The sandbox could not start the command'); }
+        if (!raw.stdout.includes(`<<ai-sdk-letta-bg:${id}>>:started`)) throw new SandboxError('sandbox_unavailable', `The sandbox could not start the command${raw.stderr.trim() ? `: ${raw.stderr.trim().slice(0, 300)}` : ''}`);
+        // The card shows from the start (and keeps updating after the turn).
+        if (input.job) { try { await input.job.output({ stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0 }); } catch { /* the card is only a view */ } }
+        return background.commands.add({ id, owner: background.owner, conversationId: background.conversationId, command: input.command, cwd, dir: join(this.workspace(), '.jobs', id), limitMs, notify: input.notify !== false, ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}) }, input.job);
+      } finally { this.release(); }
+    });
+  }
+
+  /** Stop every sandbox of this conversation. Idempotent. A sandbox running background commands is kept (by the agent's background commands) until they end. */
   async close(): Promise<void> {
     this.closed = true;
+    clearTimeout(this.idle);
+    this.unwatch?.();
+    const current = this.current;
+    if (current && this.background && this.holding) { this.current = undefined; this.background.commands.park(this.background.owner, current); }
     await Promise.all([this.stop(), ...[...this.online].map(handle => handle.stop().catch(() => {}))]);
     this.online.clear();
   }
@@ -977,11 +1036,18 @@ export class SandboxManager {
 /* ------------------------------------------------------------------ */
 
 /** What a sandbox tool returns: the text the model sees. */
-export interface SandboxToolOutput { text: string; isError?: boolean; exitCode?: number }
+export interface SandboxToolOutput { text: string; isError?: boolean; exitCode?: number; jobId?: string; note?: string }
 type CommandInput = { command: string; cwd?: string };
-const commandSchema = jsonSchema<CommandInput>({ type: 'object', properties: {
+type RunCommandInput = CommandInput & { background?: boolean; notify?: boolean };
+const commandProperties = {
   command: { type: 'string', minLength: 1, maxLength: SANDBOX_LIMITS.maxCommandChars, description: 'Shell command (bash).' },
   cwd: { type: 'string', maxLength: 500, description: 'Working directory, relative to this conversation\'s folder or absolute under /workspace. Default: this conversation\'s folder.' },
+} as const;
+const commandSchema = jsonSchema<CommandInput>({ type: 'object', properties: commandProperties, required: ['command'], additionalProperties: false });
+const runCommandSchema = jsonSchema<RunCommandInput>({ type: 'object', properties: {
+  ...commandProperties,
+  background: { type: 'boolean', description: 'Run it in the background: returns at once with a jobId; it keeps running after your turn (up to hours) and you are told when it ends. Use for anything longer than a few minutes.' },
+  notify: { type: 'boolean', description: 'With background: bring you a message when it ends (default true). false: check it yourself with command_status.' },
 }, required: ['command'], additionalProperties: false });
 
 const errorOutput = (error: unknown): SandboxToolOutput => {
@@ -996,6 +1062,11 @@ function toModelOutput({ output }: { output: unknown }) {
 const managerOf = (context: unknown) => {
   const value = (context as Record<string, unknown> | undefined)?.[SANDBOX_CONTEXT];
   return value instanceof SandboxManager ? value : undefined;
+};
+const backgroundOf = (context: unknown) => {
+  const background = managerOf(context)?.background;
+  if (!background) throw new SandboxError('sandbox_unavailable', 'Background commands are not available in this session');
+  return background;
 };
 const check = (command: string) => {
   if (!command.trim()) throw new SandboxError('command_invalid', 'The command is empty');
@@ -1035,20 +1106,75 @@ async function withCommandJob<T extends { result: CommandResult }>(context: unkn
  *   separate short-lived sandbox on the same workspace. It always needs the
  *   user's approval.
  */
-export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>; run_command_online: Tool<CommandInput, SandboxToolOutput> } = {
+export const sandboxTools: {
+  run_command: Tool<RunCommandInput, SandboxToolOutput>; run_command_online: Tool<CommandInput, SandboxToolOutput>;
+  command_status: Tool<{ jobId?: string }, SandboxToolOutput>; command_output: Tool<{ jobId: string; tail?: number }, SandboxToolOutput>; command_stop: Tool<{ jobId: string }, SandboxToolOutput>;
+} = {
   run_command: tool({
-    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds all resources, one folder per conversation; commands start in this conversation\'s folder. Files persist and are versioned. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. You are not root: sudo, apt and system installs are impossible (read-only system); put tools in /workspace (pip/uv/npm into local folders, or prebuilt binaries downloaded with run_command_online, then chmod +x and call by path). Returns the exit code and output (long output is truncated).',
-    inputSchema: commandSchema,
-    execute: async ({ command, cwd }, options) => {
+    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds all resources, one folder per conversation; commands start in this conversation\'s folder. Files persist and are versioned. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. You are not root: sudo, apt and system installs are impossible (read-only system); put tools in /workspace (pip/uv/npm into local folders, or prebuilt binaries downloaded with run_command_online, then chmod +x and call by path). Returns the exit code and output (long output is truncated). A command is stopped after about two minutes: for anything longer than a few minutes (benchmarks, training, game series, builds, test suites) pass background: true; it returns at once with a jobId, keeps running after your turn with a live card, and you get a message when it ends. Do not poll it in a loop; end your turn, and use command_status / command_output / command_stop only when needed.',
+    inputSchema: runCommandSchema,
+    execute: async ({ command, cwd, background, notify }, options) => {
       try {
         check(command);
         const manager = managerOf(options.context);
+        if (background) {
+          if (!manager?.background) throw new SandboxError('sandbox_unavailable', 'Background commands are not available in this session; run it in the foreground (it is stopped after the command timeout)');
+          const job = options.toolCallId ? commandJob(options.context as Readonly<Record<string, unknown>> | undefined, options.toolCallId, command) : undefined;
+          const record = await manager.runBackground({ command, cwd, notify: notify !== false, ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}), ...(job ? { job } : {}), signal: options.abortSignal });
+          const note = `Running in the background; ${record.notify ? 'you\'ll be told when it finishes' : 'you will not be told when it finishes (notify: false)'}. Use command_status / command_output / command_stop.`;
+          return { text: JSON.stringify({ jobId: record.id, note }), jobId: record.id, note };
+        }
         if (manager) { const { result, note } = await withCommandJob(options.context, options.toolCallId, command, manager.config.timeoutMs, onOutput => manager.run({ command, cwd, signal: options.abortSignal, ...(onOutput ? { onOutput } : {}) })); return output(result, manager.config.timeoutMs, note); }
         const session = (options as { experimental_sandbox?: Experimental_SandboxSession }).experimental_sandbox;
         if (!session) throw new SandboxError('sandbox_unavailable', 'No sandbox is configured for this agent');
         const timeoutMs = SANDBOX_LIMITS.defaultTimeoutMs;
         const { result } = await withCommandJob(options.context, options.toolCallId, command, timeoutMs, async onOutput => ({ result: await runSandboxCommand(session, { command, cwd: resolveWorkingDirectory(cwd), env: sandboxEnvironment({ git: { name: 'Sandbox', email: 'sandbox@localhost' } }), timeoutMs, signal: options.abortSignal, ...(onOutput ? { onOutput } : {}) }) }));
         return output(result, timeoutMs);
+      } catch (error) { return errorOutput(error); }
+    },
+    toModelOutput,
+  }),
+  command_status: tool({
+    description: 'List this conversation\'s background commands (started with run_command background: true) with their state (running, done, failed, timed_out, stopped, interrupted), exit code and time; or one, with jobId. Do not call it in a loop: you are told when a command ends.',
+    inputSchema: jsonSchema<{ jobId?: string }>({ type: 'object', properties: { jobId: { type: 'string', maxLength: 60, description: 'One command\'s jobId. Default: all of this conversation\'s.' } }, additionalProperties: false }),
+    execute: async ({ jobId }, options) => {
+      try {
+        const background = backgroundOf(options.context);
+        const records = background.commands.list({ owner: background.owner }).filter(r => !jobId || r.id === jobId);
+        if (jobId && !records.length) throw new SandboxError('command_invalid', `No background command ${jobId} in this conversation`);
+        const list = records.slice(-20).map(r => background.commands.summary(r));
+        return { text: list.length ? JSON.stringify({ commands: list }) : 'No background commands in this conversation.' };
+      } catch (error) { return errorOutput(error); }
+    },
+    toModelOutput,
+  }),
+  command_output: tool({
+    description: 'The latest output of a background command (running or ended): the last lines of stdout and stderr (tail: lines per stream, default 60, at most 400), bounded. Its full output is in /workspace/.jobs/<jobId>/out and err.',
+    inputSchema: jsonSchema<{ jobId: string; tail?: number }>({ type: 'object', properties: { jobId: { type: 'string', maxLength: 60 }, tail: { type: 'integer', minimum: 1, maximum: BACKGROUND_LIMITS.maxTailLines } }, required: ['jobId'], additionalProperties: false }),
+    execute: async ({ jobId, tail }, options) => {
+      try {
+        const background = backgroundOf(options.context);
+        const record = background.commands.get(jobId);
+        if (!record || record.owner !== background.owner) throw new SandboxError('command_invalid', `No background command ${jobId} in this conversation`);
+        const read = background.commands.output(jobId, tail)!;
+        const summary = background.commands.summary(read.record);
+        const head = `${summary.state}${summary.exitCode !== undefined ? ` · exit code ${summary.exitCode}` : ''} · ${summary.elapsedSeconds} s · stdout ${read.stdoutBytes} bytes, stderr ${read.stderrBytes} bytes (full output: /workspace/.jobs/${jobId}/out and err)`;
+        return { text: [head, read.stdout.replace(/\n$/, '') || '(no output)', ...(read.stderr.trim() ? [`[stderr]\n${read.stderr.replace(/\n$/, '')}`] : [])].join('\n') };
+      } catch (error) { return errorOutput(error); }
+    },
+    toModelOutput,
+  }),
+  command_stop: tool({
+    description: 'Stop a running background command and everything it started.',
+    inputSchema: jsonSchema<{ jobId: string }>({ type: 'object', properties: { jobId: { type: 'string', maxLength: 60 } }, required: ['jobId'], additionalProperties: false }),
+    execute: async ({ jobId }, options) => {
+      try {
+        const background = backgroundOf(options.context);
+        const record = background.commands.get(jobId);
+        if (!record || record.owner !== background.owner) throw new SandboxError('command_invalid', `No background command ${jobId} in this conversation`);
+        if (record.state !== 'running') return { text: `Already ended: ${record.state}${record.exitCode !== undefined ? ` (exit code ${record.exitCode})` : ''}.` };
+        const ended = await background.commands.stop(jobId, 'agent');
+        return { text: ended?.state === 'running' ? 'Asked it to stop; it has not ended yet.' : `Stopped${ended?.exitCode !== undefined ? ` (exit code ${ended.exitCode})` : ''}.` };
       } catch (error) { return errorOutput(error); }
     },
     toModelOutput,
@@ -1083,7 +1209,7 @@ export function projectNote(name: string): string {
 export function withProjectDescriptions<T extends Record<string, unknown>>(tools: T, projectPath: string): T {
   const name = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? 'project';
   const out: Record<string, unknown> = { ...tools };
-  for (const key of SANDBOX_TOOL_NAMES) {
+  for (const key of ['run_command', 'run_command_online'] as const) {
     const original = out[key] as { description?: unknown } | undefined;
     if (original && original === (sandboxTools as Record<string, unknown>)[key] && typeof original.description === 'string') out[key] = { ...original, description: `${original.description} ${key === 'run_command' ? projectNote(name) : `The project folder is at ${SANDBOX_PATHS.project}.`}` };
   }
@@ -1095,7 +1221,7 @@ export function withProjectDescriptions<T extends Record<string, unknown>>(tools
  * without asking (they are isolated); network commands always ask.
  * `run_command_online` cannot be set to `'allow'`.
  */
-export const SANDBOX_TOOL_PERMISSIONS: Readonly<Record<SandboxToolName, ToolPermission>> = Object.freeze({ run_command: 'allow', run_command_online: 'ask' });
+export const SANDBOX_TOOL_PERMISSIONS: Readonly<Record<SandboxToolName, ToolPermission>> = Object.freeze({ run_command: 'allow', run_command_online: 'ask', command_status: 'allow', command_output: 'allow', command_stop: 'allow' });
 
 /** Does a definition run commands? True when it has a sandbox and includes the built-in `run_command` without denying it. */
 export function sandboxEnabled(definition: { tools: object; permissions: Readonly<Record<string, ToolPermission>>; sandbox?: ResolvedSandboxConfig }): boolean {

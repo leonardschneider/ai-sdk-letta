@@ -1356,6 +1356,8 @@ button.crumb-agent:hover, button.crumb-agent[data-state="open"] { background: va
 .job-icon[data-status="failed"] { color: var(--danger); }
 .job-goal { font-weight: 600; font-size: 14px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .job-status { font-size: 12px; color: var(--text-3); flex: none; white-space: nowrap; }
+.job-stop { flex: none; padding: 1px 8px; gap: 4px; font-size: 12px; }
+.background-msg code { font-size: 12px; }
 .job-status[data-status="running"] { color: var(--accent); animation: pulse 2.4s ease-in-out infinite; }
 .job-status[data-status="done"] { color: var(--accent); }
 .job-status[data-status="failed"] { color: var(--danger); font-weight: 600; }

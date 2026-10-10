@@ -9,6 +9,8 @@ export type JobView = {
   kind?: 'command';
   status: JobStatus; result?: string; lines: string[]; image?: { mediaType: string; version: number };
   startedAt: string; updatedAt: string; endedAt?: string; version: number; progress: JobProgress;
+  /** A running background command's card: it can be stopped. */
+  background?: { jobId: string };
 };
 
 /** The job tools: their lines are hidden; `job_start` shows the card. */

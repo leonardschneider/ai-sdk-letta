@@ -7,7 +7,7 @@ import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
-import type { Listened, MessageApp, MessageAuthor as Author, MessageSource } from './messages.js';
+import type { Listened, MessageApp, MessageAuthor as Author, MessageBackground, MessageSource } from './messages.js';
 import { AppToolLine } from './apps.js';
 import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
@@ -105,12 +105,31 @@ function MessageOfKind() {
   const outcome = useAuiState(s => !!(s.message.metadata.custom as { decision?: unknown } | undefined)?.decision);
   const app = useAuiState(s => (s.message.metadata.custom as { app?: MessageApp } | undefined)?.app);
   const time = useAuiState(s => (s.message.metadata.custom as { time?: string } | undefined)?.time);
+  const background = useAuiState(s => (s.message.metadata.custom as { background?: MessageBackground } | undefined)?.background);
+  // A background command ended: the harness told the agent (one muted line; the full notice behind a chevron).
+  if (role === 'user' && background) return <BackgroundMessage background={background} time={time}/>;
   // A decision's outcome reached the agent here: one compact line, not a message bubble.
   if (role === 'user' && outcome) return <MessagePrimitive.Root className="msg decision-outcome-msg" data-role={role}><OutcomeMessage/></MessagePrimitive.Root>;
   if (role === 'assistant' && listened) return <MessagePrimitive.Root className="msg listened" data-role={role}><ListenedLine listened={listened} {...(time ? { time } : {})}/></MessagePrimitive.Root>;
   // A message an MCP App's view sent: one muted line ("chessos: I played e2e4."), the full text behind a chevron. The agent got all of it.
   if (role === 'user' && app) return <AppMessage app={app} time={time}/>;
   return <BubbleMessage role={role} time={time}/>;
+}
+
+function BackgroundMessage({ background, time }: { background: MessageBackground; time?: string | undefined }) {
+  const text = useAuiState(s => s.message.parts.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n'));
+  const [open, setOpen] = useState(false);
+  const how = background.state === 'done' ? 'finished' : background.state === 'failed' ? `failed (exit ${background.exitCode ?? '?'})` : background.state === 'timed_out' ? 'timed out' : background.state;
+  const command = background.command.split('\n')[0]!.slice(0, 80);
+  const label = <><SquareTerminal size={13} className="line-icon" aria-hidden="true"/><span className="app-msg-text"><span className="app-msg-name">Background command {how}:</span> <code>{command}</code></span></>;
+  return <MessagePrimitive.Root className="msg app-msg background-msg" data-role="user" data-state={background.state}>
+    <div className="line app-msg-line" title="The harness told the agent this background command ended">
+      <button type="button" className="line-summary" aria-expanded={open} onClick={() => setOpen(o => !o)} aria-label={`Background command ${how}: ${command}. ${open ? 'Hide' : 'Show'} what the agent was told`}>
+        {label}<ChevronRight size={13} className="chev" aria-hidden="true"/></button>
+      {time && <time dateTime={time} className="app-msg-time" title={fullFormat.format(new Date(time))}>{formatTime(time)}</time>}
+      {open && <pre className="app-msg-full">{text}</pre>}
+    </div>
+  </MessagePrimitive.Root>;
 }
 
 function AppMessage({ app, time }: { app: MessageApp; time?: string | undefined }) {
