@@ -3,9 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
 import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
 import { ActivityPill, useActivitySummary, useAgentActivity } from './activity.js';
-import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
+import { CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
-import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
+import { AddAgentDialog, InstructionsDialog, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -18,7 +18,9 @@ import { decideError, mayReview, type DecisionOutcome, type DecisionView, type F
 import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
-import { Sidebar } from './sidebar.js';
+import { Sidebar, type Nav } from './sidebar.js';
+import { AgentActionsMenu, type AgentActions } from './agents-nav.js';
+import { NEW_CHAT, openPlan, savedThreadKey } from './nav-model.js';
 import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
@@ -60,7 +62,6 @@ const TYPING_HEARTBEAT_MS = 1500;
 type Team = { user: Author; agents: AgentInfo[]; onSwitch(id: string): void };
 const chip = (file: Pick<FileInfo, 'name' | 'kind' | 'label' | 'bytes' | 'pages' | 'lines'>): FileChip => ({ name: file.name, kind: file.kind, detail: fileDetail(file) });
 type Current = { id: string; draft: boolean };
-const SAVED = 'ai-sdk-letta-thread';
 const newDraft = (): Current => ({ id: uuid(), draft: true });
 
 /**
@@ -119,7 +120,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const atlassianEnabled = !!agent.integrations?.includes('atlassian');
   const [atlassianOpen, setAtlassianOpen] = useState(false);
   // Team mode: the last thread is remembered per agent.
-  const SAVED_THREAD = team || agent.adopted ? `${SAVED}:${agent.id}` : SAVED;
+  const SAVED_THREAD = savedThreadKey(agent.id, { team: !!team, adopted: !!agent.adopted });
   const [adoptOpen, setAdoptOpen] = useState(false);
   const [removing, setRemoving] = useState<AgentInfo>();
   const [instructionsOf, setInstructionsOf] = useState<AgentInfo>();
@@ -228,6 +229,21 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   useEffect(() => { if (!activityLive) return; const timer = setInterval(reloadActivity, 3000); return () => clearInterval(timer); }, [activityLive, reloadActivity]);
   const otherAgents = useMemo(() => summary.agents.filter(a => a.id !== agent.id), [summary.agents, agent.id]);
   const runningElsewhere = useMemo(() => new Set(mine?.running ?? []), [mine]);
+  // Several agents (adopted ones, team servers): every agent's conversations in the sidebar, read again on every change.
+  const navAgents = team?.agents ?? local?.agents;
+  const [otherLists, setOtherLists] = useState<ReadonlyMap<string, ThreadSummary[]>>(new Map());
+  const [listTick, setListTick] = useState(0);
+  useEffect(() => { if (!team) return; const timer = setInterval(() => setListTick(n => n + 1), 20_000); return () => clearInterval(timer); }, [team]);
+  useEffect(() => {
+    if (!navAgents || navAgents.length < 2 || connecting || unreachable) return;
+    let stale = false;
+    void Promise.all(navAgents.filter(a => a.id !== agent.id).map(async a => {
+      const path = team || a.adopted ? `/api/agents/${encodeURIComponent(a.id)}/v1/threads` : '/api/v1/threads';
+      try { const response = await fetch(path, { credentials: 'same-origin' }); return [a.id, response.ok ? await response.json() as ThreadSummary[] : []] as const; } catch { return [a.id, [] as ThreadSummary[]] as const; }
+    })).then(entries => { if (!stale) setOtherLists(new Map(entries)); });
+    return () => { stale = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navAgents, agent.id, summary.version, serverChanges, turns, listTick, connecting, unreachable]);
   const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
   useEffect(() => { setAppOverlay(undefined); setViewPins({}); }, [current.id]);
   // One live view per app view (default): the newest call of each view renders, in its place (inline, panel, full screen); earlier ones collapse.
@@ -453,9 +469,10 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         const list = await api<ThreadSummary[]>('/v1/threads'); setThreads(list); setListLoading(false);
         const saved = localStorage.getItem(SAVED_THREAD);
         const sorted = sortThreads(list);
-        const first = list.find(t => t.id === saved && t.state === 'ready') ?? sorted.find(t => t.state === 'ready' && !t.archived);
+        // Opened from another agent's "New chat": start on a draft.
+        const first = saved === NEW_CHAT ? undefined : list.find(t => t.id === saved && t.state === 'ready') ?? sorted.find(t => t.state === 'ready' && !t.archived);
         setLoading(false);
-        if (first) await select(first.id); else startDraft();
+        if (first) await select(first.id); else { if (saved === NEW_CHAT) localStorage.removeItem(SAVED_THREAD); startDraft(); }
       } catch { setListLoading(false); setLoading(false); setBlocked('Couldn’t reach the local server. Check that it’s running, then refresh.'); }
     })();
     return () => stream.current?.abort();
@@ -863,11 +880,31 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     setDrawer(false);
     const focus = () => setTimeout(() => document.getElementById(`decision-${decision.id}`)?.scrollIntoView({ block: 'center' }), 300);
     const switcher = team ?? local;
-    if (switcher && decision.agent.id !== agent.id) { localStorage.setItem(team || local?.agents.find(a => a.id === decision.agent.id)?.adopted ? `${SAVED}:${decision.agent.id}` : SAVED, decision.thread.id); switcher.onSwitch(decision.agent.id); return; }
+    if (switcher && decision.agent.id !== agent.id) { localStorage.setItem(savedThreadKey(decision.agent.id, { team: !!team, adopted: !!local?.agents.find(a => a.id === decision.agent.id)?.adopted }), decision.thread.id); switcher.onSwitch(decision.agent.id); return; }
     if (currentRef.current.id === decision.thread.id) { focus(); return; }
     void select(decision.thread.id).then(focus);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [team, local, agent.id]);
+  /** The ⋯ menu of an agent (the Agents section and the breadcrumb): the adoption dialogs, or Members… on a team server (the current agent). */
+  const actionsFor = (target: AgentInfo): AgentActions | undefined => {
+    if (team) return target.id === agent.id ? { onMembers: () => setMembersOpen(true) } : undefined;
+    if (!local) return undefined;
+    const close = () => { if (narrow) setDrawer(false); };
+    return { onModel: a => { close(); setModelOf(a); }, onTools: a => { close(); setToolsOf(a); }, onProject: a => { close(); setProjectOf(a); }, onInstructions: a => { close(); setInstructionsOf(a); }, onRemove: a => { close(); setRemoving(a); }, onViewOnly: (a, value) => void setViewOnly(a, value) };
+  };
+  const switcherOf = team ?? local;
+  const nav: Nav | undefined = navAgents && switcherOf && navAgents.length > 0 ? {
+    agents: navAgents, lists: otherLists, activity: summary.agents, actionsFor,
+    onOpen: (agentId, threadId) => {
+      const plan = openPlan(agent.id, agentId, threadId, { team: !!team, adopted: !!navAgents.find(a => a.id === agentId)?.adopted });
+      if (plan.kind === 'select') { setDrawer(false); if (plan.threadId !== current.id) void select(plan.threadId); return; }
+      if (plan.kind === 'new') { startDraft(); return; }
+      localStorage.setItem(plan.save.key, plan.save.value); switcherOf.onSwitch(plan.agentId);
+    },
+    ...(local ? { onAdd: () => { if (narrow) setDrawer(false); setAdoptOpen(true); } } : {}),
+  } : undefined;
+  const [crumbMenu, setCrumbMenu] = useState(false);
+  const crumbActions = nav ? actionsFor(agent) : undefined;
   const bell = decisionsEnabled ? <DecisionBell decisions={feed.decisions} showAgent={(!!team && team.agents.length > 1) || (!!local && local.agents.length > 1)} {...(team ? { me: { id: team.user.id, name: team.user.name } } : {})} onOpen={openDecision}/> : undefined;
 
   const title = current.draft ? 'New chat' : selected?.title ?? '';
@@ -912,7 +949,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} {...(viewOnly ? { newHidden: true } : {})} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} activity={summary.agents} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onModel={setModelOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
+            {...(nav ? { nav } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
@@ -923,7 +960,13 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
               <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
               {!viewOnly && <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>}
             </>}
-            <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+            {nav ? <nav className="breadcrumb" aria-label="Breadcrumb">
+              {crumbActions ? <AgentActionsMenu agent={agent} actions={crumbActions} open={crumbMenu} onOpenChange={setCrumbMenu}>
+                <button type="button" className="crumb-agent" title={`${agent.name}: settings`}>{agent.name}</button>
+              </AgentActionsMenu> : <span className="crumb-agent">{agent.name}</span>}
+              <span className="crumb-sep" aria-hidden="true">&gt;</span>
+              <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+            </nav> : <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>}
             {!connecting && !unreachable && <ActivityPill activity={activity} others={otherAgents} narrow={narrow} onOpenThread={id => { if (id !== current.id) void select(id); }} onChanged={reloadActivity}/>}
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
