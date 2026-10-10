@@ -86,6 +86,32 @@ test('board: throttled updates (latest wins, lines accumulate), end, persistence
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('board: command jobs carry their kind and the reported rate and ETA; only agent jobs count as active', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'jobs-board-'));
+  const clock = { t: Date.parse('2026-01-01T00:00:00Z') };
+  try {
+    const { jobs } = board(directory, clock);
+    assert.equal(jobs.desk.agentJobActive!('conv-1'), false);
+    const { id } = jobs.desk.start({ goal: '$ python play.py', kind: 'command' }, turn) as { id: string };
+    assert.equal(jobs.desk.agentJobActive!('conv-1'), false, 'a command job is not the agent\'s');
+    jobs.desk.update(id, { done: 9, total: 20, ratePerSecond: 1.35, etaSeconds: 15, message: '45%|####| 9/20' }, turn);
+    clock.t += 5000;
+    const shown = jobs.forThread('thread-1')[0]!;
+    assert.equal(shown.kind, 'command');
+    assert.equal(shown.progress.ratePerSecond, 1.35);
+    assert.equal(shown.progress.etaSeconds, 10, 'the reported time left counts down');
+    assert.equal((shown as Record<string, unknown>).reported, undefined, 'internal');
+    jobs.desk.end(id, { status: 'failed', result: 'Exit code 1' }, turn);
+    assert.equal(jobs.forThread('thread-1')[0]!.status, 'failed');
+    const agent = jobs.desk.start({ goal: 'Play 20 games' }, turn) as { id: string };
+    assert.equal(jobs.desk.agentJobActive!('conv-1'), true);
+    assert.equal(jobs.desk.agentJobActive!('conv-2'), false);
+    clock.t += JOB_BOARD_LIMITS.staleMs + 1;
+    assert.equal(jobs.desk.agentJobActive!('conv-1'), false, 'a stale job no longer counts');
+    jobs.desk.end(agent.id, { status: 'done' }, turn);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('board: running jobs per conversation are limited', () => {
   const directory = mkdtempSync(join(tmpdir(), 'jobs-limit-'));
   try {

@@ -49,7 +49,7 @@ export { fileTools, FILE_TOOL_NAMES, FILE_TOOL_PERMISSIONS, ATTACHMENTS_CONTEXT,
 export {
   sandboxTools, SANDBOX_TOOL_NAMES, SANDBOX_TOOL_PERMISSIONS, SANDBOX_CONTEXT, SANDBOX_PATHS, SANDBOX_LIMITS, SANDBOX_DOCKERFILE, SANDBOX_IMAGE, SANDBOX_LABEL, KILL_SCRIPT, WEBDEV_DOCKERFILE, WEBDEV_IMAGE, MCP_APPS_DOCKERFILE, MCP_APPS_IMAGE,
   SandboxManager, SandboxError, sanitizeRepository, sandboxEnabled, sandboxToolTimeout, resolveSandboxConfig, checkProjectFolder, projectNote, withProjectDescriptions, gitConfigCredentials, sandboxEnvironment, resolveWorkingDirectory,
-  commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
+  commandScript, parseCommandOutput, formatCommandResult, runSandboxCommand, pollScript, parsePollOutput, pollCommandOutput, type CommandOutputListener, type CommandPolling, detectSandboxProvider, prepareSandbox, sweepStaleSandboxes,
   type SandboxConfig, type ResolvedSandboxConfig, type SandboxFactory, type SandboxHandle, type SandboxRequest, type SandboxMount, type SandboxProviderName, type SandboxToolName, type SandboxToolOutput, type SandboxErrorCode, type CommandResult, type CapturedStream,
 } from './sandbox.js';
 export {
