@@ -82,7 +82,7 @@ export function SettingsPage(props: SettingsProps) {
               <span><strong>View only</strong><span className="adopt-meta">Watch it work in Letta Code: conversations update live, nothing is sent from here.</span></span>
             </label>}
           </>)}
-          {section('tools', <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. After a change, update its instructions so it knows its tools.</p>, <>
+          {section('tools', <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. Once its instructions were applied, the app keeps them current after a change.</p>, <>
             <ToolsPanel key={(agent.adopted?.tools ?? []).join()} agent={agent} onSaved={props.onSaved}/>
             <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>
           </>)}

@@ -5,7 +5,7 @@ import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree,
 import { ActivityPill, useActivitySummary, useAgentActivity } from './activity.js';
 import { CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
-import { AddAgentDialog, InstructionsDialog, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
+import { AddAgentDialog, InstructionsDialog, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly, useAdoptionNotices } from './adoption.js';
 import { insertMention, mentionMatches, mentionName, mentionQuery } from './mentions.js';
 import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
@@ -230,6 +230,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const { viewTools, generations: devGenerations } = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
   // Activity: the header's status pill (always visible) and its popover; counts of every agent for the switcher and the sidebar.
   const summary = useActivitySummary(!team && !connecting && !unreachable);
+  // Automatic instructions updates of adopted agents: a toast each.
+  useAdoptionNotices(!!local && !connecting && !unreachable);
   const [activity, reloadActivity] = useAgentActivity(!connecting && !unreachable, `${serverChanges}:${turns}:${summary.version}`, false);
   const mine = summary.agents.find(a => a.id === agent.id);
   const activityLive = (mine ? mine.state !== 'idle' : false) || (!!activity && activity.state !== 'idle');

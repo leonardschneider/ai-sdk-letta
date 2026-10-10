@@ -161,7 +161,7 @@ export function ToolsDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
   return <Modal label={`Tools of ${agent.name}`} onClose={onClose} className="automations adopt">
     <div className="members-head">
       <div><h2 className="modal-title">Tools</h2>
-        <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. After a change, update its instructions so it knows its tools.</p></div>
+        <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. Once its instructions were applied, the app keeps them current after a change.</p></div>
       <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
     </div>
     <ToolsPanel agent={agent} onSaved={onSaved} onCancel={onClose}/>
@@ -242,31 +242,84 @@ export function InstructionsDialog({ agent, onClose }: { agent: AgentInfo; onClo
  */
 export function InstructionsPanel({ agent, onClose }: { agent: AgentInfo; onClose?(): void }) {
   const toast = useToast();
-  const [data, setData] = useState<{ diff: string; changed: boolean; applied: boolean; revertible: boolean }>();
+  const [data, setData] = useState<InstructionsState>();
   const [problem, setProblem] = useState('');
   const [saving, setSaving] = useState(false);
   const [showDiff, setShowDiff] = useState(!!onClose);
+  const [showAuto, setShowAuto] = useState(false);
   const path = `/agents/${encodeURIComponent(agent.id)}/instructions`;
   const load = useCallback(async () => { try { setData(await adoptionApi(path)); } catch (error) { setProblem(adoptionMessage(error)); } }, [path]);
   useEffect(() => { void load(); }, [load]);
+  // A queued update applies when the reply finishes: read again until it did.
+  const waiting = !!data?.queued || (!!data?.managed && data.changed);
+  useEffect(() => { if (!waiting) return; const timer = setInterval(() => void load(), 3000); return () => clearInterval(timer); }, [waiting, load]);
   async function run(method: 'POST' | 'DELETE') {
     setSaving(true); setProblem('');
-    try { await adoptionApi(path, method === 'POST' ? {} : undefined, method); toast(method === 'POST' ? `Updated ${agent.name}’s instructions.` : `Restored ${agent.name}’s earlier instructions.`); await load(); }
+    try {
+      const result = await adoptionApi<{ queued?: boolean }>(path, method === 'POST' ? {} : undefined, method);
+      toast(method === 'DELETE' ? `Restored ${agent.name}’s earlier instructions. The app no longer updates them automatically.` : result.queued ? `Will apply when the current reply finishes.` : `Updated ${agent.name}’s instructions. The app keeps them current from now on.`);
+      await load();
+    }
     catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
+  const auto = data?.auto;
   return <>
     {!data && !problem && <p className="muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading…</p>}
-    {data && !onClose && <p className="modal-text settings-status">{data.changed ? (data.applied ? 'An update is available: the app’s section changed since it was applied.' : 'Not applied yet: the agent doesn’t know its tools here.') : 'Up to date.'}</p>}
-    {data && (data.changed ? showDiff && <pre className="instructions-diff" aria-label="Proposed change">{data.diff.split('\n').map((line, i) => <span key={i} className={line.startsWith('+ ') ? 'add' : line.startsWith('- ') ? 'del' : line.startsWith('@@') ? 'hunk' : undefined}>{line}{'\n'}</span>)}</pre>
+    {data && (!onClose || data.queued) && <p className="modal-text settings-status">{instructionsStatus(data)}</p>}
+    {data && !onClose && auto && data.managed && <p className="modal-text settings-status instructions-auto">
+      Updated automatically · <time dateTime={auto.at}>{new Date(auto.at).toLocaleString()}</time> · {auto.reason} · <button type="button" className="link-btn" onClick={() => setShowAuto(v => !v)}>{showAuto ? 'Hide diff' : 'Diff'}</button></p>}
+    {showAuto && auto && <DiffView diff={auto.diff} label="Last automatic update"/>}
+    {data && (data.changed ? showDiff && <DiffView diff={data.diff} label="Proposed change"/>
       : onClose && <p className="modal-text">The instructions are up to date.</p>)}
     {problem && <p className="form-error" role="alert">{problem}</p>}
     <div className="modal-actions">
       {data?.changed && !showDiff && <button type="button" className="btn ghost" onClick={() => setShowDiff(true)}><FileDiff size={15} aria-hidden="true"/>Preview diff</button>}
       {data?.revertible && <button type="button" className="btn ghost" disabled={saving} onClick={() => void run('DELETE')}><RotateCcw size={15} aria-hidden="true"/>Revert</button>}
       {onClose && <button type="button" className="btn ghost" onClick={onClose}>Close</button>}
-      {data?.changed && <button type="button" className="btn primary" disabled={saving} data-autofocus={onClose ? true : undefined} onClick={() => void run('POST')}>{saving ? 'Applying…' : 'Apply'}</button>}
+      {data?.changed && !data.queued && !data.managed && <button type="button" className="btn primary" disabled={saving} data-autofocus={onClose ? true : undefined} onClick={() => void run('POST')}>{saving ? 'Applying…' : 'Apply'}</button>}
     </div>
   </>;
+}
+
+/** What `GET .../instructions` answers. */
+type InstructionsState = { diff: string; changed: boolean; applied: boolean; revertible: boolean; managed?: boolean; queued?: boolean; reason?: string; auto?: { at: string; reason: string; diff: string } };
+
+/** The Instructions line of the settings page. */
+export function instructionsStatus(data: InstructionsState): string {
+  if (data.queued) return 'Will apply when the current reply finishes.';
+  if (!data.applied) return data.changed ? 'Instructions: not managed by the app. Apply so the agent knows its tools here; the app then keeps them current.' : 'Up to date.';
+  if (!data.managed) return data.changed ? 'Instructions: not managed by the app (reverted). Apply to keep them current again.' : 'Up to date (not managed by the app).';
+  return data.changed ? 'Updating automatically when the agent is idle.' : 'Up to date · kept current automatically.';
+}
+
+function DiffView({ diff, label }: { diff: string; label: string }) {
+  return <pre className="instructions-diff" aria-label={label}>{diff.split('\n').map((line, i) => <span key={i} className={line.startsWith('+ ') ? 'add' : line.startsWith('- ') ? 'del' : line.startsWith('@@') ? 'hunk' : undefined}>{line}{'\n'}</span>)}</pre>;
+}
+
+/**
+ * Toasts for automatic instructions updates of adopted agents
+ * (`GET /api/adoption/notices?since=`, a long poll; only those after the page loaded).
+ */
+export function useAdoptionNotices(enabled: boolean, onNotice?: () => void) {
+  const toast = useToast();
+  useEffect(() => {
+    if (!enabled) return;
+    const control = new AbortController();
+    void (async () => {
+      let since = -1;
+      while (!control.signal.aborted) {
+        try {
+          const response = await fetch(`/api/adoption/notices?since=${since}`, { credentials: 'same-origin', signal: control.signal });
+          if (!response.ok) throw new Error(String(response.status));
+          const data = await response.json() as { version: number; notices: { id: number; text: string }[] };
+          for (const notice of data.notices) toast(notice.text);
+          if (data.notices.length) onNotice?.();
+          since = data.version;
+        } catch { if (control.signal.aborted) return; await new Promise(resolve => setTimeout(resolve, 3000)); }
+      }
+    })();
+    return () => control.abort();
+  }, [enabled, toast, onNotice]);
 }
 
 /**

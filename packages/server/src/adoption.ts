@@ -5,7 +5,7 @@ import type { LettaConversation } from '@letta-ai/letta-agent-sdk';
 import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import {
   ADOPTED_TOOL_SETS, AdoptionStore, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
-  forgetIdentity, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
+  forgetIdentity, instructionsSectionOf, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
   withoutInstructionsSection, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
 } from 'ai-sdk-letta';
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
@@ -106,7 +106,14 @@ export interface AdoptionRegistryOptions {
   peek?: (agentId: string) => NonNullable<RuntimeHost['peek']>;
   /** Live refresh options (tests: fake file system and timers). */
   live?: { fs?: LiveFs; debounceMs?: number; pollMs?: number; idleMs?: number; maxConversations?: number };
+  /** How often a queued instructions update checks again whether the agent is idle (ms; it also wakes when a turn ends). @default 3000 */
+  instructionsPollMs?: number;
+  /** Called after an automatic instructions update (the app shows it as a toast; see `GET /api/adoption/notices`). */
+  onNotice?: (notice: AdoptionNotice) => void;
 }
+
+/** Something the app tells the person about an adopted agent (a toast): for now, an automatic instructions update. */
+export interface AdoptionNotice { id: number; kind: 'instructions_updated'; agent: { id: string; name: string }; reason: string; text: string; at: string }
 
 const REFUSALS: Record<string, string> = {
   agent_missing: 'This agent no longer exists.', agent_hidden: 'This is a hidden or temporary agent; it cannot be added.', agent_without_memfs: 'This agent has no MemFS memory; only agents with MemFS can be added.',
@@ -134,7 +141,17 @@ const REFUSALS: Record<string, string> = {
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
  * - `GET /api/adoption/agents/<id>/model`: its model and the models it may switch to;
  * - `PUT /api/adoption/agents/<id>/model` `{ model, effort? }`: change its model and reasoning effort in Letta (Letta Code uses it too);
- * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply, revert the instructions update;
+ * - `GET|POST|DELETE /api/adoption/agents/<id>/instructions`: preview, apply (`{ queued: true }` while it replies: applied after the turn), revert the instructions update;
+ * - `GET /api/adoption/notices?since=<version>`: automatic instructions updates (toasts), a long poll;
+ *
+ * Instructions: once the person applied the app's section (`record.instructions`),
+ * the app keeps it current: at start, after a tools, project, sandbox or model
+ * change, when View only is turned off, and whenever the generated section
+ * differs from the one in Letta. Only the text between the markers changes.
+ * An update waits until the agent is idle (no turn here, Letta Code not using
+ * it); one update per agent is queued, a newer one replaces it. Revert turns
+ * this off (`autoUpdate: false`) until the next Apply. View-only agents are
+ * never updated.
  * - `/api/agents/<id>/v1/...`: the agent's API (threads, runs, memory, decisions).
  */
 export class AdoptionRegistry {
@@ -143,12 +160,23 @@ export class AdoptionRegistry {
   private feed?: DecisionFeed;
   private readonly backend: AdoptionBackend;
   private closing = false;
+  /** Queued instructions updates (one per agent: the newest reason wins) and the loops applying them. */
+  private readonly pending = new Map<string, { reason: string; manual: boolean }>();
+  private readonly draining = new Map<string, Promise<void>>();
+  private readonly wakers = new Set<() => void>();
+  private readonly notices: AdoptionNotice[] = [];
+  private noticeVersion = 0;
+  private readonly noticeWaiters = new Set<() => void>();
   constructor(private readonly options: AdoptionRegistryOptions) {
     this.store = new AdoptionStore(adoptionFile(options.stateDirectory));
     this.backend = options.backend ?? lettaAdoptionBackend();
   }
   /** Host every recorded adoption (at startup). Nothing is opened until a conversation is. */
-  start() { for (const record of this.store.read()) { try { this.host(record); } catch (error) { this.options.log?.(`Adopted agent ${record.definitionId} not loaded: ${error instanceof Error ? error.message : String(error)}`); } } }
+  start() {
+    for (const record of this.store.read()) { try { this.host(record); } catch (error) { this.options.log?.(`Adopted agent ${record.definitionId} not loaded: ${error instanceof Error ? error.message : String(error)}`); } }
+    // The app's section may have changed (a new version of the app): keep opted-in agents current.
+    for (const hosted of this.hosted.values()) this.keepInstructions(hosted.record.definitionId, 'app updated');
+  }
   private host(record: AdoptionRecord): Hosted {
     // A project folder that became unsafe or went away (moved, credentials added) is left out, so the agent still opens; the app keeps showing the path.
     let usable = record;
@@ -244,6 +272,7 @@ export class AdoptionRegistry {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
+    this.pending.delete(definitionId);
     await this.unhost(hosted);
     try { forgetIdentity(statePaths(this.options.stateDirectory).agents, definitionId); } catch { /* reopened later by the same mapping */ }
     this.store.remove(definitionId);
@@ -265,6 +294,7 @@ export class AdoptionRegistry {
     const record = this.store.update(definitionId, r => { const { viewOnly: _old, ...rest } = r; return value ? { ...rest, viewOnly: true as const } : rest; });
     await this.unhost(hosted);
     this.host(record);
+    if (value) this.pending.delete(definitionId); else this.keepInstructions(definitionId, 'view only turned off');
     return { viewOnly: value };
   }
   /** A hosted agent that may change (refused with `view_only` for a view-only one). */
@@ -282,6 +312,7 @@ export class AdoptionRegistry {
     const record = this.store.update(definitionId, r => ({ ...r, tools: sets }));
     await this.unhost(hosted);
     this.host(record);
+    this.keepInstructions(definitionId, 'tools changed');
     return record;
   }
   /**
@@ -308,6 +339,7 @@ export class AdoptionRegistry {
     });
     await this.unhost(hosted);
     this.host(record);
+    this.keepInstructions(definitionId, 'project changed');
     return { project: record.project ?? null, tools: record.tools };
   }
   /**
@@ -324,6 +356,7 @@ export class AdoptionRegistry {
     const record = this.store.update(definitionId, r => { const { commandTimeoutMs: _old, ...rest } = r; return value === null ? rest : { ...rest, commandTimeoutMs: value }; });
     await this.unhost(hosted);
     this.host(record);
+    this.keepInstructions(definitionId, 'sandbox changed');
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
   }
   /** Its current model and reasoning effort (read from Letta, else the record) and the models it may switch to (grouped by provider in the app). */
@@ -368,6 +401,7 @@ export class AdoptionRegistry {
     const record = this.store.update(definitionId, r => { const { effort: _old, ...rest } = r; return { ...rest, model, ...(effort ? { effort } : {}) }; });
     await this.unhost(hosted);
     this.host(record);
+    this.keepInstructions(definitionId, 'model changed');
     return { model, ...(effort ? { effort } : {}) };
   }
   /** The instructions section for an adopted agent: the tools it has here, its project folder, and the memory policy. */
@@ -375,29 +409,37 @@ export class AdoptionRegistry {
     const project = hosted.definition.sandbox?.project && hosted.record.project ? basename(hosted.record.project) : undefined;
     return adoptedInstructionsSection(Object.keys(hosted.definition.tools), memoryPolicyInstructions(hosted.definition.dreaming), project);
   }
-  /** Preview the instructions update (nothing changes). */
+  /** Whether the app keeps this agent's section current (Apply was done, not reverted since, not view only). */
+  private managed(record: AdoptionRecord) { return !!record.instructions && record.autoUpdate !== false && !record.viewOnly; }
+  /** Whether the agent is busy: a turn here, or Letta Code using it. */
+  private busy(hosted: Hosted) { return hosted.runtime.busy || this.backend.activity(hosted.record.agentId).active; }
+  /** Preview the instructions update (nothing changes). A managed agent whose section is out of date gets it updated (when idle). */
   async instructions(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
     const agent = await this.backend.agent(hosted.record.agentId);
     if (!agent) throw new RuntimeFault('agent_missing', 404);
     const update = instructionsUpdate(agent.system, this.section(hosted));
-    return { diff: update.diff, changed: update.changed, applied: !!hosted.record.instructions, revertible: !!hosted.record.instructions && agent.system === hosted.record.instructions.after };
+    const record = hosted.record;
+    if (update.changed && this.managed(record)) this.keepInstructions(definitionId, 'app section changed');
+    const queued = this.pending.get(definitionId);
+    return {
+      diff: update.diff, changed: update.changed, applied: !!record.instructions, revertible: !!record.instructions && agent.system === record.instructions.after,
+      managed: this.managed(record), ...(queued ? { queued: true, reason: queued.reason } : {}), ...(record.instructions?.auto ? { auto: record.instructions.auto } : {}),
+    };
   }
-  /** Apply the instructions update (approved by the person in the app). */
+  /**
+   * Apply the instructions update (approved by the person in the app). While
+   * the agent replies or Letta Code uses it, it is queued and applied when the
+   * turn ends (`{ queued: true }`). Apply turns automatic updates back on.
+   */
   async applyInstructions(definitionId: string) {
     const hosted = this.writable(definitionId);
-    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
-    const agent = await this.backend.agent(hosted.record.agentId);
-    if (!agent) throw new RuntimeFault('agent_missing', 404);
-    const update = instructionsUpdate(agent.system, this.section(hosted));
-    if (!update.changed) return { applied: false };
-    await this.backend.setSystem(hosted.record.agentId, update.next);
-    // The first prompt before any update is kept, so a revert restores the original.
-    hosted.record = this.store.update(definitionId, r => ({ ...r, instructions: { before: r.instructions?.before ?? agent.system, after: update.next, at: new Date().toISOString() } }));
-    return { applied: true };
+    if (this.busy(hosted)) { this.queueInstructions(definitionId, 'applied', true); return { queued: true }; }
+    this.pending.delete(definitionId);
+    return { applied: await this.writeInstructions(hosted, 'applied', true) };
   }
-  /** Revert the instructions update (only while the prompt is still the one we set). */
+  /** Revert the instructions update (only while the prompt is still the one we set). Automatic updates stop until the next Apply. */
   async revertInstructions(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted?.record.instructions) throw new RuntimeFault('not_found', 404);
@@ -407,9 +449,93 @@ export class AdoptionRegistry {
     if (!agent) throw new RuntimeFault('agent_missing', 404);
     // Changed since (in Letta Code): remove only our section.
     const restored = agent.system === hosted.record.instructions.after ? hosted.record.instructions.before : withoutInstructionsSection(agent.system);
+    this.pending.delete(definitionId);
     await this.backend.setSystem(hosted.record.agentId, restored);
-    hosted.record = this.store.update(definitionId, r => { const { instructions: _removed, ...rest } = r; return rest; });
+    hosted.record = this.store.update(definitionId, r => { const { instructions: _removed, ...rest } = r; return { ...rest, autoUpdate: false as const }; });
     return { reverted: true };
+  }
+  /** Keep a managed agent's section current (see the class notes): queue an update, applied when it is idle and only if the text differs. */
+  private keepInstructions(definitionId: string, reason: string) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted || !this.managed(hosted.record)) return;
+    // A manual Apply already queued stays one (a newer reason replaces the older one otherwise).
+    if (this.pending.get(definitionId)?.manual) return;
+    this.queueInstructions(definitionId, reason, false);
+  }
+  private queueInstructions(definitionId: string, reason: string, manual: boolean) {
+    if (this.closing) return;
+    this.pending.set(definitionId, { reason, manual });
+    if (this.draining.has(definitionId)) { this.wake(); return; }
+    const loop = this.drain(definitionId).catch(error => this.options.log?.(`Instructions of ${definitionId} not updated: ${error instanceof Error ? error.message : String(error)}`)).finally(() => this.draining.delete(definitionId));
+    this.draining.set(definitionId, loop);
+  }
+  /** Apply the agent's queued update once it is idle (never interrupting a turn); a newer one queued meanwhile replaces it. */
+  private async drain(definitionId: string) {
+    while (!this.closing && this.pending.has(definitionId)) {
+      const hosted = this.hosted.get(definitionId);
+      if (!hosted || hosted.record.viewOnly) { this.pending.delete(definitionId); return; }
+      if (this.busy(hosted)) { await this.idle(hosted); continue; }
+      const { reason, manual } = this.pending.get(definitionId)!;
+      this.pending.delete(definitionId);
+      if (!manual && !this.managed(hosted.record)) continue;
+      try { await this.writeInstructions(hosted, reason, manual); }
+      catch (error) { if (error instanceof RuntimeFault && error.code === 'runtime_busy' && !this.pending.has(definitionId)) this.pending.set(definitionId, { reason, manual }); else throw error; }
+    }
+  }
+  /** Wait until a turn of the agent ends, or the next poll (Letta Code's activity is polled). */
+  private idle(hosted: Hosted) {
+    return new Promise<void>(resolve => {
+      const done = () => { clearTimeout(timer); unobserve(); this.wakers.delete(done); resolve(); };
+      const timer = setTimeout(done, this.options.instructionsPollMs ?? 3000);
+      const unobserve = hosted.runtime.observe(() => { if (!hosted.runtime.busy) done(); });
+      this.wakers.add(done);
+    });
+  }
+  private wake() { for (const wake of [...this.wakers]) wake(); }
+  /** Settles once no instructions update is queued (tests, and a clean shutdown). */
+  async instructionsSettled() { while (this.draining.size) await Promise.allSettled([...this.draining.values()]); }
+  /** Write the section into Letta's system prompt when it differs (only the text between the markers changes). */
+  private async writeInstructions(hosted: Hosted, reason: string, manual: boolean): Promise<boolean> {
+    const definitionId = hosted.record.definitionId;
+    const agent = await this.backend.agent(hosted.record.agentId);
+    if (!agent) throw new RuntimeFault('agent_missing', 404);
+    const update = instructionsUpdate(agent.system, this.section(hosted));
+    // Not changed: Apply still turns automatic updates back on.
+    if (!update.changed) {
+      if (manual && hosted.record.autoUpdate === false && instructionsSectionOf(agent.system)) hosted.record = this.store.update(definitionId, r => { const { autoUpdate: _on, ...rest } = r; return { ...rest, instructions: { before: r.instructions?.before ?? withoutInstructionsSection(agent.system), after: agent.system, at: new Date().toISOString() } }; });
+      return false;
+    }
+    // A turn may have started while Letta answered: never change the prompt under it.
+    if (this.busy(hosted)) throw new RuntimeFault('runtime_busy');
+    await this.backend.setSystem(hosted.record.agentId, update.next);
+    const at = new Date().toISOString();
+    // The first prompt before any update is kept, so a revert restores the original.
+    hosted.record = this.store.update(definitionId, r => {
+      const { autoUpdate: _on, ...rest } = r;
+      const before = r.instructions?.before ?? agent.system;
+      return manual ? { ...rest, instructions: { before, after: update.next, at } } : { ...r, instructions: { before, after: update.next, at, auto: { at, reason, diff: update.diff } } };
+    });
+    // The current runtime keeps the new record (a re-host built from the store reads it too).
+    if (!manual) this.notify({ kind: 'instructions_updated', agent: { id: hosted.definition.id, name: hosted.definition.name }, reason, text: `Updated ${hosted.definition.name}’s app instructions (${reason})`, at });
+    return true;
+  }
+  private notify(notice: Omit<AdoptionNotice, 'id'>) {
+    const full = { id: ++this.noticeVersion, ...notice };
+    this.notices.push(full); if (this.notices.length > 50) this.notices.shift();
+    for (const wake of [...this.noticeWaiters]) wake();
+    try { this.options.onNotice?.(full); } catch { /* observer */ }
+    this.options.log?.(full.text);
+  }
+  /** Notices after `since` (a version), waiting up to `timeoutMs` for one. */
+  async noticesSince(since: number, timeoutMs = 25_000, signal?: AbortSignal) {
+    if (since >= 0 && since === this.noticeVersion && !signal?.aborted) {
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); this.noticeWaiters.delete(done); signal?.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, timeoutMs);
+        this.noticeWaiters.add(done); signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+    return { version: this.noticeVersion, notices: since < 0 ? [] : this.notices.filter(n => n.id > since) };
   }
   /** Routes (see the class notes). */
   routes(): express.Express {
@@ -447,6 +573,14 @@ export class AdoptionRegistry {
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));
     app.post('/adoption/agents/:id/instructions', json, wrap(async req => this.applyInstructions(String(req.params.id))));
     app.delete('/adoption/agents/:id/instructions', wrap(async req => this.revertInstructions(String(req.params.id))));
+    app.get('/adoption/notices', async (req, res) => {
+      const since = req.query.since === undefined ? -1 : Number(req.query.since);
+      if (!Number.isSafeInteger(since)) return res.status(400).json({ error: 'invalid_cursor' });
+      const control = new AbortController();
+      res.on('close', () => control.abort());
+      const result = await this.noticesSince(since, 25_000, control.signal);
+      if (!res.writableEnded && !res.destroyed) res.json(result);
+    });
     // Each adopted agent's API. Listing threads also lists conversations made elsewhere (Letta Code) since.
     app.use('/agents/:agent', async (req, res, next) => {
       const hosted = this.hosted.get(String(req.params.agent));
@@ -472,6 +606,9 @@ export class AdoptionRegistry {
   async close() {
     if (this.closing) return;
     this.closing = true;
+    this.pending.clear(); this.wake();
+    for (const wake of [...this.noticeWaiters]) wake();
+    await this.instructionsSettled();
     for (const hosted of this.hosted.values()) hosted.live?.close();
     await Promise.allSettled([...this.hosted.values()].map(hosted => this.unhost(hosted)));
   }

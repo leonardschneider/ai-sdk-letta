@@ -57,8 +57,14 @@ export type AdoptionRecord = {
   /** Tool sets it gets in this app. */
   tools: AdoptedToolSet[];
   adoptedAt: string;
-  /** An approved instructions update: the system prompt before it, and after it (for a revert). */
-  instructions?: { before: string; after: string; at: string };
+  /**
+   * An approved instructions update: the system prompt before it, and after
+   * it (for a revert). `auto`: the last automatic update (when the app's
+   * section changed: tools, project, sandbox, model, or a new version of it).
+   */
+  instructions?: { before: string; after: string; at: string; auto?: { at: string; reason: string; diff: string } };
+  /** `false` after a revert: the app no longer keeps its section current (Apply turns it back on). */
+  autoUpdate?: false;
   /** Its project folder on this computer, as the person gave it (symlinks are resolved only for the mount): mounted read-write at `/project` in its sandbox. See {@link checkAdoptedProject}. */
   project?: string;
   /**
@@ -284,10 +290,25 @@ export function withoutInstructionsSection(system: string): string {
   return (system.slice(0, start).replace(/\n+$/, '') + system.slice(end + INSTRUCTIONS_END.length).replace(/^\n+/, '\n')).replace(/\n$/, system.endsWith('\n') ? '\n' : '');
 }
 
-/** A proposed instructions update: the new text, and a line diff of what changes (only appended or replaced lines). */
+/** The ai-sdk-letta section in `system` (its markers included), or `undefined` when it has none. */
+export function instructionsSectionOf(system: string): string | undefined {
+  const start = system.indexOf(INSTRUCTIONS_BEGIN);
+  const end = system.indexOf(INSTRUCTIONS_END);
+  if (start < 0 || end < start) return undefined;
+  return system.slice(start, end + INSTRUCTIONS_END.length);
+}
+
+/**
+ * A proposed instructions update: the new text, and a line diff of what
+ * changes. An existing section is replaced in place (what is before and
+ * after its markers is kept as is); otherwise the section is appended.
+ */
 export function instructionsUpdate(system: string, section: string): { next: string; diff: string; changed: boolean } {
-  const base = withoutInstructionsSection(system).replace(/\s+$/, '');
-  const next = `${base}\n\n${section}\n`;
+  const start = system.indexOf(INSTRUCTIONS_BEGIN);
+  const end = system.indexOf(INSTRUCTIONS_END);
+  const next = start >= 0 && end >= start
+    ? system.slice(0, start) + section + system.slice(end + INSTRUCTIONS_END.length)
+    : `${system.replace(/\s+$/, '')}\n\n${section}\n`;
   const before = system.split('\n');
   const after = next.split('\n');
   let prefix = 0;

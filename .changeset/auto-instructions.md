@@ -1,0 +1,6 @@
+---
+"ai-sdk-letta": minor
+"@ai-sdk-letta/server": minor
+---
+
+Adopted agents' app instructions update automatically. Once the person applied the app's section, the server keeps it current: at start, after a tools, project, sandbox or model change, when View only is turned off, and whenever the generated section differs from the one in Letta (compared by text). An update waits until the agent is idle (no turn running here, Letta Code not using it), one per agent (a newer one replaces it), and never interrupts a turn. A manual Apply while the agent replies now answers `{ queued: true }` instead of `runtime_busy`. Only the text between the markers changes (`instructionsUpdate` now replaces an existing section in place; new `instructionsSectionOf`). Revert turns automatic updates off (`autoUpdate: false` on the record) until the next Apply. View-only agents are never updated. Each automatic update is recorded (`instructions.auto`: time, reason, diff) and announced: `GET /api/adoption/notices?since=` (a long poll, `AdoptionRegistryOptions.onNotice`) feeds a toast such as "Updated chess's app instructions (tools changed)", and the settings page shows "Updated automatically · time · reason" with the diff.
