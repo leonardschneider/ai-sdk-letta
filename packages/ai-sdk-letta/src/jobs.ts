@@ -43,7 +43,8 @@ export type JobStatus = 'running' | 'done' | 'failed' | 'cancelled' | 'interrupt
 /** An image of a job, read and checked: its bytes and sniffed media type. */
 export type JobImage = { bytes: Uint8Array; mediaType: JobImageType };
 export type JobStartRequest = { goal: string; total?: number; unit?: string };
-export type JobUpdateRequest = { done?: number; total?: number; message?: string; image?: JobImage };
+/** `imageRef`: the file path the image was read from (not for data URLs), so the host can re-read it on later updates. */
+export type JobUpdateRequest = { done?: number; total?: number; message?: string; image?: JobImage; imageRef?: string };
 export type JobEndRequest = { status: 'done' | 'failed' | 'cancelled'; result?: string };
 /** The turn a job call belongs to (bound by the runtime). */
 export type JobTurn = { conversationId: string; toolCallId: string };
@@ -57,6 +58,8 @@ export interface JobDesk {
   start(request: JobStartRequest, turn: JobTurn): { id: string } | Promise<{ id: string }>;
   update(id: string, request: JobUpdateRequest, turn: JobTurn): void | Promise<void>;
   end(id: string, request: JobEndRequest, turn: JobTurn): void | Promise<void>;
+  /** The file path a job's image was last read from: an update without `image` re-reads it (the picture follows the file). */
+  imageRef?(id: string, turn: JobTurn): string | undefined;
 }
 /**
  * Where image paths resolve (host paths): `/workspace/...` under `workspace`,
@@ -226,8 +229,13 @@ export const jobUpdateTool: Tool<JobUpdateInput, JobOutput> = tool({
     if (!bound) return failure('jobs_unavailable');
     try {
       const { jobId, image, ...rest } = request;
-      const read = image !== undefined ? readJobImage(image, bound.paths?.()) : undefined;
-      await bound.desk.update(jobId, { ...rest, ...(read ? { image: read } : {}) }, { conversationId: bound.conversationId, toolCallId: options.toolCallId });
+      const turn = { conversationId: bound.conversationId, toolCallId: options.toolCallId };
+      // Without a new image, the last file is read again (it may have changed); a file that went away keeps the previous picture.
+      const ref = image ?? bound.desk.imageRef?.(jobId, turn);
+      let read: JobImage | undefined;
+      if (image !== undefined) read = readJobImage(image, bound.paths?.());
+      else if (ref) { try { read = readJobImage(ref, bound.paths?.()); } catch { /* keep the previous picture */ } }
+      await bound.desk.update(jobId, { ...rest, ...(read ? { image: read, ...(ref && !ref.startsWith('data:') ? { imageRef: ref } : {}) } : {}) }, turn);
       return { ok: true };
     } catch (error) { return failure(errorCode(error)); }
   },
