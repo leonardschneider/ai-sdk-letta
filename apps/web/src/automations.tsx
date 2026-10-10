@@ -32,6 +32,18 @@ export function AutomationsRow({ onOpen }: { onOpen(): void }) {
  * the agent scheduled (cancel).
  */
 export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentName: string; onClose(): void; onOpenThread(id: string): void }) {
+  return <Modal label={`Automations of ${agentName}`} onClose={onClose} className="automations">
+    <div className="members-head">
+      <div><h2 className="modal-title">Automations</h2>
+        <p className="modal-text">Let n8n, Conductor or a script start conversations with {agentName}. Each token belongs to one automation and acts as you. Runs nobody watches can’t ask for approval: they stop and report it instead.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <AutomationsPanel agentName={agentName} onOpenThread={id => { onClose(); onOpenThread(id); }}/>
+  </Modal>;
+}
+
+/** Tokens and scheduled tasks (the Automations dialog and the settings page). */
+export function AutomationsPanel({ agentName, onOpenThread }: { agentName: string; onOpenThread(id: string): void }) {
   const toast = useToast();
   const [data, setData] = useState<AutomationsData>();
   const [failed, setFailed] = useState('');
@@ -54,13 +66,7 @@ export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentN
     try { await automationsApi(`/schedules/${encodeURIComponent(task.id)}/cancel`, {}); toast('Cancelled the scheduled task.'); await load(); }
     catch (error) { toast(automationError(errorCode(error)), { tone: 'error' }); }
   }
-  return <Modal label={`Automations of ${agentName}`} onClose={onClose} className="automations">
-    <div className="members-head">
-      <div><h2 className="modal-title">Automations</h2>
-        <p className="modal-text">Let n8n, Conductor or a script start conversations with {agentName}. Each token belongs to one automation and acts as you. Runs nobody watches can’t ask for approval: they stop and report it instead.</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
-    </div>
-    {created
+  return <>    {created
       ? <CreatedToken created={created} endpoint={data?.endpoint} onDone={() => { setCreated(undefined); void load(); }}/>
       : creating
         ? <CreateToken tools={data?.tools ?? []} replyModes={!!data?.replyModes} onCancel={() => setCreating(false)} onCreated={value => { setCreating(false); setCreated(value); }}/>
@@ -88,7 +94,7 @@ export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentN
                   </label>
                   <span className="member-login">{!token.active ? <span className="token-warning">{token.actor.login ? `Not working: ${token.actor.name} is no longer a member of this agent` : 'Not working on this server: it acts for someone who isn’t a member of this agent'}</span> : token.lastUsedAt ? <>Last used {relativeTime(token.lastUsedAt)}{token.lastRun && token.lastRun.status === 'decision_pending' ? <> · <span className="token-note">waiting for a decision</span></> : token.lastRun && token.lastRun.status !== 'completed' ? <> · <span className="token-warning">{token.lastRun.error === 'approval_required' ? 'last run needed approval' : token.lastRun.error === 'question_required' ? 'last run needed an answer' : `last run ${token.lastRun.status}`}</span></> : null}</> : 'Never used'}</span>
                 </span>
-                {token.lastRun && <button type="button" className="btn ghost small" onClick={() => { onClose(); onOpenThread(token.lastRun!.threadId); }}>Open</button>}
+                {token.lastRun && <button type="button" className="btn ghost small" onClick={() => onOpenThread(token.lastRun!.threadId)}>Open</button>}
                 <TokenMenu token={token} onRevoke={() => void revoke(token)}/>
               </li>)}
             </ul>
@@ -100,14 +106,14 @@ export function AutomationsDialog({ agentName, onClose, onOpenThread }: { agentN
                     <span className="member-name schedule-prompt" title={task.prompt}>{task.prompt}</span>
                     <span className="member-login">{scheduleState(task)} · {VIA_LABEL[task.orchestrator as Via] ?? task.orchestrator} · asked by {task.actor.name}</span>
                   </span>
-                  {task.run && <button type="button" className="btn ghost small" onClick={() => { onClose(); onOpenThread(task.run!.threadId); }}>Open</button>}
+                  {task.run && <button type="button" className="btn ghost small" onClick={() => onOpenThread(task.run!.threadId)}>Open</button>}
                   {(task.state === 'scheduled' || task.state === 'failed') && <button type="button" className="btn ghost small" onClick={() => void cancel(task)}>Cancel</button>}
                 </li>)}
               </ul>
             </>}
             {data?.endpoint && <p className="integration-note">Automation API: <span className="mono">{data.endpoint.url}</span>{data.endpoint.docker ? <> · from Docker on this machine: <span className="mono">{data.endpoint.docker}</span></> : null}. {data.endpoint.scheduler ? `The agent can schedule tasks with ${VIA_LABEL[data.endpoint.scheduler]}.` : 'Agent scheduling is off (no orchestrator configured).'}</p>}
           </>}
-  </Modal>;
+  </>;
 }
 
 function TokenMenu({ token, onRevoke }: { token: TokenView; onRevoke(): void }) {

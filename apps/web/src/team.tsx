@@ -84,6 +84,19 @@ const memberError = (error: unknown) => ({
  * their Tailscale login, make them admins, or remove them.
  */
 export function MembersDialog({ agent, onClose }: { agent: AgentInfo; onClose(): void }) {
+  const admin = agent.role === 'admin';
+  return <Modal label={`Members of ${agent.name}`} onClose={onClose} className="members">
+    <div className="members-head">
+      <div><h2 className="modal-title">Members of {agent.name}</h2>
+        <p className="modal-text">Members share every conversation, file and memory of this agent. {admin ? 'Add people by their Tailscale login; they must be in your tailnet.' : 'Only admins can add or remove members.'}</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" data-autofocus={!admin || undefined} onClick={onClose}><X size={16}/></button>
+    </div>
+    <MembersPanel agent={agent}/>
+  </Modal>;
+}
+
+/** Add members (admins), change roles, remove (the Members dialog and the settings page). */
+export function MembersPanel({ agent }: { agent: AgentInfo }) {
   const toast = useToast();
   const [members, setMembers] = useState<Member[]>();
   const [failed, setFailed] = useState(false);
@@ -120,13 +133,7 @@ export function MembersDialog({ agent, onClose }: { agent: AgentInfo; onClose():
     } catch (error) { toast(memberError(error), { tone: 'error' }); }
   }
   const admins = members?.filter(m => m.role === 'admin').length ?? 0;
-  return <Modal label={`Members of ${agent.name}`} onClose={onClose} className="members">
-    <div className="members-head">
-      <div><h2 className="modal-title">Members of {agent.name}</h2>
-        <p className="modal-text">Members share every conversation, file and memory of this agent. {admin ? 'Add people by their Tailscale login; they must be in your tailnet.' : 'Only admins can add or remove members.'}</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" data-autofocus={!admin || undefined} onClick={onClose}><X size={16}/></button>
-    </div>
-    {admin && <form className="member-add" onSubmit={event => void add(event)}>
+  return <>    {admin && <form className="member-add" onSubmit={event => void add(event)}>
       <label className="sr-only" htmlFor="member-login">Tailscale login</label>
       <input id="member-login" ref={field} data-autofocus className="member-input" type="text" inputMode="email" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="name@example.com"
         value={login} aria-invalid={!!problem || undefined} aria-describedby={problem ? 'member-problem' : undefined} onChange={event => { setLogin(event.target.value); setProblem(''); }}/>
@@ -160,7 +167,7 @@ export function MembersDialog({ agent, onClose }: { agent: AgentInfo; onClose():
         </DropdownMenu.Root>}
       </li>)}
     </ul>
-  </Modal>;
+  </>;
 }
 
 /* ------------------------------------------------------------------ */

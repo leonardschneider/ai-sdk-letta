@@ -192,6 +192,18 @@ const POLICY: Record<string, string> = { allow: 'runs', ask: 'asks', deny: 'deni
  * Policies and approved origins are set in the agent's definition.
  */
 export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { onClose(): void; onChanged(): void; viewPolicy?(appId: string): ViewPolicy; onViewPolicy?(appId: string, value: ViewPolicy): void }) {
+  return <Modal label="Apps" onClose={onClose} className="apps-dialog">
+    <div className="members-head">
+      <div><h2 className="modal-title">Apps</h2>
+        <p className="modal-text">MCP Apps installed for this agent. Each runs in its own container without network access; its views run in a sandbox on their own origin. Policies and allowed sites are set in the agent’s definition.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose} data-autofocus><X size={16}/></button>
+    </div>
+    <AppsPanel onChanged={onChanged} {...(viewPolicy ? { viewPolicy } : {})} {...(onViewPolicy ? { onViewPolicy } : {})}/>
+  </Modal>;
+}
+
+/** The apps list (the Apps dialog and the settings page): status, Restart, Stop, Logs, grants and Reset, enable/disable. */
+export function AppsPanel({ onChanged, viewPolicy, onViewPolicy }: { onChanged(): void; viewPolicy?(appId: string): ViewPolicy; onViewPolicy?(appId: string, value: ViewPolicy): void }) {
   const toast = useToast();
   const [apps, setApps] = useState<AppStatusView[]>();
   const [failed, setFailed] = useState(false);
@@ -225,13 +237,7 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
     try { await api(`/v1/apps/${encodeURIComponent(app.id)}/dev`, { ask }, 'PATCH'); load(); }
     catch { toast('Couldn’t change it. Try again.', { tone: 'error' }); }
   };
-  return <Modal label="Apps" onClose={onClose} className="apps-dialog">
-    <div className="members-head">
-      <div><h2 className="modal-title">Apps</h2>
-        <p className="modal-text">MCP Apps installed for this agent. Each runs in its own container without network access; its views run in a sandbox on their own origin. Policies and allowed sites are set in the agent’s definition.</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose} data-autofocus><X size={16}/></button>
-    </div>
-    <ul className="token-list" aria-busy={!apps || undefined}>
+  return <>    <ul className="token-list" aria-busy={!apps || undefined}>
       {failed && <li className="member-empty">Couldn’t load the apps. <button type="button" className="link-btn" onClick={load}>Try again</button></li>}
       {!apps && !failed && <li className="member-empty muted">Loading…</li>}
       {apps?.map(app => <li key={app.id} className="token-row app-row" data-inactive={!app.enabled || app.status !== 'running' || undefined}>
@@ -266,5 +272,5 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
         </span>
       </li>)}
     </ul>
-  </Modal>;
+  </>;
 }

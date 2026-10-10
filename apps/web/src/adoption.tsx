@@ -158,6 +158,18 @@ export function AddAgentDialog({ onClose, onAdded }: { onClose(): void; onAdded(
  * next message.
  */
 export function ToolsDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  return <Modal label={`Tools of ${agent.name}`} onClose={onClose} className="automations adopt">
+    <div className="members-head">
+      <div><h2 className="modal-title">Tools</h2>
+        <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. After a change, update its instructions so it knows its tools.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <ToolsPanel agent={agent} onSaved={onSaved} onCancel={onClose}/>
+  </Modal>;
+}
+
+/** The tool sets form (the Tools dialog and the settings page); Cancel only when `onCancel` is given. */
+export function ToolsPanel({ agent, onSaved, onCancel }: { agent: AgentInfo; onSaved(): void; onCancel?(): void }) {
   const toast = useToast();
   const current = agent.adopted?.tools ?? [];
   const available = agent.adopted?.available ?? current;
@@ -173,25 +185,18 @@ export function ToolsDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
       onSaved();
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
-  return <Modal label={`Tools of ${agent.name}`} onClose={onClose} className="automations adopt">
-    <div className="members-head">
-      <div><h2 className="modal-title">Tools</h2>
-        <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. After a change, update its instructions so it knows its tools.</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+  return <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
+    <fieldset className="adopt-tools">
+      <legend className="automations-heading">Tools it gets here</legend>
+      {available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} disabled={saving} onChange={event => { setTools(list => toggleToolSet(list, set, event.target.checked)); setProblem(''); }}/>{TOOL_LABELS[set] ?? set}</label>)}
+      <p className="adopt-meta">Saving restarts {agent.name}’s sandbox and services.</p>
+    </fieldset>
+    {problem && <p className="form-error" role="alert">{problem}</p>}
+    <div className="modal-actions">
+      {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
+      <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
-    <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
-      <fieldset className="adopt-tools">
-        <legend className="automations-heading">Tools it gets here</legend>
-        {available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} disabled={saving} onChange={event => { setTools(list => toggleToolSet(list, set, event.target.checked)); setProblem(''); }}/>{TOOL_LABELS[set] ?? set}</label>)}
-        <p className="adopt-meta">Saving restarts {agent.name}’s sandbox and services.</p>
-      </fieldset>
-      {problem && <p className="form-error" role="alert">{problem}</p>}
-      <div className="modal-actions">
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-        <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
-      </div>
-    </form>
-  </Modal>;
+  </form>;
 }
 
 /** Remove an adopted agent from the app: the Letta agent, its memory and conversations stay. */
@@ -221,10 +226,26 @@ export function RemoveAgentDialog({ agent, onClose, onRemoved }: { agent: AgentI
  * Applied only when the person approves; can be reverted.
  */
 export function InstructionsDialog({ agent, onClose }: { agent: AgentInfo; onClose(): void }) {
+  return <Modal label={`Instructions of ${agent.name}`} onClose={onClose} className="automations instructions">
+    <div className="members-head">
+      <div><h2 className="modal-title">Update instructions</h2>
+        <p className="modal-text">Appends a short section to {agent.name}’s system prompt: the tools it has in this app, and how its memory is protected here. Nothing else changes, and you can undo it.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <InstructionsPanel agent={agent} onClose={onClose}/>
+  </Modal>;
+}
+
+/**
+ * The instructions' status with Apply and Revert. In a dialog the diff shows
+ * at once; inline (no `onClose`), behind "Preview diff".
+ */
+export function InstructionsPanel({ agent, onClose }: { agent: AgentInfo; onClose?(): void }) {
   const toast = useToast();
   const [data, setData] = useState<{ diff: string; changed: boolean; applied: boolean; revertible: boolean }>();
   const [problem, setProblem] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showDiff, setShowDiff] = useState(!!onClose);
   const path = `/agents/${encodeURIComponent(agent.id)}/instructions`;
   const load = useCallback(async () => { try { setData(await adoptionApi(path)); } catch (error) { setProblem(adoptionMessage(error)); } }, [path]);
   useEffect(() => { void load(); }, [load]);
@@ -233,22 +254,19 @@ export function InstructionsDialog({ agent, onClose }: { agent: AgentInfo; onClo
     try { await adoptionApi(path, method === 'POST' ? {} : undefined, method); toast(method === 'POST' ? `Updated ${agent.name}’s instructions.` : `Restored ${agent.name}’s earlier instructions.`); await load(); }
     catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
-  return <Modal label={`Instructions of ${agent.name}`} onClose={onClose} className="automations instructions">
-    <div className="members-head">
-      <div><h2 className="modal-title">Update instructions</h2>
-        <p className="modal-text">Appends a short section to {agent.name}’s system prompt: the tools it has in this app, and how its memory is protected here. Nothing else changes, and you can undo it.</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
-    </div>
+  return <>
     {!data && !problem && <p className="muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading…</p>}
-    {data && (data.changed ? <pre className="instructions-diff" aria-label="Proposed change">{data.diff.split('\n').map((line, i) => <span key={i} className={line.startsWith('+ ') ? 'add' : line.startsWith('- ') ? 'del' : line.startsWith('@@') ? 'hunk' : undefined}>{line}{'\n'}</span>)}</pre>
-      : <p className="modal-text">The instructions are up to date.</p>)}
+    {data && !onClose && <p className="modal-text settings-status">{data.changed ? (data.applied ? 'An update is available: the app’s section changed since it was applied.' : 'Not applied yet: the agent doesn’t know its tools here.') : 'Up to date.'}</p>}
+    {data && (data.changed ? showDiff && <pre className="instructions-diff" aria-label="Proposed change">{data.diff.split('\n').map((line, i) => <span key={i} className={line.startsWith('+ ') ? 'add' : line.startsWith('- ') ? 'del' : line.startsWith('@@') ? 'hunk' : undefined}>{line}{'\n'}</span>)}</pre>
+      : onClose && <p className="modal-text">The instructions are up to date.</p>)}
     {problem && <p className="form-error" role="alert">{problem}</p>}
     <div className="modal-actions">
+      {data?.changed && !showDiff && <button type="button" className="btn ghost" onClick={() => setShowDiff(true)}><FileDiff size={15} aria-hidden="true"/>Preview diff</button>}
       {data?.revertible && <button type="button" className="btn ghost" disabled={saving} onClick={() => void run('DELETE')}><RotateCcw size={15} aria-hidden="true"/>Revert</button>}
-      <button type="button" className="btn ghost" onClick={onClose}>Close</button>
-      {data?.changed && <button type="button" className="btn primary" disabled={saving} data-autofocus onClick={() => void run('POST')}>{saving ? 'Applying…' : 'Apply'}</button>}
+      {onClose && <button type="button" className="btn ghost" onClick={onClose}>Close</button>}
+      {data?.changed && <button type="button" className="btn primary" disabled={saving} data-autofocus={onClose ? true : undefined} onClick={() => void run('POST')}>{saving ? 'Applying…' : 'Apply'}</button>}
     </div>
-  </Modal>;
+  </>;
 }
 
 /**
@@ -258,6 +276,18 @@ export function InstructionsDialog({ agent, onClose }: { agent: AgentInfo; onClo
  * `~/.letta`, credentials in `.git/config`) and says why.
  */
 export function ProjectDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  return <Modal label={`Project folder of ${agent.name}`} onClose={onClose} className="automations project">
+    <div className="members-head">
+      <div><h2 className="modal-title">Project folder</h2>
+        <p className="modal-text">A folder on this computer that {agent.name} works on, such as a website or a repository. Its sandbox sees it at <code>/project</code> and can change files there; conversation files stay in <code>/workspace</code>.</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <ProjectPanel agent={agent} onSaved={onSaved} onCancel={onClose}/>
+  </Modal>;
+}
+
+/** The project folder form and the command time limit (the Project dialog and the settings page). */
+export function ProjectPanel({ agent, onSaved, onCancel }: { agent: AgentInfo; onSaved(): void; onCancel?(): void }) {
   const toast = useToast();
   const current = agent.adopted?.project ?? '';
   const [path, setPath] = useState(current);
@@ -273,26 +303,21 @@ export function ProjectDialog({ agent, onClose, onSaved }: { agent: AgentInfo; o
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
   const trimmed = path.trim();
-  return <Modal label={`Project folder of ${agent.name}`} onClose={onClose} className="automations project">
-    <div className="members-head">
-      <div><h2 className="modal-title">Project folder</h2>
-        <p className="modal-text">A folder on this computer that {agent.name} works on, such as a website or a repository. Its sandbox sees it at <code>/project</code> and can change files there; conversation files stay in <code>/workspace</code>.</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
-    </div>
+  return <>
     <form onSubmit={event => { event.preventDefault(); if (trimmed && trimmed !== current) void save(trimmed); }}>
-      <label className="automations-heading" htmlFor="project-path">Folder</label>
-      <input id="project-path" className="member-input mono" data-autofocus value={path} maxLength={1000} placeholder="/Users/you/blog" spellCheck={false} autoComplete="off" disabled={!sandbox || saving}
+      <label className="automations-heading" htmlFor="project-path">Project folder</label>
+      <input id="project-path" className="member-input mono" data-autofocus={onCancel ? true : undefined} value={path} maxLength={1000} placeholder="/Users/you/blog" spellCheck={false} autoComplete="off" disabled={!sandbox || saving}
         onChange={event => { setPath(event.target.value); setProblem(''); }} aria-invalid={!!problem || undefined} aria-describedby="project-help"/>
       <p id="project-help" className="adopt-meta">{!sandbox ? 'This server has no sandbox, so it cannot mount a project folder.' : current ? `Current: ${current}.` : 'None yet. Paste the folder’s full path.'} Folders with credentials in <code>.git/config</code>, your home folder and <code>~/.letta</code> are refused. Changing it restarts {agent.name}’s sandbox.</p>
       {problem && <p className="form-error" role="alert">{problem}</p>}
       <div className="modal-actions">
         {current && <button type="button" className="btn ghost" disabled={saving} onClick={() => void save(null)}>Clear</button>}
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
         <button type="submit" className="btn primary" disabled={!sandbox || saving || !trimmed || trimmed === current}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>
     {sandbox && <CommandTimeout agent={agent} onSaved={onSaved}/>}
-  </Modal>;
+  </>;
 }
 
 /** The adopted agent's sandbox per-command timeout (a full site build can take minutes). */
@@ -341,6 +366,23 @@ const effortFor = (model: ModelChoice | undefined, keep?: string) => !model?.eff
  * a definition has no reasoning setting, so it uses the model's default).
  */
 export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onClose(): void; onSaved(): void }) {
+  const adopted = !!agent.adopted && !agent.viewOnly;
+  return <Modal label={`Model of ${agent.name}`} onClose={onClose} className="automations adopt model-dialog">
+    <div className="members-head">
+      <div><h2 className="modal-title">Model</h2>
+        <p className="modal-text">{adopted ? 'Changes the agent’s model in Letta, so Letta Code uses it too.' : 'Set in code (LETTA_MODEL / definition).'}</p></div>
+      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
+    </div>
+    <ModelPanel agent={agent} onSaved={onSaved} onClose={onClose}/>
+  </Modal>;
+}
+
+/**
+ * The current model and reasoning; for an adopted agent (not view only), the
+ * model list and reasoning efforts with Save. Inline (no `onClose`), the
+ * list is behind "Change model".
+ */
+export function ModelPanel({ agent, onSaved, onClose }: { agent: AgentInfo; onSaved(): void; onClose?(): void }) {
   const toast = useToast();
   const adopted = !!agent.adopted && !agent.viewOnly;
   const current = agent.adopted?.model ?? agent.model ?? '';
@@ -350,6 +392,7 @@ export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
   const [effort, setEffort] = useState<string | undefined>(agent.adopted?.effort ?? agent.effort);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState('');
+  const [editing, setEditing] = useState(!!onClose);
   const path = `/agents/${encodeURIComponent(agent.id)}/model`;
   const load = useCallback(async () => {
     try {
@@ -359,7 +402,7 @@ export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
       setProblem('');
     } catch (error) { setProblem(adoptionMessage(error)); }
   }, [path, current]);
-  useEffect(() => { if (adopted) void load(); }, [adopted, load]);
+  useEffect(() => { if (adopted && editing) void load(); }, [adopted, editing, load]);
   const groups = new Map<string, ModelChoice[]>();
   for (const model of models ?? []) groups.set(model.providerLabel, [...(groups.get(model.providerLabel) ?? []), model]);
   const currentLabel = models?.find(m => m.handle === current);
@@ -376,30 +419,27 @@ export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
       onSaved();
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
-  return <Modal label={`Model of ${agent.name}`} onClose={onClose} className="automations adopt model-dialog">
-    <div className="members-head">
-      <div><h2 className="modal-title">Model</h2>
-        <p className="modal-text">{adopted ? 'Changes the agent’s model in Letta, so Letta Code uses it too.' : 'Set in code (LETTA_MODEL / definition).'}</p></div>
-      <button type="button" className="icon-btn small" aria-label="Close" onClick={onClose}><X size={16}/></button>
-    </div>
-    <p className="model-current"><span className="automations-heading">Current</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}
-      <span className="adopt-meta"> · reasoning: {adopted ? currentEffort ?? 'model default' : agent.adopted?.effort ?? agent.effort ?? 'default'}</span></p>
-    {adopted && <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
+  return <>
+    <p className="model-current"><span className="automations-heading">{onClose ? 'Current' : 'Model'}</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}
+      <span className="adopt-meta"> · reasoning: {adopted ? currentEffort ?? 'model default' : agent.adopted?.effort ?? agent.effort ?? 'default'}</span>
+      {!onClose && !adopted && <span className="role-badge small settings-code" title="LETTA_MODEL or the agent definition">Set in code</span>}
+      {!onClose && adopted && !editing && <button type="button" className="link-btn settings-change" onClick={() => setEditing(true)}>Change model</button>}</p>
+    {adopted && editing && <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
       <div className="member-list adopt-list model-list" role="radiogroup" aria-label="Models" aria-busy={!models || undefined}>
         {!models && !problem && <p className="member-empty muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading models…</p>}
         {models && !models.length && <p className="member-empty muted">No models found. Connect a provider in Letta Code first.</p>}
         {[...groups].map(([provider, list]) => <fieldset key={provider} className="model-group">
           <legend className="automations-heading">{provider}</legend>
           {list.map(model => <label key={model.handle} className={`member-row adopt-row${chosen === model.handle ? ' selected' : ''}`}>
-            <input type="radio" name="model" value={model.handle} checked={chosen === model.handle} disabled={saving} onChange={() => pick(model.handle)} data-autofocus={model.handle === current || undefined}/>
+            <input type="radio" name={`model-${agent.id}`} value={model.handle} checked={chosen === model.handle} disabled={saving} onChange={() => pick(model.handle)} data-autofocus={model.handle === current || undefined}/>
             <span className="adopt-text"><span className="adopt-name">{model.label}{model.handle === current && <span className="role-badge small">Current</span>}</span>
               <span className="adopt-meta">{[model.handle, tokens(model.contextWindow)].filter(Boolean).join(' · ')}</span></span>
           </label>)}
         </fieldset>)}
       </div>
       {efforts.length > 1 && <div className="effort-row">
-        <span className="automations-heading" id="effort-label">Reasoning</span>
-        <div className="effort-seg" role="radiogroup" aria-labelledby="effort-label">
+        <span className="automations-heading" id={`effort-label-${agent.id}`}>Reasoning</span>
+        <div className="effort-seg" role="radiogroup" aria-labelledby={`effort-label-${agent.id}`}>
           {efforts.map(e => <button key={e.value} type="button" role="radio" aria-checked={effort === e.value} className={`effort-opt${effort === e.value ? ' selected' : ''}`} disabled={saving}
             title={[e.default ? 'The model’s default' : '', tokens(e.contextWindow)].filter(Boolean).join(' · ') || undefined} onClick={() => { setEffort(e.value); setProblem(''); }}>
             {e.label}{e.default && <span className="effort-default" aria-label="(default)">·default</span>}
@@ -409,10 +449,10 @@ export function ModelDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
       <p className="adopt-meta">Saving restarts {agent.name} here; open conversations use the new model on their next message.</p>
       {problem && <p className="form-error" role="alert">{problem} {!models && <button type="button" className="link-btn" onClick={() => void load()}>Try again</button>}</p>}
       <div className="modal-actions">
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn ghost" onClick={() => { if (onClose) onClose(); else { setEditing(false); setChosen(current); setProblem(''); } }}>Cancel</button>
         <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>}
-    {!adopted && <div className="modal-actions"><button type="button" className="btn primary" data-autofocus onClick={onClose}>Close</button></div>}
-  </Modal>;
+    {!adopted && onClose && <div className="modal-actions"><button type="button" className="btn primary" data-autofocus onClick={onClose}>Close</button></div>}
+  </>;
 }
