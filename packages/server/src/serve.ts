@@ -3,9 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, jobsEnabled, type JobDesk, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { localModels } from './models.js';
 import { DecisionBoard } from './decisions.js';
+import { JobBoard } from './jobs.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory, authorOf } from './team.js';
@@ -110,6 +111,28 @@ function decisionDesk(definition: AgentDefinition, memoryReviews = false) {
 }
 
 /**
+ * The jobs of an agent that has `job_start`: a desk for its sessions now,
+ * bound to the board (`<dir>/jobs.json`) once the runtime exists.
+ */
+function jobDesk(definition: AgentDefinition) {
+  let board: JobBoard | undefined;
+  const enabled = jobsEnabled(definition);
+  const unavailable = () => { throw new Error('jobs_unavailable'); };
+  const desk: JobDesk | undefined = enabled ? {
+    start: (request, turn) => board ? board.desk.start(request, turn) : unavailable(),
+    update: (id, request, turn) => board ? board.desk.update(id, request, turn) : unavailable(),
+    end: (id, request, turn) => board ? board.desk.end(id, request, turn) : unavailable(),
+    imageRef: (id, turn) => board?.desk.imageRef?.(id, turn),
+  } : undefined;
+  return { desk, bind: (runtime: ThreadRuntime, directory: string) => {
+    if (!enabled) return undefined;
+    board = new JobBoard(join(directory, 'jobs.json'), { threadOf: conversationId => runtime.threadOfConversationAny(conversationId), jobChanged: job => runtime.jobChanged(job) });
+    runtime.jobs = board;
+    return board;
+  } };
+}
+
+/**
  * Memory review wiring of one agent: reviews reach the runtime (pages
  * refresh; reverts show a toast), held changes become memory review
  * decisions, and the reviewer's model can be changed in the app (kept in
@@ -164,7 +187,7 @@ function projectOf(definition: AgentDefinition<ToolSet>): string | undefined {
   return path;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps, jobs?: JobDesk): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   const project = projectOf(definition as AgentDefinition<ToolSet>);
   return {
@@ -172,7 +195,7 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
+      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand, ...(runtime.toolsStale ? { toolsStale: runtime.toolsStale } : {}) };
@@ -189,12 +212,12 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
  * A host that keeps several conversations of one agent open at once (each its
  * own Letta session), for a shared runtime. The agent itself is opened on first use.
  */
-function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring): RuntimeHost {
+function parallelHost<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, jobs?: JobDesk): RuntimeHost {
   let agent: Promise<AgentHost<TOOLS>> | undefined;
   // Shared conversations: the agent may listen without replying (it gets the stay_silent tool).
   // Each turn acts for its author (the runtime passes it); a turn without one acts for nobody.
   const project = projectOf(definition as AgentDefinition<ToolSet>);
-  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) }).catch(error => { agent = undefined; throw error; });
+  const opened = () => agent ??= openAgentHost(definition, { stateDirectory, foregroundExternalTools: true, listening: true, defaultActor: null, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}) }).catch(error => { agent = undefined; throw error; });
   return {
     parallel: true,
     ...(project ? { project } : {}),
@@ -261,14 +284,16 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const appPortRef = { port }; const previewRef = { port: 0 };
     const scheduling = automationScheduling(options.automation, [definition]);
     const decisions = decisionDesk(definition, true);
+    const jobs = jobDesk(definition);
     const memory = memoryWiring(definition, directory);
     // Web app development and MCP Apps: each runtime's services (kept across sessions), on one shared preview listener (started below).
     const previewMembers = new Set<PreviewMember>();
     const dev = devServices(definition, stateDirectory, log);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     const { webDev, apps } = dev;
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
+    jobs.bind(runtime, directory);
     memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
@@ -288,13 +313,15 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       build: (adopted, folder) => {
         mkdirSync(folder, { recursive: true, mode: 0o700 });
         const desk = decisionDesk(adopted, true);
+        const adoptedJobs = jobDesk(adopted);
         const wiring = memoryWiring(adopted, folder);
         // Its own web development services and MCP App servers (web_dev, mcp_app_dev), on the shared preview listener.
         const services = devServices(adopted, stateDirectory, log);
-        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps, adoptedJobs.desk), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
         const member = services.bind(hosted, { owner, directory: folder, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port });
         previewMembers.add(member);
         const hostedBoard = desk.bind(hosted, folder, owner);
+        adoptedJobs.bind(hosted, folder);
         wiring.bind(hosted, hostedBoard);
         hostedBoard?.resumeAll();
         return { runtime: hosted, ...(hostedBoard ? { board: hostedBoard } : {}), ...(services.webDev ? { webDev: true } : {}), ...(services.apps ? { apps: true } : {}),
@@ -454,12 +481,14 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       const folder = join(statePaths(stateDirectory).server(definition.id), 'team');
       unlocks.push(serviceLock(folder));
       const decisions = decisionDesk(definition, true);
+      const teamJobs = jobDesk(definition);
       const memory = memoryWiring(definition, folder, () => directory.members(definition.id).map(m => ({ id: m.id, name: m.name, login: m.login })));
-      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name, logLabel: definition.id,
+      const runtime = new ThreadRuntime(parallelHost(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, teamJobs.desk), join(folder, 'state.json'), 'team', { queue: true, parallel: true, replyMode: definition.replyMode ?? 'auto', agentName: definition.name, logLabel: definition.id,
         // An agent with several members is a group from the first message: "auto" means agent decides.
         members: () => directory.members(definition.id).length, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
       runtimes.push(runtime);
       const board = decisions.bind(runtime, folder, 'team');
+      teamJobs.bind(runtime, folder);
       boards.push(board);
       memory.bind(runtime, board);
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });

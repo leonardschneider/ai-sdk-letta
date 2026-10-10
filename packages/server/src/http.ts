@@ -347,6 +347,20 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   app.post('/v1/threads/:id/dream', async (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(await runtime.dreamNow(owner, req.params.id, req.body)); });
   /** Change the reviewer's model: `{ model: 'auto' | '<provider>/<model>' }` (team servers: admins only). */
   app.put('/v1/memory/reviewer', (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(runtime.setReviewerModel(owner, req.body)); });
+  /* ---------------- jobs ---------------- */
+  /** A conversation's jobs (visible background work), oldest first, with their progress. */
+  app.get('/v1/threads/:id/jobs', (req, res) => res.json({ jobs: runtime.threadJobs(owner, req.params.id) }));
+  /**
+   * A job's latest image. Served as an image only: SVG never runs as a
+   * document (a sandbox policy without scripts), and the app shows it in an
+   * `<img>`. The `?v=` query is a cache-buster; the bytes are never cached.
+   */
+  app.get('/v1/threads/:id/jobs/:job/image', (req, res) => {
+    const image = runtime.jobImage(owner, req.params.id, req.params.job);
+    res.set({ 'Content-Type': image.mediaType, 'Content-Length': String(image.bytes.byteLength), 'Content-Disposition': 'inline',
+      'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'Cache-Control': 'private, no-store' });
+    res.end(image.bytes);
+  });
   /* ---------------- decisions ---------------- */
   const board = () => { if (!runtime.decisions) throw new RuntimeFault('not_found', 404); return runtime.decisions; };
   /** Decisions: `?thread=<id>` that conversation's (newest 50, any status), otherwise the pending ones. */

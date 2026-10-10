@@ -46,6 +46,8 @@ import { LAYOUT_KEY, readLayout, type Layout } from './resources-model.js';
 import { SIDE_PANEL_KEY, SIDE_WIDTH, activeTab, announce, appTab, appTabId, appsOf, clampSideWidth, closeApp, retargetApp, close as closeSide, hasApp, isShown, openApp, readSidePanel, select as selectSide, tabKey, toggle as toggleSide, visibleTabs, type Announced, type SidePanel, type SideTab } from './side-panel-model.js';
 import { AttachmentError, FILE_LIMITS, FileAttachmentAdapter, IMAGE_LIMITS, base64Bytes, checkBudget, dataUrlToImage, fileDetail, fileMessage, fileMessages, messages as attachmentMessages, pasteAttaches, type FileInfo } from './attachments.js';
 import { ComposerImages, FileLinkContext, LightboxProvider } from './images.js';
+import { JobsContext, useThreadJobs } from './jobs.js';
+import type { JobView } from './jobs-model.js';
 import { AppApprovalCards, AppOverlay, AppPanel, AppsContext, AppsDialog, AppsRow, useAppApprovals, useViewTools, type AppsState } from './apps.js';
 import { appToolLabel, liveViews, readViewPolicy, viewIdentity, viewPolicyKey, type ViewCall, type ViewPins, type ViewPolicy } from './apps-model.js';
 import './style.css';
@@ -278,6 +280,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   }, [liveCalls, current.id]);
   const [archiving, setArchiving] = useState<ReadonlySet<string>>(new Set());
   const [liveThread, setLiveThread] = useState<string>();
+  // Jobs of the open conversation (live cards): read on open and on changes, merged with live `job` events.
+  const [jobsState, mergeJob] = useThreadJobs(current.draft ? undefined : current.id, `${serverChanges}:${turns}`, !!liveThread && liveThread === current.id);
   const currentInteraction = useRef<{ id: string; runId: string; resolved: boolean } | undefined>(undefined);
   const lastRun = useRef<string | null>(null);
   const liveRun = useRef<string | undefined>(undefined);
@@ -321,6 +325,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
           const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); if (!line.trim()) continue;
           const event = JSON.parse(line) as RuntimeEvent;
           if (stream.current !== control || control.signal.aborted) return;
+          // Job progress: display only (no sequence of its own); the card updates in place.
+          if (event.type === 'job') { if (event.data.job && typeof event.data.job === 'object') mergeJob(event.data.job as JobView); continue; }
           if (event.sequence <= (events.at(-1)?.sequence ?? 0)) continue;
           // This message was sent together with others as one turn: show that turn instead.
           if (team && event.type === 'started' && typeof event.data.batchOf === 'string') { control.abort(); liveRun.current = undefined; void refreshView().catch(() => {}); return; }
@@ -974,6 +980,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     <FileLinkContext.Provider value={fileLink}>
     <LatexContext.Provider value={latex}>
     <RewindContext.Provider value={rewindState}>
+    <JobsContext.Provider value={jobsState}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-side-drawer={(narrow && sideOpen) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-side-open={(!narrow && sideOpen) || undefined}
         data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--side-width': `${side.width}px` } as React.CSSProperties}>
@@ -1115,6 +1122,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         {atlassianOpen && <AtlassianDialog status={atlassianStatus} onStatus={setAtlassianStatus} team={!!team} onClose={() => setAtlassianOpen(false)}/>}
       </div>
     </AssistantRuntimeProvider>
+    </JobsContext.Provider>
     </RewindContext.Provider>
     </LatexContext.Provider>
     </FileLinkContext.Provider>

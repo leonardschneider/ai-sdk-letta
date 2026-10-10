@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSyn
 import { dirname, join } from 'node:path';
 import type { UIMessage, UserContent } from 'ai';
 import type { DecisionBoard } from './decisions.js';
+import { publicJob, type JobBoard, type JobRecord } from './jobs.js';
 import { externalEffects, forkPoint, rewindTurn, rewoundSpan, soloRefusal, type RewindSummary } from './rewind.js';
 import { ProjectFolder } from './project.js';
 import {
@@ -436,6 +437,8 @@ export class ThreadRuntime {
   private readonly members: () => number;
   /** The agent's decisions, when the server keeps them (set by `DecisionBoard`). */
   decisions?: DecisionBoard;
+  /** The agent's jobs (visible background work), when the server keeps them (set by the server). */
+  jobs?: JobBoard;
   /**
    * Web app development (set by the server for agents with `webDevTools`):
    * each conversation's services, and its preview's origin.
@@ -605,6 +608,31 @@ export class ThreadRuntime {
   membersChanged() { this.changed(); }
   /** A decision changed (requested, decided, cancelled): open pages refresh (wakes `waitForChange`). */
   decisionsChanged() { this.changed(); }
+  /**
+   * A job started, progressed or ended: a `job` event reaches the live run
+   * of its conversation (display only: not recorded in the run, so updates
+   * never grow the state), and open pages refresh.
+   */
+  jobChanged(job: JobRecord) {
+    const run = this.lane(job.threadId).active?.run;
+    if (run && run.threadId === job.threadId) {
+      const event = { sequence: run.events.at(-1)?.sequence ?? 0, type: 'job', data: { job: publicJob(job) } };
+      for (const listener of this.listeners.get(run.id) ?? []) { try { listener(event); } catch { /* listener */ } }
+    }
+    this.changed();
+  }
+  /** A thread's jobs (oldest first). */
+  threadJobs(owner: string, id: string) {
+    const thread = this.thread(owner, id);
+    return this.jobs?.forThread(thread.id) ?? [];
+  }
+  /** A job's latest image (bytes and media type), or a 404. */
+  jobImage(owner: string, id: string, jobId: string) {
+    const thread = this.thread(owner, id);
+    const image = this.jobs?.image(thread.id, jobId);
+    if (!image) throw new RuntimeFault('not_found', 404);
+    return image;
+  }
   /** The turn running in a conversation now, if any (a copy). */
   activeRun(threadId: string): Run | undefined {
     const run = this.lane(threadId).active?.run;
@@ -2028,6 +2056,7 @@ export class ThreadRuntime {
   async close() {
     this.closing = true;
     this.decisions?.close();
+    this.jobs?.close();
     if (this.typingTimer) { clearTimeout(this.typingTimer); this.typingTimer = undefined; }
     for (const lane of this.lanes.values()) lane.active?.control.abort();
     if (this.saveTimer) { try { this.save(); } catch { /* best effort */ } }

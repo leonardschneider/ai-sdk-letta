@@ -153,7 +153,7 @@ test('an adopted agent\'s project folder is persisted and merged into its sandbo
 test('web_dev and mcp_app_dev: off by default, need a docker or apple-container sandbox and their dependencies, and switch the image to the web development one', () => {
   const docker = { sandbox: { provider: 'docker' as const, git: { name: 'A', email: 'a@example.com' } } };
   const custom = { sandbox: { provider: (() => { throw new Error('unused'); }) as never, git: { name: 'A', email: 'a@example.com' } } };
-  assert.deepEqual(defaultAdoptedTools(docker), ['files', 'sandbox', 'decisions', 'ask_user']);
+  assert.deepEqual(defaultAdoptedTools(docker), ['files', 'sandbox', 'decisions', 'jobs', 'ask_user']);
   assert.equal(adoptedToolsRefusal(['sandbox', 'web_dev'], {}), 'sandbox_unavailable');
   assert.equal(adoptedToolsRefusal(['sandbox', 'web_dev'], custom), 'sandbox_unavailable', 'a custom sandbox factory has no services container');
   assert.equal(adoptedToolsRefusal(['sandbox', 'mcp_app_dev'], docker), 'mcp_app_dev_needs_web_dev');

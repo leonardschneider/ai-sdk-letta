@@ -8,8 +8,8 @@ import type { ThreadRuntime } from './runtime.js';
 /** One item of the activity view. `since` is when it started (ISO), `threadId` the conversation it belongs to. */
 export type ActivityItem = {
   id: string;
-  group: 'turns' | 'waiting' | 'services' | 'background';
-  kind: 'turn' | 'queued' | 'approval' | 'question' | 'decision' | 'memory-review' | 'app-approval' | 'container' | 'dev-server' | 'browser' | 'app' | 'jiminy' | 'dream' | 'schedule';
+  group: 'turns' | 'waiting' | 'jobs' | 'services' | 'background';
+  kind: 'turn' | 'queued' | 'approval' | 'question' | 'decision' | 'memory-review' | 'app-approval' | 'container' | 'dev-server' | 'browser' | 'app' | 'jiminy' | 'dream' | 'schedule' | 'job';
   label: string;
   detail?: string;
   threadId?: string; title?: string;
@@ -20,6 +20,8 @@ export type ActivityItem = {
   until?: string;
   /** Apps: `running`, `starting`, `stopped`, `failed`. */
   status?: string;
+  /** Jobs: progress (`done` of `total` `unit`, `percent`), for the bar. */
+  progress?: { done?: number; total?: number; unit?: string; percent?: number; ratePerSecond?: number; etaSeconds?: number };
   /** What can be done from the view: `stop` (a turn, a queued message), `stop-dev-server`, `stop-app`, `restart-app`. */
   actions?: ('stop' | 'stop-dev-server' | 'stop-app' | 'restart-app')[];
   /** Turns, queued messages and prompts: the run. Apps: the app ID. */
@@ -33,9 +35,9 @@ export type AgentActivity = { state: ActivityState; working: number; waiting: nu
 export type ActivityState = 'idle' | 'working' | 'waiting';
 
 /** The state of an agent from its items: anything waiting for a person, else anything working (services alone are not work). */
-export function activityState(items: readonly Pick<ActivityItem, 'group' | 'kind'>[]): { state: ActivityState; working: number; waiting: number } {
+export function activityState(items: readonly Pick<ActivityItem, 'group' | 'kind' | 'status'>[]): { state: ActivityState; working: number; waiting: number } {
   const waiting = items.filter(i => i.group === 'waiting').length;
-  const working = items.filter(i => i.kind === 'turn' || i.kind === 'queued' || i.kind === 'jiminy' || i.kind === 'dream').length;
+  const working = items.filter(i => i.kind === 'turn' || i.kind === 'queued' || i.kind === 'jiminy' || i.kind === 'dream' || (i.kind === 'job' && i.status !== 'quiet')).length;
   return { state: waiting ? 'waiting' : working ? 'working' : 'idle', working, waiting };
 }
 
@@ -63,6 +65,14 @@ export function agentActivity(runtime: ThreadRuntime, owner: string): AgentActiv
     if (!thread || thread.archived) continue;
     const memory = decision.kind === 'memory-review' || decision.kind === 'claim-confirmation' || decision.kind === 'memory-notice';
     items.push({ id: `decision:${decision.id}`, group: 'waiting', kind: memory ? 'memory-review' : 'decision', label: decision.kind === 'web-research' ? 'Review web research' : memory ? 'Memory review' : 'Decision', detail: decision.question.slice(0, 200), threadId: thread.id, title: thread.title, since: decision.createdAt, ref: decision.id });
+  }
+  // Jobs the agent runs (visible background work): goal, progress, latest log line. A job nobody updated for a while is listed but no longer counts as work.
+  for (const job of runtime.jobs?.running() ?? []) {
+    const thread = titled(job.threadId);
+    if (!thread || thread.archived) continue;
+    const { percent, ratePerSecond, etaSeconds } = job.progress;
+    items.push({ id: `job:${job.id}`, group: 'jobs', kind: 'job', label: job.goal, ...(job.lines.length ? { detail: job.lines.at(-1)!.slice(0, 200) } : {}), threadId: thread.id, title: thread.title, since: job.startedAt, status: runtime.jobs!.fresh(job) ? 'running' : 'quiet',
+      progress: { ...(job.done !== undefined ? { done: job.done } : {}), ...(job.total !== undefined ? { total: job.total } : {}), ...(job.unit ? { unit: job.unit } : {}), ...(percent !== undefined ? { percent } : {}), ...(ratePerSecond !== undefined ? { ratePerSecond } : {}), ...(etaSeconds !== undefined ? { etaSeconds } : {}) }, ref: job.id });
   }
   if (runtime.apps) {
     for (const approval of runtime.apps.pendingAll()) {

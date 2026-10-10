@@ -39,6 +39,8 @@ export function dataUrlBlob(url: string): Blob | undefined {
 
 type Lightbox = (image: { url: string; name: string }) => void;
 const LightboxContext = createContext<Lightbox>(() => {});
+/** Open an image in the lightbox (`url`: any same-origin or blob URL). */
+export const useLightbox = () => useContext(LightboxContext);
 
 /** Click-to-enlarge overlay for local (blob/data) images. Esc or a click outside closes it. */
 export function LightboxProvider({ children }: { children: React.ReactNode }) {
