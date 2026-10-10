@@ -350,6 +350,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   /* ---------------- jobs ---------------- */
   /** A conversation's jobs (visible background work), oldest first, with their progress. */
   app.get('/v1/threads/:id/jobs', (req, res) => res.json({ jobs: runtime.threadJobs(owner, req.params.id) }));
+  /** Stop a background command (its card's job ID, or the command's own `bg-…` ID): the agent is told it was stopped. */
+  app.post('/v1/threads/:id/jobs/:job/stop', async (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(await runtime.stopBackgroundCommand(owner, req.params.id, req.params.job)); });
   /**
    * A job's latest image. Served as an image only: SVG never runs as a
    * document (a sandbox policy without scripts), and the app shows it in an

@@ -186,6 +186,16 @@ export class BackgroundCommands {
     this.save(); this.changed(); this.schedule();
     return { ...full };
   }
+  /** Give a running command (followed again after a restart) a new live card; its output is read from the start. */
+  reattach(id: string, job: CommandJob) {
+    const record = this.state.commands.find(r => r.id === id);
+    if (!record || record.state !== 'running') return;
+    const live = this.live.get(id) ?? { offsets: { stdout: 0, stderr: 0 }, aliveSeenAt: this.now() };
+    live.job = job; live.offsets = { stdout: 0, stderr: 0 };
+    this.live.set(id, live);
+    void job.output({ stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0 }).then(() => { if (job.jobId && record.cardJobId !== job.jobId) { record.cardJobId = job.jobId; try { this.save(); } catch { /* next change */ } } }, () => {});
+    this.schedule();
+  }
   /** Is any command of this sandbox owner running? */
   running(owner: string): boolean { return this.state.commands.some(r => r.owner === owner && r.state === 'running'); }
   /** How many commands of this owner run now. */

@@ -3,10 +3,11 @@ import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { Server } from 'node:http';
 import type { ToolSet } from 'ai';
-import { McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, jobsEnabled, type JobDesk, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
+import { backgroundCommandsAt, McpApps, mcpAppDevEnabled, mcpAppsDirectory, type ClaimMember, provenanceLabel, ASK_USER_TOOL, CredentialStore, LOCAL_USER_ID, PREPARE_CALL, WebDevRegistry, webDevEnabled, atlassianEnabled, sandboxEnabled, checkProjectFolder, checkConversation, createLettaAgent, decisionsEnabled, jobsEnabled, type JobDesk, filesEnabled, openAgentHost, openResources, resolveStateDirectory, schedulingEnabled, statePaths, webSearchEnabled, webDevSandbox, type AdoptionEnvironment, type AgentDefinition, type AgentHost, type DecisionDesk, type LettaRuntime, type MemoryGuardEvents, type MemoryReview, type OpenAgentOptions, type TaskScheduler, type SandboxConfig, type DreamingSettings } from 'ai-sdk-letta';
 import { localModels } from './models.js';
 import { DecisionBoard } from './decisions.js';
 import { JobBoard } from './jobs.js';
+import { BackgroundNotifier } from './background.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
 import { TeamDirectory, authorOf } from './team.js';
@@ -131,6 +132,18 @@ function jobDesk(definition: AgentDefinition) {
     runtime.jobs = board;
     return board;
   } };
+}
+
+/**
+ * Background commands of an agent that runs commands: their ends become
+ * notification turns, and after a restart running ones get their card back.
+ */
+function backgroundCommands(definition: AgentDefinition, runtime: ThreadRuntime, stateDirectory: string, owner: string, desk?: JobDesk) {
+  if (!sandboxEnabled(definition as AgentDefinition<ToolSet>)) return undefined;
+  const notifier = new BackgroundNotifier(runtime, backgroundCommandsAt(statePaths(stateDirectory).root), owner, desk);
+  runtime.backgroundNotifier = notifier;
+  notifier.resumeAll();
+  return notifier;
 }
 
 /**
@@ -295,6 +308,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
     jobs.bind(runtime, directory);
+    backgroundCommands(definition, runtime, stateDirectory, owner, jobs.desk);
     memory.bind(runtime, board);
     const credentials = atlassianEnabled(definition) ? new CredentialStore(statePaths(stateDirectory).credentials) : undefined;
     let automation: { service: AutomationService; server: Server; url: string; port: number; endpoint: AutomationEndpoint } | undefined;
@@ -323,6 +337,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
         previewMembers.add(member);
         const hostedBoard = desk.bind(hosted, folder, owner);
         adoptedJobs.bind(hosted, folder);
+        backgroundCommands(adopted, hosted, stateDirectory, owner, adoptedJobs.desk);
         wiring.bind(hosted, hostedBoard);
         hostedBoard?.resumeAll();
         return { runtime: hosted, ...(hostedBoard ? { board: hostedBoard } : {}), ...(services.webDev ? { webDev: true } : {}), ...(services.apps ? { apps: true } : {}),
@@ -490,6 +505,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       runtimes.push(runtime);
       const board = decisions.bind(runtime, folder, 'team');
       teamJobs.bind(runtime, folder);
+      backgroundCommands(definition, runtime, stateDirectory, 'team', teamJobs.desk);
       boards.push(board);
       memory.bind(runtime, board);
       agents.set(definition.id, { info: { ...agentInfo(definition), replyMode: definition.replyMode ?? 'auto', ...(options.automation ? { automations: true } : {}) }, runtime });
