@@ -484,6 +484,11 @@ export class AppGate {
     const decided = [...this.approvals.values()].filter(a => a.status !== 'pending');
     for (const old of decided.slice(0, Math.max(0, decided.length - APP_GATE_LIMITS.maxDecided))) { this.approvals.delete(old.id); this.instanceOf.delete(old.id); }
   }
+  /** Every pending approval of the agent's views (the activity view), oldest first. */
+  pendingAll() {
+    this.expire();
+    return [...this.approvals.values()].filter(a => a.status === 'pending').sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map(publicApproval);
+  }
   /** Pending approvals of a thread (the cards). */
   pending(owner: string, threadId: string) {
     this.options.runtime.threadSummary(owner, threadId) ?? (() => { throw new RuntimeFault('not_found', 404); })();

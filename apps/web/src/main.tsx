@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
 import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
+import { ActivityPill, useActivitySummary, useAgentActivity } from './activity.js';
 import { AgentSwitcher, CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
 import { AddAgentDialog, InstructionsDialog, LocalAgentSwitcher, ModelDialog, ProjectDialog, RemoveAgentDialog, ToolsDialog, adoptionMessage, saveViewOnly } from './adoption.js';
@@ -219,6 +220,14 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const appTabs = appsEnabled ? appsOf(side, current.draft ? undefined : current.id) : [];
   const [appsVersion, setAppsVersion] = useState(0);
   const { viewTools, generations: devGenerations } = useViewTools(appsEnabled && !connecting && !unreachable, serverChanges + turns + appsVersion);
+  // Activity: the header's status pill (always visible) and its popover; counts of every agent for the switcher and the sidebar.
+  const summary = useActivitySummary(!team && !connecting && !unreachable);
+  const [activity, reloadActivity] = useAgentActivity(!connecting && !unreachable, `${serverChanges}:${turns}:${summary.version}`, false);
+  const mine = summary.agents.find(a => a.id === agent.id);
+  const activityLive = (mine ? mine.state !== 'idle' : false) || (!!activity && activity.state !== 'idle');
+  useEffect(() => { if (!activityLive) return; const timer = setInterval(reloadActivity, 3000); return () => clearInterval(timer); }, [activityLive, reloadActivity]);
+  const otherAgents = useMemo(() => summary.agents.filter(a => a.id !== agent.id), [summary.agents, agent.id]);
+  const runningElsewhere = useMemo(() => new Set(mine?.running ?? []), [mine]);
   const [appApprovals, refreshAppApprovals] = useAppApprovals(current.draft ? undefined : current.id, appsEnabled && !connecting && !unreachable, serverChanges + turns);
   useEffect(() => { setAppOverlay(undefined); setViewPins({}); }, [current.id]);
   // One live view per app view (default): the newest call of each view renders, in its place (inline, panel, full screen); earlier ones collapse.
@@ -695,7 +704,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     catch (e) { toast(errorCode(e) === 'not_your_turn' ? 'Only its author or an admin can withdraw that message.' : errorCode(e) === 'already_sent' ? 'Too late: that message was just sent to the agent.' : 'Couldn’t withdraw that message.', { tone: 'error' }); }
   }
 
-  const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running, queued: t.queued ?? 0, decision: !!t.pendingDecision } })), [active]);
+  const adapterThreads = useMemo<ExternalStoreThreadData<'regular'>[]>(() => active.map(t => ({ status: 'regular', id: t.id, title: t.title, custom: { state: t.state, running: !!t.running || runningElsewhere.has(t.id), queued: t.queued ?? 0, decision: !!t.pendingDecision } })), [active, runningElsewhere]);
   const adapterArchived = useMemo<ExternalStoreThreadData<'archived'>[]>(() => archived.map(t => ({ status: 'archived', id: t.id, title: t.title, custom: { state: t.state } })), [archived]);
   const readOnly = !!selected?.archived;
   const readOnlyRef = useRef(readOnly); readOnlyRef.current = readOnly;
@@ -903,7 +912,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} {...(viewOnly ? { newHidden: true } : {})} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
-            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onModel={setModelOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
+            {...(team ? { brand: <AgentSwitcher agents={team.agents} current={agent} onSwitch={team.onSwitch} onMembers={() => setMembersOpen(true)}/> } : local ? { brand: <LocalAgentSwitcher agents={local.agents} current={agent} activity={summary.agents} onSwitch={local.onSwitch} onAdd={() => { if (narrow) setDrawer(false); setAdoptOpen(true); }} onRemove={setRemoving} onInstructions={setInstructionsOf} onProject={setProjectOf} onTools={setToolsOf} onModel={setModelOf} onViewOnly={(target, value) => void setViewOnly(target, value)}/> } : {})}
             footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
@@ -915,6 +924,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
               {!viewOnly && <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>}
             </>}
             <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+            {!connecting && !unreachable && <ActivityPill activity={activity} others={otherAgents} narrow={narrow} onOpenThread={id => { if (id !== current.id) void select(id); }} onChanged={reloadActivity}/>}
             {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {viewOnly && <span className="live-badge" role="status" title="View only: changes made in Letta Code appear here live"><span className="live-dot" aria-hidden="true"/>Live</span>}

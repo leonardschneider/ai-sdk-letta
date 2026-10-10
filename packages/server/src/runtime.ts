@@ -13,6 +13,28 @@ import {
   appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
+/**
+ * What a running turn does now, from its last events: `tool:<name>` (a tool
+ * runs), `waiting` (a prompt waits for a person), `thinking`, `writing`, or
+ * `starting` (nothing streamed yet).
+ */
+export function turnStep(run: Pick<Run, 'events'>): string {
+  const open = new Map<string, string>();
+  let last = 'starting';
+  for (const event of run.events) {
+    const id = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : undefined;
+    if (event.type === 'tool_started' && id) { open.set(id, String(event.data.name ?? 'tool')); last = 'tool'; }
+    else if ((event.type === 'tool_completed' || event.type === 'tool_failed') && id) { open.delete(id); last = 'thinking'; }
+    else if (event.type === 'reasoning') last = 'thinking';
+    else if (event.type === 'text') last = 'writing';
+    else if (event.type === 'interaction') last = 'waiting';
+    else if (event.type === 'interaction_resolved' || event.type === 'interaction_ended') last = open.size ? 'tool' : 'thinking';
+  }
+  if (last === 'waiting') return 'waiting';
+  if (open.size && (last === 'tool' || last === 'thinking')) return `tool:${[...open.values()].at(-1)}`;
+  return last === 'tool' ? 'thinking' : last;
+}
+
 /** One NDJSON event of a run. The application, never the HTTP consumer, owns tools. */
 export type RuntimeEvent = { sequence: number; type: string; data: Record<string, unknown> };
 /**
@@ -229,7 +251,7 @@ function memoryChip(rewind: ConversationRewind, commit: string): { provenance?: 
   return { ...(provenance ? { provenance } : {}), ...(review?.verdict ? { review: `${review.verdict}${review.jiminy ? ` · trust ${review.jiminy.trust.toFixed(2)}` : ''}` } : {}) };
 }
 /** One conversation's session and its single running turn (one lane per runtime unless parallel). */
-type Lane = { key: string; locked: boolean; usedAt?: number; current?: RuntimeSession; active?: { run: Run; control: AbortController }; pending?: { runId: string; request: InteractionRequest; resolve(value: InteractionResponse): void }; draining?: boolean };
+type Lane = { key: string; locked: boolean; usedAt?: number; current?: RuntimeSession; active?: { run: Run; control: AbortController }; pending?: { runId: string; request: InteractionRequest; at?: number; resolve(value: InteractionResponse): void }; draining?: boolean };
 /** An opened agent conversation as seen by the runtime. */
 export interface RuntimeSession {
   agentId: string;
@@ -433,6 +455,8 @@ export class ThreadRuntime {
   turnContext?: (threadId: string) => { reminder?: string; sources?: ContentSource[] };
   /** MCP Apps' gate (set by the server for agents with `mcpApps`). */
   apps?: import('./mcp-apps.js').AppGate;
+  /** Scheduled tasks still to fire (set by the automation service), for the activity view. */
+  upcoming?: () => { id: string; at: string; prompt: string; threadId?: string; title?: string }[];
   /** The reviewer's model setting, when the app may change it (see {@link setReviewerModel}). */
   reviewerModel?: { value(): string; set(model: string): void; available(): Promise<string[]> };
   /** The agent's project folder, read-only (see {@link RuntimeHost.project}). */
@@ -586,6 +610,30 @@ export class ThreadRuntime {
     const run = this.lane(threadId).active?.run;
     return run && run.threadId === threadId ? structuredClone(run) : undefined;
   }
+  /**
+   * What this runtime does now, for the activity view (in memory, no Letta
+   * call): running turns with their current step, queued messages, prompts
+   * waiting for a person, and a dream in progress.
+   */
+  activityNow(owner: string) {
+    this.authorize(owner);
+    const titleOf = (id: string) => this.state.threads.find(t => t.id === id)?.title ?? 'Conversation';
+    const turns: { runId: string; threadId: string; title: string; startedAt?: string; step: string; source?: { kind: string; name: string } }[] = [];
+    const prompts: { runId: string; threadId: string; title: string; kind: 'approval' | 'question'; tool: string; prompt: string; since?: string }[] = [];
+    for (const lane of this.lanes.values()) {
+      const run = lane.active?.run;
+      if (!run) continue;
+      turns.push({ runId: run.id, threadId: run.threadId, title: titleOf(run.threadId), ...(run.startedAt ? { startedAt: run.startedAt } : {}), step: lane.pending?.runId === run.id ? 'waiting' : turnStep(run), ...(run.source ? { source: { kind: run.source.kind, name: run.source.name } } : {}) });
+      if (lane.pending) {
+        const at = lane.pending.at;
+        prompts.push({ runId: run.id, threadId: run.threadId, title: titleOf(run.threadId), kind: lane.pending.request.kind, tool: lane.pending.request.tool, prompt: lane.pending.request.title.slice(0, 200), ...(at ? { since: new Date(at).toISOString() } : {}) });
+      }
+    }
+    const queued = this.state.runs.filter(r => r.status === 'queued').map(r => ({ runId: r.id, threadId: r.threadId, title: titleOf(r.threadId), ...(r.queuedAt ? { since: r.queuedAt } : {}) }));
+    return { turns, queued, prompts, ...(this.dreaming ? { dreaming: { ...this.dreaming, title: titleOf(this.dreaming.threadId) } } : {}) };
+  }
+  /** A dream (reflection) started with {@link dreamNow} runs now. */
+  private dreaming?: { threadId: string; since: string };
   /** Letta agents this runtime's threads use. */
   agentIds(): string[] { return [...new Set(this.state.threads.map(t => t.agentId).filter((id): id is string => !!id))]; }
   /** Whether a turn runs or waits, or a session is being opened (an adopted agent is not removed meanwhile). */
@@ -740,9 +788,10 @@ export class ThreadRuntime {
     return this.exclusive(lane, async () => {
       const session = await this.openIn(lane, thread);
       if (!session.harnessCommand) throw new RuntimeFault('dream_unavailable');
+      this.dreaming = { threadId: thread.id, since: new Date().toISOString() }; this.changed();
       const output = await session.harnessCommand('reflect', typeof instruction === 'string' && instruction.trim() ? `--instruction ${JSON.stringify(instruction.trim())}` : '');
       return { started: true as const, output: output.slice(0, 500) };
-    });
+    }).finally(() => { if (this.dreaming?.threadId === thread.id) { this.dreaming = undefined; this.changed(); } });
   }
   /** Memory reviews changed (one started, settled or reverted something): open pages refresh. */
   memoryChanged() { this.memoryVersion++; this.changed(); }
@@ -1618,7 +1667,7 @@ export class ThreadRuntime {
           reject(new RuntimeFault('interaction_cancelled'));
         };
         signal.addEventListener('abort', abort, { once: true });
-        lane.pending = { runId: run.id, request, resolve: value => {
+        lane.pending = { runId: run.id, request, at: waitingAt, resolve: value => {
           signal.removeEventListener('abort', abort);
           if (lane.pending?.request.id === request.id) lane.pending = undefined;
           done(); resolve(value);
@@ -1852,6 +1901,16 @@ export class ThreadRuntime {
     const revoked = await this.webDev.registry.revokeOrigin(agentId, thread.conversationId, origin);
     if (!revoked) throw new RuntimeFault('not_found', 404);
     return this.webDevStatus(owner, threadId);
+  }
+  /** Stop a conversation's dev server (its services container keeps running). */
+  async stopDevServer(owner: string, threadId: string): Promise<{ stopped: boolean; text: string }> {
+    const thread = this.thread(owner, threadId);
+    const services = this.webDev && thread.agentId && thread.conversationId ? this.webDev.registry.get(thread.agentId, thread.conversationId) : undefined;
+    if (!services) throw new RuntimeFault('not_found', 404);
+    const had = services.running;
+    const text = await services.stopDevServer();
+    this.changed();
+    return { stopped: had, text };
   }
   /** A conversation's web development status changed (dev server, origins): open pages refresh. */
   webDevChanged() { this.changed(); }

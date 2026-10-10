@@ -346,6 +346,8 @@ export class MemoryGuard {
     }
   }
   /** Resolves when every pending review has settled (tests, shutdown). */
+  /** IDs of reviews Jiminy is deciding now (in the background). */
+  reviewing(): string[] { return [...this.pending.keys()]; }
   async idle(): Promise<void> { while (this.pending.size) await Promise.allSettled([...this.pending.values()]); }
 
   /** Files the commits changed (first-parent diffs), with whether each is protected. */
