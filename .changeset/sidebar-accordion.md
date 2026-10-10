@@ -1,0 +1,5 @@
+---
+"@ai-sdk-letta/server": minor
+---
+
+Sidebar navigation for several agents (adopted agents, team servers): an accordion with a **Conversations** section, where every agent's conversations are grouped by time (Today, Yesterday, Previous 7 days, Older) and then by agent (a small muted sub-heading, agents ordered by their most recent conversation), and an **Agents** section (collapsed by default) listing each agent with its model and a status dot, a ⋯ menu with its settings (Model…, Tools…, Project folder…, Update instructions…, View only, Remove from app; Members… on team servers) and "Add agent…". Search covers all agents; opening another agent's conversation switches to that agent and opens it. "New chat" starts with the current agent, with a chevron to pick another. The header shows a breadcrumb, `agent > conversation` (the agent opens its menu; only the title on phones). The sidebar title is now the app's name, replacing the agent switcher. Single-agent setups keep the simple sidebar.
