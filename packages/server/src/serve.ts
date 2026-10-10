@@ -13,6 +13,7 @@ import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from 
 import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
 import { AdoptionRegistry, adoptedPeek } from './adoption.js';
+import { DefinitionToolOverrides } from './tool-overrides.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
 import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer, type PreviewTarget } from './preview.js';
 import { AppGate } from './mcp-apps.js';
@@ -201,7 +202,7 @@ function projectOf(definition: AgentDefinition<ToolSet>): string | undefined {
   return path;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps, jobs?: JobDesk): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps, jobs?: JobDesk, overrides?: DefinitionToolOverrides<TOOLS>): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   const project = projectOf(definition as AgentDefinition<ToolSet>);
   return {
@@ -209,10 +210,12 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
     ...(filesEnabled(definition) || atlassianEnabled(definition) ? { attachmentsRoot: statePaths(stateDirectory).resources, resources: (agentId: string, titles: Record<string, string>) => openResources(statePaths(stateDirectory), agentId, titles) } : {}),
     open: async options => {
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
-      runtime = await createLettaAgent(definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
+      // Per-tool overrides (tighten only) apply when a session opens; a change since reopens it before the next turn.
+      const opened = overrides?.version;
+      runtime = await createLettaAgent(overrides?.effective() ?? definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
-      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand, ...(runtime.toolsStale ? { toolsStale: runtime.toolsStale } : {}) };
+      return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand, ...(runtime.toolsStale || overrides ? { toolsStale: () => (overrides ? overrides.version !== opened : false) || !!runtime?.toolsStale?.() } : {}) };
     },
     close: async () => { const current = runtime; runtime = undefined; await current?.close(); },
     // Check and unlock (the runtime closed the session first): read-only, under the identity lock.
@@ -303,7 +306,11 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     // Web app development and MCP Apps: each runtime's services (kept across sessions), on one shared preview listener (started below).
     const previewMembers = new Set<PreviewMember>();
     const dev = devServices(definition, stateDirectory, log);
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    // Per-tool overrides of the app's own agent: tighten only (<state>/server/<id>/tool-overrides.json).
+    const info: GuiAgentInfo = { ...agentInfo(definition), toolControl: true };
+    const toolOverrides = new DefinitionToolOverrides(definition, stateDirectory, effective => { info.approvalTools = Object.keys(effective.permissions).filter(name => effective.permissions[name] === 'ask'); });
+    info.approvalTools = Object.keys(toolOverrides.effective().permissions).filter(name => toolOverrides.effective().permissions[name] === 'ask');
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     const { webDev, apps } = dev;
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
@@ -358,7 +365,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
           sandbox: token => { for (const member of previewMembers) { const page = member.sandbox(token); if (page.status !== 404) return page; } return { status: 404 }; } });
         previewRef.port = preview.port;
       }
-      const server = guiApp(runtime, owner, port, assets, { ...agentInfo(definition), ...(automation ? { automations: true } : {}) }, credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui()).listen(port, '127.0.0.1');
+      const server = guiApp(runtime, owner, port, assets, Object.assign(info, automation ? { automations: true } : {}), credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui(), toolOverrides.routes()).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       appPort = bound; appPortRef.port = bound;
       const url = `http://127.0.0.1:${bound}`;

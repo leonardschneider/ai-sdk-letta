@@ -19,6 +19,7 @@ export { BackgroundNotifier } from './background.js';
 export { JobBoard, jobProgress, publicJob, JOB_BOARD_LIMITS, type JobRecord, type PublicJob, type JobProgress, type JobHost } from './jobs.js';
 export { DecisionBoard, DecisionConflict, DECISION_BOARD_LIMITS, type DecisionRecord, type DecisionStatus, type DecisionPerson, type PublicDecision } from './decisions.js';
 export { AdoptionRegistry, lettaAdoptionBackend, availableTools, adoptedPeek, viewOnlyAllowed, VIEW_ONLY_READS, type AdoptionBackend, type AdoptionRegistryOptions, type AdoptionNotice, type HostFactory } from './adoption.js';
+export { DefinitionToolOverrides, withToolOverrides, definitionToolControl } from './tool-overrides.js';
 export { LiveConversations, LIVE_LIMITS, type LiveFs, type LiveOptions } from './live.js';
 export { AppGate, APP_GATE_LIMITS, VIEW_STATE_EXTENSION, sandboxProxyHtml, sandboxOrigin, contentText, publicApproval, type AppGateOptions, type AppInstance, type AppApproval, type AppApprovalKind, type AppAuditEvent } from './mcp-apps.js';
 export { ProjectFolder, PROJECT_LIMITS, PROJECT_DEFAULT_IGNORES, type ProjectEntry, type ProjectListing, type ProjectStatus } from './project.js';

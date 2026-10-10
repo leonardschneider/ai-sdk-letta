@@ -6,7 +6,7 @@ import { LettaAgentClient } from '@letta-ai/letta-agent-sdk';
 import {
   ADOPTED_TOOL_SETS, AdoptionStore, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
   forgetIdentity, instructionsSectionOf, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
-  withoutInstructionsSection, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
+  withoutInstructionsSection, adoptedToolBase, adoptedToolControl, checkToolOverrides, ToolOverrideError, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
 } from 'ai-sdk-letta';
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
 import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type GuiAgentInfo } from './http.js';
@@ -135,7 +135,8 @@ const REFUSALS: Record<string, string> = {
  * - `GET /api/adoption/agents`: local agents for the "Add agent" picker;
  * - `POST /api/adoption/agents` `{ agentId, tools?, viewOnly? }`: adopt one (view only: even while Letta Code uses it);
  * - `DELETE /api/adoption/agents/<id>`: remove it from the app (the Letta agent is never deleted);
- * - `PUT /api/adoption/agents/<id>/tools` `{ tools }`: its tool sets;
+ * - `GET /api/adoption/agents/<id>/tools`: its sets' tools, defaults, overrides, locks and costs;
+ * - `PUT /api/adoption/agents/<id>/tools` `{ tools, overrides? }`: its tool sets and per-tool overrides (`allow`, `ask`, `off`);
  * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
  * - `PUT /api/adoption/agents/<id>/view-only` `{ viewOnly }`: view only (reads only; off is refused while Letta Code uses it);
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
@@ -232,7 +233,7 @@ export class AdoptionRegistry {
       ...(webDev ? { webDev: true, ...(!record.tools.includes('files') ? { resources: true } : {}) } : {}), ...(apps ? { apps: true } : {}),
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
-      adopted: { agentId: record.agentId, model: record.model, ...(record.effort ? { effort: record.effort } : {}), tools: [...record.tools], instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
+      adopted: { agentId: record.agentId, model: record.model, ...(record.effort ? { effort: record.effort } : {}), tools: [...record.tools], ...(record.toolOverrides && Object.keys(record.toolOverrides).length ? { overrides: { ...record.toolOverrides } } : {}), instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
     }));
   }
   bindFeed(feed: DecisionFeed) {
@@ -304,16 +305,34 @@ export class AdoptionRegistry {
     if (hosted.record.viewOnly) throw new RuntimeFault('view_only', 403);
     return hosted;
   }
-  /** Change an adopted agent's tool sets: its runtime restarts with the new definition. */
+  /**
+   * Change an adopted agent's tool sets and per-tool overrides (`{ tools, overrides? }`;
+   * without `overrides` the current ones stay): its runtime restarts with the new
+   * definition. Overrides are checked against every set the host offers (so a set
+   * turned off keeps its overrides); unknown tools and defaults are dropped, locked
+   * tools refused (`tool_locked`).
+   */
   async setTools(definitionId: string, input: unknown) {
     const hosted = this.writable(definitionId);
-    const sets = this.validTools((input as { tools?: unknown } | undefined)?.tools);
+    const body = (input ?? {}) as { tools?: unknown; overrides?: unknown };
+    const sets = this.validTools(body.tools);
+    const overrides = body.overrides === undefined ? undefined : checkToolOverrides(body.overrides, adoptedToolBase(availableTools(this.options.environment), this.options.environment));
     if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
-    const record = this.store.update(definitionId, r => ({ ...r, tools: sets }));
+    const record = this.store.update(definitionId, r => {
+      if (overrides === undefined) return { ...r, tools: sets };
+      const { toolOverrides: _old, ...rest } = r;
+      return { ...rest, tools: sets, ...(Object.keys(overrides).length ? { toolOverrides: overrides } : {}) };
+    });
     await this.unhost(hosted);
     this.host(record);
     this.keepInstructions(definitionId, 'tools changed');
     return record;
+  }
+  /** Per-tool control of an adopted agent: each set the host offers, its tools, defaults, overrides, locks and costs (see `adoptedToolControl`). */
+  toolControl(definitionId: string) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    return adoptedToolControl(hosted.record, availableTools(this.options.environment), this.options.environment);
   }
   /**
    * Set or clear an adopted agent's project folder (`{ path }` or `{ path: null }`).
@@ -547,6 +566,8 @@ export class AdoptionRegistry {
       catch (error) {
         // A refused project folder: the reason is shown to the person who chose it (their own paths only).
         if (error instanceof ProjectRefusal) return void res.status(409).json({ error: error.code, message: error.message });
+        // A refused tool override: why (a locked tool, a set's needs, a bad value).
+        if (error instanceof ToolOverrideError) return void res.status(400).json({ error: error.code, message: error.message });
         const { status, code } = refusal(error); res.status(status).json({ error: code, ...(REFUSALS[code] ? { message: REFUSALS[code] } : {}) });
       }
     };
@@ -564,6 +585,7 @@ export class AdoptionRegistry {
     }));
     app.post('/adoption/agents', json, wrap(async req => this.adopt(req.body)));
     app.delete('/adoption/agents/:id', wrap(async req => this.remove(String(req.params.id))));
+    app.get('/adoption/agents/:id/tools', wrap(async req => this.toolControl(String(req.params.id))));
     app.put('/adoption/agents/:id/tools', json, wrap(async req => this.setTools(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/view-only', json, wrap(async req => this.setViewOnly(String(req.params.id), req.body)));

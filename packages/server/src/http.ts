@@ -455,7 +455,9 @@ export interface GuiAgentInfo {
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model, tool sets, project folder (as given), and whether the server has a sandbox. */
   /** View only (an adopted agent that works in Letta Code): the app shows its conversations live and never sends. */
   viewOnly?: boolean;
-  adopted?: { agentId: string; model: string; effort?: string; tools: readonly string[]; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
+  /** The app's own agent: its tools can be tightened from the settings (`/api/tools`). */
+  toolControl?: boolean;
+  adopted?: { agentId: string; model: string; effort?: string; tools: readonly string[]; /** Per-tool overrides (`allow`, `ask`, `off`). */ overrides?: Readonly<Record<string, string>>; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
   /** The agent has MCP Apps (`mcpApps`): tool lines of app tools render their views. */
@@ -628,7 +630,9 @@ export function clientErrorLog(options: { log?: (line: string) => void; perMinut
  */
 export function guiApp(runtime: ThreadRuntime, owner: string, port: number, assets: string, agent: GuiAgentInfo, credentials?: CredentialStore, integrationOptions?: { fetch?: typeof fetch }, automation?: AppAutomation,
   /** Web app previews: their listener's origin pattern, for `frame-src` (see `startPreviewServer`). */
-  preview?: { frameSrc: string }, adoption?: GuiAdoption) {
+  preview?: { frameSrc: string }, adoption?: GuiAdoption,
+  /** Per-tool control of the app's own agent (`GET`/`PUT /api/tools`, tighten only; see `DefinitionToolOverrides`). */
+  toolRoutes?: express.Router) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
@@ -646,7 +650,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}) }, versions,
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}), ...(agent.toolControl && toolRoutes ? { toolControl: true } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: !info.viewOnly })), adoption: true } : {}) });
   });
@@ -673,6 +677,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   ...(feed ? [express.Router().get('/decisions', decisionFeedRoute(feed, () => () => true))] : []),
   // Adopted agents: the picker and each agent's API (`/api/agents/<id>/v1/...`).
   ...(adoption ? [adoption.routes] : []),
+  ...(toolRoutes ? [toolRoutes] : []),
   runtimeRoutes(express(), runtime, owner, undefined, undefined, integrations));
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;
