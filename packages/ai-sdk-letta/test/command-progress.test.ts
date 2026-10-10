@@ -5,7 +5,7 @@ import { mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import type { Experimental_SandboxSession } from 'ai';
 import {
   commandGoal, commandJob, parseProgressLine, visibleLine, OutputLines, pollScript, parsePollOutput, pollCommandOutput, runSandboxCommand, commandScript, sandboxTools, formatCommandResult,
-  JOBS_CONTEXT, type JobDesk, type JobEndRequest, type JobStartRequest, type JobUpdateRequest, type CommandOutputChunk,
+  JOBS_CONTEXT, KILL_SCRIPT, type JobDesk, type JobEndRequest, type JobStartRequest, type JobUpdateRequest, type CommandOutputChunk,
 } from '../src/index.js';
 
 /* ------------------------------------------------------------------ */
@@ -72,7 +72,9 @@ test('the poll script reads new output from the offsets, the newest bytes, and n
 function hostSession(log: string[] = []): Experimental_SandboxSession {
   const run = async ({ command: script, abortSignal }: { command: string; abortSignal?: AbortSignal }) => {
     // The tools start in /workspace; on the host, /tmp stands in for it.
-    const command = script.replace("cd -- '/workspace'", "cd -- '/tmp'");
+    // Never run the sandbox's process sweep on the host (on Linux it would kill the test runner).
+    const command = script.replace("cd -- '/workspace'", "cd -- '/tmp'").split(KILL_SCRIPT).join('true');
+    assert.ok(!command.includes('/proc/'));
     log.push(command.includes('<<ai-sdk-letta-poll:') ? 'poll' : 'command');
     const { spawn } = await import('node:child_process');
     return new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
