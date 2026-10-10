@@ -4,6 +4,7 @@ import { ASK_USER_TOOL } from './tools.js';
 import { REQUEST_DECISION_TOOL } from './decisions.js';
 import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { includesMcpAppDevTools } from './mcp-app-dev.js';
+import { jobsEnabled, JOBS_NOTE } from './jobs.js';
 import { includesWebDevTools, isBrowserOutputTool, resolveWebDevConfig, webDevEnabled, WEB_DEV_NOTE, type ResolvedWebDevConfig, type WebDevConfig } from './webdev.js';
 import { REPLY_MODE_SETTINGS, STAY_SILENT_TOOL, type ReplyModeSetting } from './listening.js';
 import { resolveMcpApps, type McpAppConfig, type ResolvedMcpAppConfig } from './mcp-apps.js';
@@ -365,7 +366,7 @@ export function memoryPolicyInstructions(dreaming: DreamingSettings): string {
 export function creationOptions(definition: AgentDefinition, cwd: string): CreateAgentOptions {
   return {
     name: definition.name, model: definition.model, cwd, memfs: true,
-    baseTools: [], skillSources: [], systemPrompt: `${definition.instructions}\n\n${webDevEnabled(definition) ? `${WEB_DEV_NOTE}\n\n` : ''}${memoryPolicyInstructions(definition.dreaming)}`,
+    baseTools: [], skillSources: [], systemPrompt: `${definition.instructions}\n\n${webDevEnabled(definition) ? `${WEB_DEV_NOTE}\n\n` : ''}${jobsEnabled(definition) ? `${JOBS_NOTE}\n\n` : ''}${memoryPolicyInstructions(definition.dreaming)}`,
     // Do not pass `dreaming` here: the SDK applies it with scope 'both', which
     // mutates the user's global Letta defaults. The runtime installs the
     // definition's settings with scope 'local_project' in the private state cwd.

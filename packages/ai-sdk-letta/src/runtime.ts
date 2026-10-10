@@ -12,6 +12,7 @@ import { ToolInteractions } from './interactions.js';
 import { createToolBridge, fileTraceWriter, type ToolActivity, type ToolBridge } from './tools.js';
 import { SCHEDULER_CONTEXT, schedulingEnabled, type TaskScheduler } from './scheduling.js';
 import { DECISIONS_CONTEXT, decisionsEnabled, type DecisionDesk } from './decisions.js';
+import { JOBS_CONTEXT, jobsEnabled, type JobDesk } from './jobs.js';
 import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
@@ -94,6 +95,11 @@ export interface OpenAgentOptions {
    * it the decision tools answer `decisions_unavailable`.
    */
   decisions?: DecisionDesk;
+  /**
+   * Where the job tools (`job_start`, `job_update`, `job_end`) record jobs
+   * (the server passes one, and shows them). Without it they answer `jobs_unavailable`.
+   */
+  jobs?: JobDesk;
   /**
    * Web search for the `web_search` tool: a SearXNG base URL (with the
    * default summarizer, a tool-less Letta sub-agent on the definition's
@@ -331,7 +337,7 @@ export type ConversationCheck = { unlocked: boolean; active: boolean; delivered?
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'jobs' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -599,6 +605,10 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           ...(folder && credentials ? { [WORKSPACE_CONTEXT]: folder } : {}), ...(credentials ? { [ATLASSIAN_CONTEXT]: { store: credentials } } : {}) };
         const scheduler = options.scheduler && schedulingEnabled(definition) ? options.scheduler : undefined;
         const desk = options.decisions && decisionsEnabled(definition) ? options.decisions : undefined;
+        // Jobs: images are read from the conversation's folder, the workspace or the project (host paths of what the sandbox sees).
+        const jobDesk = options.jobs && jobsEnabled(definition) ? options.jobs : undefined;
+        const jobFolder = folder; const jobResources = resources;
+        const jobPaths = jobFolder && jobResources ? () => ({ workspace: jobResources.workTree(), folder: jobFolder.path, ...(definition.sandbox?.project ? { project: definition.sandbox.project.path } : {}) }) : undefined;
         // Web search reviews not answered in time become decisions, also for agents without the decision tools.
         const reviewDesk = researcher && options.decisions?.review ? options.decisions : undefined;
         // A requested decision pauses the work: the turn must end with a reply (never a silent "listened"), and no further tools run.
@@ -606,6 +616,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const toolContext = () => Object.freeze({ ...staticContext, ...(turnActor ? { [ACTOR_CONTEXT]: turnActor } : {}),
           ...(scheduler ? { [SCHEDULER_CONTEXT]: { scheduler, conversationId, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
           ...(desk ? { [DECISIONS_CONTEXT]: { desk, conversationId, requested, ...(turnActor ? { actor: turnActor } : {}) } } : {}),
+          ...(jobDesk ? { [JOBS_CONTEXT]: { desk: jobDesk, conversationId, ...(jobPaths ? { paths: jobPaths } : {}) } } : {}),
           ...(researcher ? { [WEB_SEARCH_CONTEXT]: { researcher, reviewTimeoutMs: definition.webSearch.reviewTimeoutMs, ...(turnActor ? { actor: turnActor } : {}),
             // A result nobody reviewed in time waits as a decision (when the host keeps them); the rest of the turn pauses.
             ...(reviewDesk ? { escalate: async (research: WebResearch, toolCallId: string) => {

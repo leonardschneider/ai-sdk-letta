@@ -12,6 +12,7 @@ import { defineAgent, type AgentDefinition, type DreamingSettings, type ToolPerm
 import { fileTools, FILE_TOOL_PERMISSIONS } from './file-tools.js';
 import { checkProjectFolder, projectNote, sandboxTools, SandboxError, SANDBOX_LIMITS, SANDBOX_TOOL_PERMISSIONS, type SandboxConfig } from './sandbox.js';
 import { decisionTools, DECISION_TOOL_PERMISSIONS } from './decisions.js';
+import { jobTools, JOB_TOOL_PERMISSIONS, JOBS_NOTE } from './jobs.js';
 import { webSearchTools, WEB_SEARCH_TOOL_PERMISSIONS } from './web-search.js';
 import { askUserTool, ASK_USER_TOOL } from './tools.js';
 import { webDevTools, WEBDEV_TOOL_PERMISSIONS, WEB_DEV_NOTE } from './webdev.js';
@@ -40,7 +41,7 @@ import { SANDBOX_IMAGE } from './sandbox.js';
  * host sandbox with the built-in `docker` or `apple-container` provider
  * (see {@link adoptedToolsRefusal}).
  */
-export const ADOPTED_TOOL_SETS = ['files', 'sandbox', 'decisions', 'web_search', 'ask_user', 'web_dev', 'mcp_app_dev'] as const;
+export const ADOPTED_TOOL_SETS = ['files', 'sandbox', 'decisions', 'jobs', 'web_search', 'ask_user', 'web_dev', 'mcp_app_dev'] as const;
 export type AdoptedToolSet = typeof ADOPTED_TOOL_SETS[number];
 
 /** One adopted agent, as the app records it. */
@@ -268,6 +269,7 @@ export function adoptedInstructionsSection(tools: readonly string[], memoryPolic
       + (tools.length ? tools.join(', ') : 'none besides memory') + '. Letta Code tools (shell, file editing outside memory, subagents) are not available in the app; do not call them there.',
     ...(project ? [projectNote(project)] : []),
     // Web and MCP App development: the agent learns to call their guides first (its own system prompt never gets the app's notes otherwise).
+    ...(tools.includes('job_start') ? [JOBS_NOTE] : []),
     ...(tools.includes('web_dev_guide') ? [WEB_DEV_NOTE] : []),
     ...(tools.includes('app_dev_guide') ? [MCP_APP_DEV_NOTE] : []),
     memoryPolicy, INSTRUCTIONS_END].join('\n');
@@ -361,9 +363,9 @@ export function adoptedToolsRefusal(sets: readonly AdoptedToolSet[], environment
 /** Tool sets in their canonical order ({@link ADOPTED_TOOL_SETS}), without duplicates. */
 export const orderedAdoptedTools = (sets: readonly AdoptedToolSet[]): AdoptedToolSet[] => ADOPTED_TOOL_SETS.filter(set => sets.includes(set));
 
-/** Tool sets an adopted agent gets by default: files, decisions and `ask_user`, plus the sandbox and web search when the host has them. */
+/** Tool sets an adopted agent gets by default: files, decisions, jobs and `ask_user`, plus the sandbox and web search when the host has them. */
 export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): AdoptedToolSet[] {
-  return ['files', ...(environment.sandbox ? ['sandbox' as const] : []), 'decisions', ...(environment.webSearch ? ['web_search' as const] : []), 'ask_user'];
+  return ['files', ...(environment.sandbox ? ['sandbox' as const] : []), 'decisions', 'jobs', ...(environment.webSearch ? ['web_search' as const] : []), 'ask_user'];
 }
 
 /**
@@ -389,12 +391,12 @@ export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionE
   const sandbox = base ? { ...base, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
   const tools: ToolSet = {
     ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
-    ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
+    ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('jobs') ? jobTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
     ...(webDev ? webDevTools : {}), ...(appDev ? mcpAppDevTools : {}),
   };
   const permissions: Record<string, ToolPermission> = {
     ...(sets.has('files') ? FILE_TOOL_PERMISSIONS : {}), ...(sets.has('sandbox') && environment.sandbox ? SANDBOX_TOOL_PERMISSIONS : {}),
-    ...(sets.has('decisions') ? DECISION_TOOL_PERMISSIONS : {}), ...(sets.has('web_search') && environment.webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: 'allow' as const } : {}),
+    ...(sets.has('decisions') ? DECISION_TOOL_PERMISSIONS : {}), ...(sets.has('jobs') ? JOB_TOOL_PERMISSIONS : {}), ...(sets.has('web_search') && environment.webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: 'allow' as const } : {}),
     ...(webDev ? WEBDEV_TOOL_PERMISSIONS : {}), ...(appDev ? MCP_APP_DEV_TOOL_PERMISSIONS : {}),
   };
   return defineAgent({
