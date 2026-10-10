@@ -10,7 +10,7 @@ import { toggleToolSet } from './tool-sets.js';
 export type LocalAgent = { agentId: string; name: string; model: string; lastActivity?: string; conversations: number; adoptedAs?: string; refusal?: string; inApp?: boolean; busy?: boolean };
 type Picker = { agents: LocalAgent[]; tools: { available: string[]; defaults: string[] } };
 
-const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell commands (sandbox)', decisions: 'Decisions', web_search: 'Web search', ask_user: 'Questions', web_dev: 'Web development (dev server, preview, browser)', mcp_app_dev: 'MCP App development' };
+const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell commands (sandbox)', decisions: 'Decisions', jobs: 'Jobs (live progress cards)', web_search: 'Web search', ask_user: 'Questions', web_dev: 'Web development (dev server, preview, browser)', mcp_app_dev: 'MCP App development' };
 /** The server's message for a refusal, or a fixed text. */
 export const adoptionMessage = (error: unknown) => (error instanceof AdoptionError ? error.message : undefined) ?? 'That didn’t work. Nothing was changed.';
 class AdoptionError extends Error { constructor(readonly code: string, message: string) { super(message); } }

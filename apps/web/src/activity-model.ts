@@ -4,7 +4,8 @@ export type ActivityState = 'idle' | 'working' | 'waiting';
 export type ActivityAction = 'stop' | 'stop-dev-server' | 'stop-app' | 'restart-app';
 /** One item (see the server's `ActivityItem`). */
 export type ActivityItem = {
-  id: string; group: 'turns' | 'waiting' | 'services' | 'background'; kind: string; label: string; detail?: string;
+  id: string; group: 'turns' | 'waiting' | 'jobs' | 'services' | 'background'; kind: string; label: string; detail?: string;
+  progress?: { done?: number; total?: number; unit?: string; percent?: number; ratePerSecond?: number; etaSeconds?: number };
   threadId?: string; title?: string; since?: string; step?: string; until?: string; status?: string; actions?: ActivityAction[]; ref?: string;
 };
 export type AgentActivity = { state: ActivityState; working: number; waiting: number; items: ActivityItem[] };
@@ -13,6 +14,7 @@ export type ActivityCounts = { id: string; name: string; state: ActivityState; w
 export const GROUPS: readonly { key: ActivityItem['group']; label: string }[] = [
   { key: 'waiting', label: 'Waiting on you' },
   { key: 'turns', label: 'Turns' },
+  { key: 'jobs', label: 'Jobs' },
   { key: 'services', label: 'Services' },
   { key: 'background', label: 'Background' },
 ];

@@ -58,7 +58,7 @@ test('adopting lists existing conversations (default included) read-only, persis
   try {
     const record = await registry.adopt({ agentId: BLOG });
     assert.equal(record.definitionId, 'blog-2cc740f1');
-    assert.deepEqual(record.tools, ['files', 'decisions', 'ask_user']);
+    assert.deepEqual(record.tools, ['files', 'decisions', 'jobs', 'ask_user']);
     assert.deepEqual(registry.agents().map(a => [a.id, a.name, a.adopted?.agentId]), [['blog-2cc740f1', 'blog', BLOG]]);
     const app = registry.routes();
     const server = app.listen(0, '127.0.0.1');
@@ -150,7 +150,7 @@ test('the single-user session lists adopted agents next to the app\'s own one, b
     assert.deepEqual(data.agents.map(a => [a.id, a.adopted?.agentId]), [['blog-2cc740f1', BLOG]]);
     const picker = await (await fetch(`${base}/api/adoption/agents`, { headers: { cookie } })).json() as { agents: { name: string; adoptedAs?: string }[]; tools: { available: string[] } };
     assert.deepEqual(picker.agents.map(a => [a.name, a.adoptedAs]), [['blog', 'blog-2cc740f1'], ['general', undefined]]);
-    assert.deepEqual(picker.tools.available, ['files', 'decisions', 'ask_user']);
+    assert.deepEqual(picker.tools.available, ['files', 'decisions', 'jobs', 'ask_user']);
     // Mutations need the CSRF token and the origin.
     assert.equal((await fetch(`${base}/api/adoption/agents`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ agentId: GENERAL }) })).status, 403);
     const adopted = await fetch(`${base}/api/adoption/agents`, { method: 'POST', headers: { cookie, origin: base, 'x-csrf-token': data.csrf, 'content-type': 'application/json' }, body: JSON.stringify({ agentId: GENERAL }) });
@@ -288,7 +288,7 @@ test('PUT /api/adoption/agents/<id>/project needs the session and CSRF token, an
     const headers = { cookie, origin: base, 'x-csrf-token': csrf, 'content-type': 'application/json' };
     const ok = await fetch(url, { method: 'PUT', headers, body });
     assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { project: blog, tools: ['files', 'sandbox', 'decisions', 'ask_user'] });
+    assert.deepEqual(await ok.json(), { project: blog, tools: ['files', 'sandbox', 'decisions', 'jobs', 'ask_user'] });
     const listed = await (await fetch(`${base}/api/session`, { headers: { cookie } })).json() as { agents: { adopted?: { project?: string; sandbox?: boolean } }[] };
     assert.deepEqual(listed.agents[0]!.adopted && { project: listed.agents[0]!.adopted.project, sandbox: listed.agents[0]!.adopted.sandbox }, { project: blog, sandbox: true });
     const refused = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ path: homedir() }) });
@@ -296,6 +296,6 @@ test('PUT /api/adoption/agents/<id>/project needs the session and CSRF token, an
     const reason = await refused.json() as { error: string; message: string };
     assert.equal(reason.error, 'project_unsafe'); assert.match(reason.message, /home folder/);
     const cleared = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ path: null }) });
-    assert.deepEqual(await cleared.json(), { project: null, tools: ['files', 'sandbox', 'decisions', 'ask_user'] });
+    assert.deepEqual(await cleared.json(), { project: null, tools: ['files', 'sandbox', 'decisions', 'jobs', 'ask_user'] });
   } finally { server.closeAllConnections(); server.close(); await registry.close(); await runtime.close(); rmSync(dir, { recursive: true, force: true }); rmSync(projects, { recursive: true, force: true }); }
 });

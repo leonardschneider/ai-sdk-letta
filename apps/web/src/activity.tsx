@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Dialog, Popover } from 'radix-ui';
-import { AppWindow, Bot, Brain, CalendarClock, Clock, Container, Globe, LoaderCircle, MessageCircleQuestion, MoonStar, RotateCcw, ShieldAlert, Signpost, Square, X } from 'lucide-react';
+import { Activity as ActivityIcon, AppWindow, Bot, Brain, CalendarClock, Clock, Container, Globe, LoaderCircle, MessageCircleQuestion, MoonStar, RotateCcw, ShieldAlert, Signpost, Square, X } from 'lucide-react';
 import { api, apiPath, errorCode } from './api.js';
 import { useToast } from './toasts.js';
+import { ActivityJobBar } from './jobs.js';
+import { progressLine } from './jobs-model.js';
 import { actionLabel, actionPath, grouped, pill, timing, type ActivityAction, type ActivityCounts, type ActivityItem, type AgentActivity } from './activity-model.js';
 
 /**
@@ -58,7 +60,7 @@ function useSecondTick(on: boolean) {
 const ICONS: Record<string, React.ReactNode> = {
   turn: <LoaderCircle size={14} className="spin"/>, queued: <Clock size={14}/>, approval: <ShieldAlert size={14}/>, question: <MessageCircleQuestion size={14}/>,
   decision: <Signpost size={14}/>, 'memory-review': <Brain size={14}/>, 'app-approval': <ShieldAlert size={14}/>, container: <Container size={14}/>, 'dev-server': <AppWindow size={14}/>,
-  browser: <Globe size={14}/>, app: <Bot size={14}/>, jiminy: <Brain size={14}/>, dream: <MoonStar size={14}/>, schedule: <CalendarClock size={14}/>,
+  browser: <Globe size={14}/>, app: <Bot size={14}/>, jiminy: <Brain size={14}/>, dream: <MoonStar size={14}/>, schedule: <CalendarClock size={14}/>, job: <ActivityIcon size={14}/>,
 };
 
 /**
@@ -95,7 +97,9 @@ export function ActivityPill({ activity, others, narrow, onOpenThread, onChanged
             <span className="activity-icon" aria-hidden="true">{ICONS[item.kind] ?? <Clock size={14}/>}</span>
             <span className="activity-body">
               <span className="activity-label">{item.label}{item.status && item.kind === 'app' && <span className="activity-status" data-status={item.status}>{item.status}</span>}</span>
-              {item.detail && <span className="activity-detail">{item.detail}</span>}
+              {item.kind === 'job' && item.progress && <span className="activity-job"><ActivityJobBar {...(item.progress.percent !== undefined ? { percent: item.progress.percent } : {})}/>
+                <span className="activity-job-meta">{progressLine({ ...item.progress, status: 'running', progress: item.progress })}</span></span>}
+              {item.detail && <span className={`activity-detail${item.kind === 'job' ? ' mono' : ''}`}>{item.detail}</span>}
               <span className="activity-meta">
                 {item.threadId && item.title && <a href="#" className="activity-link" onClick={event => { event.preventDefault(); setOpen(false); onOpenThread(item.threadId!); }}>{item.title}</a>}
                 {item.threadId && item.title && when && <span aria-hidden="true"> · </span>}
