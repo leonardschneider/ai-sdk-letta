@@ -944,7 +944,7 @@ const output = (result: CommandResult, timeoutMs: number, note?: string): Sandbo
  */
 export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>; run_command_online: Tool<CommandInput, SandboxToolOutput> } = {
   run_command: tool({
-    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds all resources, one folder per conversation; commands start in this conversation\'s folder. Files persist and are versioned. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. Returns the exit code and output (long output is truncated).',
+    description: 'Run a bash command in an isolated Linux sandbox with no network. /workspace holds all resources, one folder per conversation; commands start in this conversation\'s folder. Files persist and are versioned. Has Python 3 (venv in /workspace/.venv), git, rg, jq, pdftotext, curl. You are not root: sudo, apt and system installs are impossible (read-only system); put tools in /workspace (pip/uv/npm into local folders, or prebuilt binaries downloaded with run_command_online, then chmod +x and call by path). Returns the exit code and output (long output is truncated).',
     inputSchema: commandSchema,
     execute: async ({ command, cwd }, options) => {
       try {
@@ -961,7 +961,7 @@ export const sandboxTools: { run_command: Tool<CommandInput, SandboxToolOutput>;
     toModelOutput,
   }),
   run_command_online: tool({
-    description: 'Like run_command, but with internet access, e.g. pip install (into /workspace/.venv, kept across turns) or downloads. The user must approve each call; use run_command when no network is needed.',
+    description: 'Like run_command, but with internet access, e.g. pip install (into /workspace/.venv, kept across turns) or downloads of prebuilt binaries into /workspace (no sudo or apt: not root, read-only system). The user must approve each call; use run_command when no network is needed.',
     inputSchema: commandSchema,
     execute: async ({ command, cwd }, options) => {
       try {
