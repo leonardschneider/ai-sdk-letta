@@ -555,11 +555,11 @@ single-user only (`startGuiServer`). Details, the sandbox and the gate:
 
 **MCP Apps dev mode** lets the agent write its own MCP Apps: add
 `mcpAppDevTools` (with `MCP_APP_DEV_TOOL_PERMISSIONS`) next to
-`webDevTools`. The agent reads `mcp_app_guide`, builds the app in its
-sandbox, runs it with `mcp_app_dev_start` over stdio in the services
+`webDevTools`. The agent reads `app_dev_guide`, builds the app in its
+sandbox, runs it with `app_dev_start` over stdio in the services
 container (no network; packages come in through `run_command_online`), and
 calls it as `dev_<name>__<tool>` from the next turn: the view renders in the
-chat with a **Dev** badge, its calls always ask, and `mcp_app_dev_reload`
+chat with a **Dev** badge, its calls always ask, and `app_dev_reload`
 re-renders open views live. Details:
 [MCP Apps dev mode](../README.md#mcp-apps-dev-mode).
 

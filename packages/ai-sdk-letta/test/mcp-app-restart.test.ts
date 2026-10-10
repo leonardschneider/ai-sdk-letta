@@ -9,7 +9,7 @@ const SERVER = join(import.meta.dirname, 'fixtures', 'mcp-app-server.mjs');
 const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), `ai-sdk-letta-${prefix}-`));
 const line = { line: { command: process.execPath, args: [SERVER] }, stop: async () => {} };
 
-/** A dev app started as `mcp_app_dev_start` would (stdio), whose launches are counted; `fail` makes the next launches fail. */
+/** A dev app started as `app_dev_start` would (stdio), whose launches are counted; `fail` makes the next launches fail. */
 function devSpec(conversationId: string, state: { launches: number; fail?: boolean }, touch?: () => void) {
   return { name: 'clock', conversationId, folder: '/workspace/clock', command: 'node server.mjs', transport: 'stdio' as const,
     launch: async () => { state.launches++; if (state.fail) throw new Error('boom: Cannot find module server.mjs'); return line; }, ...(touch ? { touch } : {}) };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkSummary, isLocked, lockedNotice, stoppedLine } from '../src/turn-state.js';
+import { checkSummary, failedReplyLine, isLocked, lockedNotice, stoppedLine } from '../src/turn-state.js';
 
 test('a stopped turn keeps the conversation usable; uncertain ones lock it', () => {
   for (const status of [null, 'running', 'completed', 'stopped']) assert.equal(isLocked(status), false, String(status));
@@ -30,4 +30,9 @@ test('a stopped turn closes its open tool cards as interrupted (live view)', asy
   ]) as { type: string; isError?: boolean; result?: unknown }[];
   assert.equal(parts[0]!.isError, true);
   assert.equal(failureText(parts[0]!.result), 'Interrupted: the turn was stopped before this finished.');
+});
+
+test('a failed reply says whether the conversation stays usable', () => {
+  assert.match(failedReplyLine(true), /nothing ran\. You can continue\./);
+  assert.equal(failedReplyLine(false), 'This reply failed.');
 });

@@ -144,7 +144,7 @@ test('heartbeat: an open view keeps its dev app\'s container alive (touch on eve
     let touches = 0;
     f.apps.bindDev(f.conversationId, { launch: async () => line, touch: () => { touches++; } });
     await f.apps.reloadDev('dev_clock');
-    // The spec's own touch (set by mcp_app_dev_start) is what keeps the container alive; this fixture's spec has none: set one.
+    // The spec's own touch (set by app_dev_start) is what keeps the container alive; this fixture's spec has none: set one.
     (f.apps.devSpec('dev_clock') as { touch?: () => void }).touch = () => { touches++; };
     const minted = await f.gate.instance('owner', f.thread, { toolCallId: 'call-dev' }) as { instance: string; sandboxUrl: string };
     assert.throws(() => f.gate.heartbeat('owner', minted.instance), /not_found/);

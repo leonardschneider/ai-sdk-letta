@@ -5,7 +5,7 @@
 export type ViewTool = { app: string; appName: string; tool: string; title?: string; resourceUri?: string; dev?: true };
 /** May this be an app tool (`<app>__<tool>`, or a dev app's `dev_<name>__<tool>`)? The line then asks `viewTools` whether it has a view. */
 export const isAppToolName = (name: string): boolean => /^(?:dev_)?[a-z][a-z0-9-]{0,23}__/.test(name);
-/** `GET /v1/apps` → `devGenerations`: each running dev app's generation (it grows with every `mcp_app_dev_reload`). */
+/** `GET /v1/apps` → `devGenerations`: each running dev app's generation (it grows with every `app_dev_reload`). */
 export type DevGenerations = Readonly<Record<string, number>>;
 /**
  * The key of a view of `toolName`: its dev app's generation, so a reload

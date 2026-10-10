@@ -275,7 +275,7 @@ export interface ConversationSession<TOOLS extends ToolSet = ToolSet> {
   mcpApps?: McpApps;
   /**
    * Did this conversation's dev app tools change since it opened
-   * (`mcp_app_dev_start`, reload, stop)? The session's tool list is fixed
+   * (`app_dev_start`, reload, stop)? The session's tool list is fixed
    * when it opens: reopen it before the next turn so the agent gets them.
    */
   toolsStale(): boolean;
@@ -591,7 +591,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         // Dev apps of this conversation (kept across idle stops and restarts) start again through its services.
         if (apps && webDev && appDev) bindDevApps(apps, conversationId, webDev);
         // With a conversation: its dev apps' tools too. The session's tool list is fixed when it opens:
-        // when they change (mcp_app_dev_start/reload/stop), toolsStale() tells the host to reopen it before the next turn.
+        // when they change (app_dev_start/reload/stop), toolsStale() tells the host to reopen it before the next turn.
         const appTools = apps?.agentTools(conversationId);
         const devSignature = apps?.devSignature(conversationId) ?? '';
         const staticContext = { ...(attachments ? { [ATTACHMENTS_CONTEXT]: attachments } : {}), ...(sandbox ? { [SANDBOX_CONTEXT]: sandbox } : {}), ...(webDev ? { [WEBDEV_CONTEXT]: webDev } : {}),
@@ -722,11 +722,11 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           limits,
           delivery: { begin: otid => beginTurn(conversationId, otid), complete: () => completeTurn(conversationId),
             // A stopped turn: once the backend is idle (the harness cancelled the run and closed its tools), record it as settled.
-            settle: async ({ otid }) => {
+            settle: async ({ otid, outcome }) => {
               await waitIdle(live);
               const records = (await loadHistory(query => historyPage(live, identity.agentId, conversationId, query, REQUEST_TIMEOUT_MS), 200)).messages;
               const delivered = otid ? records.some(message => (message as unknown as { otid?: unknown }).otid === otid) : undefined;
-              settleTurn(conversationId, { outcome: 'stopped', ...(delivered !== undefined ? { delivered } : {}), ...(otid ? { otid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
+              settleTurn(conversationId, { outcome: outcome === 'failed' ? 'failed' : 'stopped', ...(delivered !== undefined ? { delivered } : {}), ...(otid ? { otid } : {}), ...(records.at(-1) ? { through: records.at(-1)!.id } : {}) });
               return delivered !== undefined ? { delivered } : {};
             } },
           // Whatever the agent changed in the resources during the turn becomes one commit.

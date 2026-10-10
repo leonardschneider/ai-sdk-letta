@@ -78,7 +78,7 @@ test('dev reloads: a view keys on its dev app\'s generation; installed apps and 
   assert.ok(isAppToolName('dev_notes__show_board'));
   assert.ok(isAppToolName('clock__show'));
   assert.ok(!isAppToolName('run_command'));
-  assert.ok(!isAppToolName('mcp_app_dev_start'));
+  assert.ok(!isAppToolName('app_dev_start'));
   assert.notEqual(devGenerationsKey({ a: 1 }), devGenerationsKey({ a: 2 }));
 });
 

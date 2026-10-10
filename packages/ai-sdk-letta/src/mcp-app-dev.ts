@@ -21,9 +21,9 @@ import { MCP_APP_GUIDE } from './mcp-app-guide.js';
  */
 
 /** A dev app tool name. */
-export type McpAppDevToolName = 'mcp_app_guide' | 'mcp_app_dev_start' | 'mcp_app_dev_reload' | 'mcp_app_dev_stop' | 'mcp_app_dev_status' | 'mcp_app_dev_logs' | 'mcp_app_dev_call' | 'mcp_app_dev_check';
+export type McpAppDevToolName = 'app_dev_guide' | 'app_dev_start' | 'app_dev_reload' | 'app_dev_stop' | 'app_dev_status' | 'app_dev_logs' | 'app_dev_call' | 'app_dev_check';
 /** Every dev app tool. */
-export const MCP_APP_DEV_TOOL_NAMES: readonly McpAppDevToolName[] = ['mcp_app_guide', 'mcp_app_dev_start', 'mcp_app_dev_reload', 'mcp_app_dev_stop', 'mcp_app_dev_status', 'mcp_app_dev_logs', 'mcp_app_dev_call', 'mcp_app_dev_check'];
+export const MCP_APP_DEV_TOOL_NAMES: readonly McpAppDevToolName[] = ['app_dev_guide', 'app_dev_start', 'app_dev_reload', 'app_dev_stop', 'app_dev_status', 'app_dev_logs', 'app_dev_call', 'app_dev_check'];
 /** Most text a dev app tool returns. */
 export const MCP_APP_DEV_LIMITS = Object.freeze({ maxText: 14_000, maxStructured: 6_000, maxMeta: 2_000, maxFindings: 40 });
 
@@ -51,12 +51,12 @@ const failure = (error: unknown): TextOutput => {
 };
 /** The dev app of this conversation named `name`, or an error. */
 function ownApp(apps: McpApps, conversationId: string, name: unknown): string | TextOutput {
-  if (typeof name !== 'string' || !DEV_APP_NAME.test(name)) return { text: 'Error (app_unknown): give the dev app\'s name (as passed to mcp_app_dev_start).', isError: true };
+  if (typeof name !== 'string' || !DEV_APP_NAME.test(name)) return { text: 'Error (app_unknown): give the dev app\'s name (as passed to app_dev_start).', isError: true };
   const id = devAppId(name);
   const spec = apps.devSpec(id);
   if (!spec || spec.conversationId !== conversationId) {
     const mine = apps.devApps(conversationId).map(a => a.slice(4));
-    return { text: `Error (app_unknown): no dev app "${name}" in this conversation${mine.length ? ` (it has: ${mine.join(', ')})` : ''}. Start it with mcp_app_dev_start.`, isError: true };
+    return { text: `Error (app_unknown): no dev app "${name}" in this conversation${mine.length ? ` (it has: ${mine.join(', ')})` : ''}. Start it with app_dev_start.`, isError: true };
   }
   return id;
 }
@@ -93,7 +93,7 @@ export function formatDevStart(result: McpAppDevStart, findings?: McpAppLintFind
   const out: string[] = [];
   const name = result.app.slice(4);
   if (result.status !== 'running') {
-    out.push(`Dev app "${name}" did not start (generation ${result.generation}): ${result.error ?? result.status}.`, `See mcp_app_dev_logs {"name":"${name}"} for its stderr; fix the server and call mcp_app_dev_reload (or mcp_app_dev_start again).`);
+    out.push(`Dev app "${name}" did not start (generation ${result.generation}): ${result.error ?? result.status}.`, `See app_dev_logs {"name":"${name}"} for its stderr; fix the server and call app_dev_reload (or app_dev_start again).`);
     return out.join('\n');
   }
   out.push(`Dev app "${name}" running (generation ${result.generation}): ${result.tools.length} tool(s), ${result.views.length} view(s).`);
@@ -157,14 +157,14 @@ const nameOnly = jsonSchema<NameInput>({ type: 'object', properties: { name: nam
  * ```
  */
 export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
-  mcp_app_guide: tool({
+  app_dev_guide: tool({
     description: 'The guide to building MCP Apps here (pinned SDK versions, how this host runs them, API cheat-sheet, a minimal working example, the dev loop). Read it once before you build or change an MCP App.',
     inputSchema: jsonSchema<Record<string, never>>({ type: 'object', properties: {}, additionalProperties: false }),
     execute: async () => ({ text: MCP_APP_GUIDE }),
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_start: tool({
-    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation, in the services container without network. By default it serves Streamable HTTP: the command listens on 127.0.0.1:<port> (default 3000; PORT and HOST are set) with the MCP endpoint at <path> (default /mcp); its output goes to its log. With transport "stdio", stdout is MCP and stderr the log. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js"}. Build first (run_command); the command must not build or install anything. Read mcp_app_guide first.',
+  app_dev_start: tool({
+    description: 'Start (or restart) an MCP server you are writing as a dev app of this conversation, in the services container without network. By default it serves Streamable HTTP: the command listens on 127.0.0.1:<port> (default 3000; PORT and HOST are set) with the MCP endpoint at <path> (default /mcp); its output goes to its log. With transport "stdio", stdout is MCP and stderr the log. Its model-visible tools become yours from your next turn as dev_<name>__<tool>, and its views show in the user\'s side panel (marked Dev). The result lists its tools and views and the MCP Apps contract check. Example: {"name":"clock","cwd":"clock-app","command":"node dist/server.js"}. Build first (run_command); the command must not build or install anything. Read app_dev_guide first.',
     inputSchema: jsonSchema<StartInput>({ type: 'object', properties: {
       name: nameSchema,
       command: { type: 'string', minLength: 1, maxLength: WEBDEV_LIMITS.maxCommandChars, description: 'Shell command that runs the MCP server in the foreground (it listens on 127.0.0.1:<port>, or speaks stdio with transport "stdio").' },
@@ -225,8 +225,8 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_reload: tool({
-    description: 'Restart a dev app after you changed (and rebuilt) it: same folder and command. Returns what changed (tools added, removed or changed; views changed) and the contract check. Open views of it render again; tool-list changes reach you at your next turn. See mcp_app_guide.',
+  app_dev_reload: tool({
+    description: 'Restart a dev app after you changed (and rebuilt) it: same folder and command. Returns what changed (tools added, removed or changed; views changed) and the contract check. Open views of it render again; tool-list changes reach you at your next turn. See app_dev_guide.',
     inputSchema: nameOnly,
     execute: async ({ name }, options) => {
       const ctx = contextOf(options.context);
@@ -241,7 +241,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_stop: tool({
+  app_dev_stop: tool({
     description: 'Stop a dev app of this conversation: its server is killed and its tools and views go away (from your next turn).',
     inputSchema: nameOnly,
     execute: async ({ name }, options) => {
@@ -254,14 +254,14 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_status: tool({
+  app_dev_status: tool({
     description: 'The dev apps of this conversation: status, folder, command, generation, tools and views.',
     inputSchema: jsonSchema<Record<string, never>>({ type: 'object', properties: {}, additionalProperties: false }),
     execute: async (_input, options) => {
       const ctx = contextOf(options.context);
       if (isFailure(ctx)) return ctx;
       const mine = ctx.apps.status().filter(s => s.dev?.conversationId === ctx.conversationId);
-      if (!mine.length) return { text: 'No dev apps in this conversation (start one with mcp_app_dev_start).' };
+      if (!mine.length) return { text: 'No dev apps in this conversation (start one with app_dev_start).' };
       const lines = mine.flatMap(s => [
         `${s.id.slice(4)}: ${s.status}${s.error ? ` (${s.error})` : ''} · generation ${s.dev!.generation} since ${s.dev!.startedAt} · ${s.dev!.folder} $ ${s.dev!.command.slice(0, 200)}`,
         ...s.tools.map(t => `  - tool ${t.name} [${t.visibility.join(', ')}]${t.agentTool ? ` as ${t.agentTool}` : ''}${t.resourceUri ? ` · view ${t.resourceUri}` : ''}`),
@@ -271,7 +271,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_logs: tool({
+  app_dev_logs: tool({
     description: 'The last lines a dev app\'s server wrote to stderr (startup errors, stack traces, your console.error), and whether it runs. Untrusted content.',
     inputSchema: jsonSchema<LogsInput>({ type: 'object', properties: { name: nameSchema, lines: { type: 'integer', minimum: 1, maximum: WEBDEV_LIMITS.maxLogLines, description: 'How many lines (default 60).' } }, required: ['name'], additionalProperties: false }),
     execute: async ({ name, lines }, options) => {
@@ -285,7 +285,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_call: tool({
+  app_dev_call: tool({
     description: 'Call any tool of a dev app directly, also app-only ones (visibility ["app"]), as its views would. Returns the content text, structuredContent (JSON) and _meta, bounded. Nothing is shown to the user. Untrusted content.',
     inputSchema: jsonSchema<CallInput>({ type: 'object', properties: {
       name: nameSchema,
@@ -297,7 +297,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
       if (isFailure(ctx)) return ctx;
       const id = ownApp(ctx.apps, ctx.conversationId, name);
       if (typeof id !== 'string') return id;
-      if (!ctx.apps.toolDefinition(id, toolName)) return { text: `Error (tool_unknown): "${name}" has no tool "${String(toolName).slice(0, 128)}" (see mcp_app_dev_status).`, isError: true };
+      if (!ctx.apps.toolDefinition(id, toolName)) return { text: `Error (tool_unknown): "${name}" has no tool "${String(toolName).slice(0, 128)}" (see app_dev_status).`, isError: true };
       try {
         const signal = options.abortSignal ? AbortSignal.any([options.abortSignal, AbortSignal.timeout(MCP_APP_LIMITS.callTimeoutMs)]) : AbortSignal.timeout(MCP_APP_LIMITS.callTimeoutMs);
         ctx.services.touch();
@@ -307,7 +307,7 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
     },
     toModelOutput: textModelOutput,
   }),
-  mcp_app_dev_check: tool({
+  app_dev_check: tool({
     description: 'Check a running dev app against the MCP Apps contract (tool _meta.ui, resources and their MIME type, CSP and permissions metadata, how views call tools). Each finding has a rule, a level and a fix.',
     inputSchema: nameOnly,
     execute: async ({ name }, options) => {
@@ -328,14 +328,14 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
 export const MCP_APP_DEV_TOOL_PERMISSIONS: Readonly<Record<McpAppDevToolName, ToolPermission>> = Object.freeze(Object.fromEntries(MCP_APP_DEV_TOOL_NAMES.map(name => [name, 'allow'])) as Record<McpAppDevToolName, ToolPermission>);
 
 /** Does a tool set include the dev app tools? */
-export const includesMcpAppDevTools = (tools: object) => (tools as Record<string, unknown>).mcp_app_dev_start === mcpAppDevTools.mcp_app_dev_start;
-/** Does a definition use MCP Apps dev mode? Web development enabled, and `mcp_app_dev_start` from {@link mcpAppDevTools}, allowed. */
+export const includesMcpAppDevTools = (tools: object) => (tools as Record<string, unknown>).app_dev_start === mcpAppDevTools.app_dev_start;
+/** Does a definition use MCP Apps dev mode? Web development enabled, and `app_dev_start` from {@link mcpAppDevTools}, allowed. */
 export function mcpAppDevEnabled(definition: { tools: object; permissions: Readonly<Record<string, ToolPermission>> }, webDev: boolean): boolean {
-  return webDev && includesMcpAppDevTools(definition.tools) && ['allow', 'ask'].includes(definition.permissions.mcp_app_dev_start ?? 'deny');
+  return webDev && includesMcpAppDevTools(definition.tools) && ['allow', 'ask'].includes(definition.permissions.app_dev_start ?? 'deny');
 }
 /** Bridge deadlines of the dev app tools (a start waits for the server, then lints it). */
 export function mcpAppDevToolTimeouts(fallbackMs: number): Record<string, number> {
   const long = Math.max(fallbackMs, MCP_APP_LIMITS.startTimeoutMs + MCP_APP_LIMITS.callTimeoutMs + 15_000);
   const call = Math.max(fallbackMs, MCP_APP_LIMITS.callTimeoutMs + 5000);
-  return { mcp_app_dev_start: long, mcp_app_dev_reload: long, mcp_app_dev_stop: Math.max(fallbackMs, 30_000), mcp_app_dev_status: fallbackMs, mcp_app_dev_logs: Math.max(fallbackMs, 30_000), mcp_app_dev_call: call, mcp_app_dev_check: call };
+  return { app_dev_start: long, app_dev_reload: long, app_dev_stop: Math.max(fallbackMs, 30_000), app_dev_status: fallbackMs, app_dev_logs: Math.max(fallbackMs, 30_000), app_dev_call: call, app_dev_check: call };
 }

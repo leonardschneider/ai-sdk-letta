@@ -20,6 +20,11 @@ export function stoppedLine(code: unknown): string {
   }
 }
 
+/** The line under a failed reply. `usable`: Letta rejected it before the model produced anything (nothing ran), so the conversation stays usable. */
+export function failedReplyLine(usable: boolean): string {
+  return usable ? 'This reply failed before the agent started; nothing ran. You can continue.' : 'This reply failed.';
+}
+
 /** The notice over the composer of a read-only conversation (the last turn's outcome is uncertain). */
 export function lockedNotice(code?: string): string {
   const why = code === 'delivery_uncertain' ? 'The server restarted while the agent was replying'

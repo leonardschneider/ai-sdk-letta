@@ -1209,7 +1209,7 @@ defineAgent({ ...,
 MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
 ```
 
-- **`mcp_app_guide`** returns a short guide (about 1.5k tokens) adapted
+- **`app_dev_guide`** returns a short guide (about 1.5k tokens) adapted
   from the official ext-apps skill `create-mcp-app` (v2.0.3; code
   Apache-2.0, docs CC-BY-4.0): pinned SDK versions, how this host runs
   apps, an API cheat-sheet (`registerAppTool` / `registerAppResource`,
@@ -1219,13 +1219,13 @@ MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
 - **The loop.** The agent scaffolds the app, installs its packages with
   `run_command_online` (you approve it; the services container has no
   network and nothing is vendored), builds it with `run_command`, then
-  `mcp_app_dev_start` runs it **in the services container** as the dev app
+  `app_dev_start` runs it **in the services container** as the dev app
   `dev_<name>` of this conversation, and checks it against the
-  MCP Apps contract (`mcp_app_dev_check`: tool `_meta.ui`, resources and
-  their MIME type, CSP metadata, how views call tools). `mcp_app_dev_call`
-  calls any tool, also app-only ones; `mcp_app_dev_logs` shows its stderr;
-  `mcp_app_dev_reload` restarts it and reports what changed;
-  `mcp_app_dev_stop` stops it.
+  MCP Apps contract (`app_dev_check`: tool `_meta.ui`, resources and
+  their MIME type, CSP metadata, how views call tools). `app_dev_call`
+  calls any tool, also app-only ones; `app_dev_logs` shows its stderr;
+  `app_dev_reload` restarts it and reports what changed;
+  `app_dev_stop` stops it.
 - **Transport.** Dev apps are **Streamable HTTP** servers by default
   (`transport: "http"`, port 3000, path `/mcp`; `PORT` and
   `HOST=127.0.0.1` are set): the command runs detached, its output goes to
@@ -1240,7 +1240,7 @@ MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
 - **What views may do.** As for installed apps, with one rule: every call
   a dev app's view makes **asks** (a Permission needed card), and dev apps
   get no outside origins.
-- **Live re-render.** After `mcp_app_dev_reload`, open views of that app
+- **Live re-render.** After `app_dev_reload`, open views of that app
   (inline, in side panel tabs, full screen) render again with the new
   code and an **updated** note, without reloading the page: `GET /v1/apps`
   carries each dev app's generation (`devGenerations`) and views are keyed
@@ -1272,7 +1272,7 @@ App servers and views keep their state across restarts and reloads:
 - **Server state (`STATE_DIR`).** Every app server gets a folder that
   survives restarts, named in `STATE_DIR`. Dev apps: `/workspace/.app-state/<name>`
   in the services container, under the conversation's folder on the host
-  (created before each start; `mcp_app_dev_start` shows it). Installed apps:
+  (created before each start; `app_dev_start` shows it). Installed apps:
   `<state>/mcp-apps/<definition>/state/<app>` on the host, mounted read-write
   at `/state` (`STATE_DIR=/state`), per agent and app; kept across restarts
   and upgrades, and when the app is removed from the definition (delete the
@@ -1559,7 +1559,7 @@ conversations get them on their next message).
   whenever such a sandbox is configured, so tools turned on later work
   without a restart). Removing the agent or changing its tools stops them.
   Run **Update instructions…** afterwards: the section tells the agent to
-  call `web_dev_guide` / `mcp_app_guide` first. From code: `PUT
+  call `web_dev_guide` / `app_dev_guide` first. From code: `PUT
   /api/adoption/agents/<id>/tools` with `{ "tools": ["files", "sandbox",
   "web_dev", "mcp_app_dev"] }` (refusals: `sandbox_unavailable`,
   `web_dev_needs_sandbox`, `mcp_app_dev_needs_web_dev`).

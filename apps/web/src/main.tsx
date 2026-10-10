@@ -28,7 +28,7 @@ import { LatexContext } from './markdown.js';
 import { resolveLatex, type LatexOverride } from './latex.js';
 import { LatexMenu } from './latex-menu.js';
 import { TrustMenu } from './trust-menu.js';
-import { checkSummary, isLocked, lockedNotice, stoppedLine, type CheckResult } from './turn-state.js';
+import { checkSummary, failedReplyLine, isLocked, lockedNotice, stoppedLine, type CheckResult } from './turn-state.js';
 import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
 import { AppErrorPanel, CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
@@ -50,7 +50,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; code?: string; usable?: boolean };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -155,6 +155,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [checkNote, setCheckNote] = useState('');
   // A stopped reply (Stop or a turn limit): marked under the reply; the conversation stays usable.
   const [stoppedNote, setStoppedNote] = useState<{ runId: string; text: string }>();
+  // A failed reply: why (the harness's error), under "This reply failed"; `usable`: nothing ran, so the conversation stays usable.
+  const [failedNote, setFailedNote] = useState<{ runId: string; error?: string; usable: boolean }>();
   const [interaction, setInteraction] = useState<InteractionRequest>();
   const [interactionOutcome, setInteractionOutcome] = useState('');
   const [sentAnswer, setSentAnswer] = useState<InteractionResponse>();
@@ -316,7 +318,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             // A stopped reply (Stop, or a turn limit) with a known outcome: marked as stopped; the conversation stays usable.
             if (event.type === 'stopped') setStoppedNote({ runId: id, text: stoppedLine(event.data.code) });
             // Team mode: the conversation's state (read-only or not) comes from the view refreshed when this ends.
-            if (event.type === 'failed' && !team) { setBlocked(lockedNotice(String(event.data.code))); setCheckable(true); }
+            if (event.type === 'failed') setFailedNote({ runId: id, usable: event.data.usable === true, ...(typeof event.data.error === 'string' ? { error: event.data.error } : {}) });
+            if (event.type === 'failed' && !team && event.data.usable !== true) { setBlocked(lockedNotice(String(event.data.code))); setCheckable(true); }
           }
           render();
         }
@@ -372,6 +375,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     setBlocked(locked ? lockedNotice(view.code) : '');
     setCheckable(locked); setCheckNote('');
     setStoppedNote(view.stopped ? { runId: view.stopped.runId, text: stoppedLine(view.stopped.code) } : undefined);
+    setFailedNote(view.failed ? { runId: view.failed.runId, usable: true, ...(view.failed.error ? { error: view.failed.error } : {}) } : locked && view.lastRunId && view.error ? { runId: view.lastRunId, usable: false, error: view.error } : undefined);
   }
   /** Check and unlock: ask Letta (read-only) whether the uncertain turn ended; unlock when it did. Never resends anything. */
   async function checkAndUnlock() {
@@ -399,7 +403,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     // Team mode: other conversations keep running on the server while you look elsewhere.
     if (operation.current || (liveRun.current && !team)) return;
     if (team) { stream.current?.abort(); liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
-    operation.current = true; setLoading(true); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
+    operation.current = true; setLoading(true); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setFailedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     const previous = currentRef.current;
     setCurrent({ id, draft: false }); setMessages([]); setDrawer(false);
     try {
@@ -426,7 +430,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     if (operation.current || (liveRun.current && !team)) return;
     stream.current?.abort();
     if (team) { liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
-    setCurrent(newDraft()); setMessages([]); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
+    setCurrent(newDraft()); setMessages([]); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setFailedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     lastRun.current = null; setDrawer(false); setLoading(false);
     localStorage.removeItem(SAVED_THREAD);
     focusComposer();
@@ -619,7 +623,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     const files = uploads.map(chip);
     if (!text.trim() && !wire.length && !uploads.length) throw new MessageNotSentError();
     if (text.length > 8000) { toast('Messages can be up to 8,000 characters.', { tone: 'error' }); throw new MessageNotSentError(); }
-    operation.current = true; setStoppedNote(undefined);
+    operation.current = true; setStoppedNote(undefined); setFailedNote(undefined);
     // Sending ends your typing (the server clears it too).
     typingState.current = { at: 0 }; setMention(undefined);
     const startedAt = new Date().toISOString();
@@ -751,7 +755,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (currentRef.current.id !== threadId) return;
       lastRun.current = view.lastRunId;
       const base = historyMessages(view.messages);
-      setMessages(base); setQueue(view.queue ?? []); setBlocked(''); setCheckable(false); setStoppedNote(undefined);
+      setMessages(base); setQueue(view.queue ?? []); setBlocked(''); setCheckable(false); setStoppedNote(undefined); setFailedNote(undefined);
       void refreshThreads().catch(() => {});
       setTurns(n => n + 1);
       if (view.live) void watch(view.live.id, view.live.input, base, view.live.startedAt, [], [], view.live.author);
@@ -941,6 +945,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                   {team && <QueueList queue={queue} me={team.user.id} canWithdraw={turn => isAdmin || turn.author?.id === team.user.id} onWithdraw={turn => void withdraw(turn)} together={!!selected?.replyModeInEffect && (selected.members ?? 0) > 1}/>}
                   {team && !current.draft && !readOnly && <TypingLine people={selected?.typing ?? []} me={team.user.id}/>}
                   {stoppedNote && !blocked && !running && <div className="stopped-line" role="status" data-run={stoppedNote.runId}><Square size={11} aria-hidden="true"/><span>{stoppedNote.text}</span></div>}
+                  {failedNote && !running && (failedNote.usable ? !blocked : !!blocked) && <div className="failed-line" role="status" data-run={failedNote.runId}><TriangleAlert size={12} aria-hidden="true"/><span>{failedReplyLine(failedNote.usable)}
+                    {failedNote.error && <details className="failed-details"><summary>Details</summary><code>{failedNote.error}</code></details>}</span></div>}
                   {blocked && <div className="notice" role="status"><TriangleAlert size={16} aria-hidden="true"/><span>{blocked}{checkNote && <><br/><em className="check-note">{checkNote}</em></>}</span>
                     {checkable && !current.draft && <button type="button" className="btn small primary" disabled={running || checking} onClick={() => void checkAndUnlock()}>{checking ? 'Checking…' : 'Check and unlock'}</button>}
                     <button type="button" className="btn small" disabled={running} onClick={startDraft}>New chat</button></div>}
