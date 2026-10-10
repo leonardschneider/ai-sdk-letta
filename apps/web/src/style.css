@@ -1085,6 +1085,12 @@ body[data-resizing] iframe { pointer-events: none; }
 .appview-frame { display: block; width: 100%; height: 100%; border: 0; background: transparent; color-scheme: light dark; }
 .appview[data-phase="loading"] .appview-frame { position: absolute; inset: 0; opacity: 0; }
 .appview-wait { display: flex; align-items: center; gap: 8px; padding: 14px; font-size: 13px; color: var(--text-2); }
+.appview-down { display: flex; flex-direction: column; gap: 8px; padding: 14px; font-size: 13px; color: var(--text-2); overflow: auto; max-height: 100%; }
+.appview-down-title { margin: 0; }
+.appview-down-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.appview-down-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+.appview-logs { margin: 0; flex-shrink: 0; min-height: 60px; max-height: 240px; overflow: auto; font-size: 11.5px; background: var(--bg-2, rgba(127,127,127,.08)); padding: 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+.app-row-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .app-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px; }
 .app-overlay.fullscreen { position: fixed; inset: 0; z-index: 80; background: var(--bg); padding: 0; display: flex; flex-direction: column; }
 .app-overlay.fullscreen .appview { border-radius: 0; border: 0; flex: 1; }

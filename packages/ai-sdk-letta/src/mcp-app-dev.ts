@@ -2,7 +2,7 @@ import { tool, jsonSchema, type Tool } from 'ai';
 import type { ToolPermission } from './definition.js';
 import { SandboxError } from './sandbox.js';
 import { WEBDEV_CONTEXT, WEBDEV_LIMITS, WebDevServices, devAppStateDir } from './webdev.js';
-import { DEV_APP_NAME, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevStart, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
+import { DEV_APP_NAME, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, MCP_APPS_CONTEXT, MCP_APP_LIMITS, McpAppError, McpApps, devAppId, type McpAppDevPersisted, type McpAppDevStart, type McpAppRuntime, type McpAppsContext, type McpCallResult } from './mcp-apps.js';
 import { lintMcpApp, type McpAppLintFinding } from './mcp-app-lint.js';
 import { MCP_APP_GUIDE } from './mcp-app-guide.js';
 
@@ -59,6 +59,33 @@ function ownApp(apps: McpApps, conversationId: string, name: unknown): string | 
     return { text: `Error (app_unknown): no dev app "${name}" in this conversation${mine.length ? ` (it has: ${mine.join(', ')})` : ''}. Start it with mcp_app_dev_start.`, isError: true };
   }
   return id;
+}
+
+/** Start a dev app's server from its kept spec, in the conversation's services container (HTTP or stdio). */
+export async function launchDevApp(services: WebDevServices, spec: Pick<McpAppDevPersisted, 'name' | 'folder' | 'command' | 'transport' | 'port' | 'path'>, signal?: AbortSignal): Promise<McpAppRuntime> {
+  if (spec.transport === 'http') {
+    const launched = await services.devAppHttpStart(spec.name, { command: spec.command, cwd: spec.folder, port: spec.port ?? MCP_APP_HTTP_DEFAULTS.port, path: spec.path ?? MCP_APP_HTTP_DEFAULTS.path }, signal);
+    if (!launched.ok) throw new Error(launched.text);
+    return { http: launched.endpoint, stop: () => services.stopDevApp(spec.name) };
+  }
+  const launched = await services.devAppLine(spec.name, { command: spec.command, cwd: spec.folder }, signal);
+  if (!launched.ok) throw new Error(launched.text);
+  return { line: launched.line, stop: () => services.stopDevApp(spec.name) };
+}
+const boundServices = new WeakMap<WebDevServices, Set<McpApps>>();
+/**
+ * Bind a conversation's dev apps to its web development services: kept dev
+ * apps (after an idle stop or a restart) start again through them, and when
+ * their container stops (`idle`, or stopped) the dev apps are marked stopped
+ * with that reason, keeping their spec. Called by the runtime when a
+ * conversation opens; idempotent.
+ */
+export function bindDevApps(apps: McpApps, conversationId: string, services: WebDevServices): void {
+  apps.bindDev(conversationId, { launch: (spec, signal) => launchDevApp(services, spec, signal), touch: () => services.touch(), logs: (name, lines) => services.devAppLogs(name, lines) });
+  const bound = boundServices.get(services) ?? new Set<McpApps>();
+  if (bound.has(apps)) return;
+  bound.add(apps); boundServices.set(services, bound);
+  services.onStop(reason => apps.devContainerStopped(conversationId, reason === 'idle' ? 'idle' : 'stopped'));
 }
 
 /** The summary of a (re)start, for the model. */
@@ -160,8 +187,9 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
           if (!MCP_APP_HTTP_PATH.test(http.path)) return { text: 'Error (command_invalid): path must be a URL path such as "/mcp".', isError: true };
           let folder = cwd;
           let stateDir = devAppStateDir(name);
+          bindDevApps(apps, conversationId, services);
           const result = await apps.startDev({
-            name, conversationId, folder: services.resolveFolder(cwd), command,
+            name, conversationId, folder: services.resolveFolder(cwd), command, transport: 'http', port: http.port, path: http.path,
             // Every launch (re)starts the server and opens a new tunnel; reloads use the folder found first.
             launch: async signal => {
               const launched = await services.devAppHttpStart(name, { command, ...(folder !== undefined ? { cwd: folder } : {}), ...http }, signal);
@@ -179,8 +207,9 @@ export const mcpAppDevTools: Record<McpAppDevToolName, Tool> = {
         const first = await services.devAppLine(name, { command, ...(cwd !== undefined ? { cwd } : {}) }, options.abortSignal);
         if (!first.ok) return { text: first.text, isError: true };
         let fresh = true;
+        bindDevApps(apps, conversationId, services);
         const result = await apps.startDev({
-          name, conversationId, folder: first.folder, command,
+          name, conversationId, folder: first.folder, command, transport: 'stdio',
           // The first launch uses the line checked above; reloads build it again (the container may have restarted).
           launch: async signal => {
             const launched = fresh ? first : await services.devAppLine(name, { command, cwd: first.folder }, signal);

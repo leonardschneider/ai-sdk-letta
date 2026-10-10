@@ -1245,8 +1245,25 @@ MCP_APP_DEV=1 npm run gui   # the example agent (implies WEBDEV=1)
   code and an **updated** note, without reloading the page: `GET /v1/apps`
   carries each dev app's generation (`devGenerations`) and views are keyed
   on it.
-- Dev apps live as long as the server: after a restart, ask the agent to
-  start them again.
+- **Stopped apps restart.** A dev app stops with its conversation's
+  services container (after `webDev.idleTimeoutMs` without tool calls,
+  preview requests or open views). Its spec (folder, command, transport,
+  port, path) is kept in `<state>/mcp-apps/<definition>/dev-apps.json`, also
+  across server restarts. Opening or reloading one of its views, or the
+  agent calling one of its tools, starts it again by itself (the view shows
+  **Starting…** and loads once it runs, within about 30 s). An app that
+  **failed** to start (or whose server exited) is not restarted by itself:
+  its view says why, with **Restart app** and **Logs** (its stderr).
+  `POST /v1/threads/:id/apps/:app/restart` restarts one (the thread's own dev
+  apps: members; installed apps: admins; CSRF; view-only agents have no
+  apps); `GET /v1/threads/:id/apps/:app/logs` reads a dev app's log. The
+  **Apps** dialog shows each app's status and why it stopped, with
+  **Restart**, **Stop** and **Logs** (`POST /v1/apps/:app/restart|stop`,
+  `GET /v1/apps/:app/logs`, admins).
+- **Kept running while visible.** An open view sends a heartbeat every
+  minute (`POST /v1/apps/instances/:instance/heartbeat`), and each of its
+  requests counts too: the container does not stop for idleness while one
+  of its views is on screen.
 
 #### App state
 

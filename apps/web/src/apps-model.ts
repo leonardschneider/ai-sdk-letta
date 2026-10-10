@@ -56,6 +56,34 @@ export const viewStateParams = {
 };
 /** The instance route's answer when the call is not recorded (yet). */
 export type NoInstance = { status: 'none' };
+/** Why an app is stopped (see `McpAppStopReason`). */
+export type AppStopReason = 'idle' | 'stopped' | 'restart' | 'exited' | 'manual';
+/** The instance route's answer when the app is not running: `starting` (it restarts by itself: ask again) or `unavailable` (failed or stopped: Restart, Logs). */
+export type AppDown = { status: 'starting' | 'unavailable'; app: { id: string; name: string; dev?: boolean }; appStatus: 'starting' | 'running' | 'failed' | 'stopped'; stopReason?: AppStopReason; error?: string; restartable?: boolean };
+/** How a view stays known to be on screen: a heartbeat this often (its dev app's container does not idle-stop). */
+export const VIEW_HEARTBEAT_MS = 60_000;
+/** How often a view asks again while its app (re)starts, and for how long. */
+export const STARTING_RETRY = Object.freeze({ everyMs: 1500, attempts: 80 });
+/** What the not-running card says: why, in a few words. */
+export function appDownReason(down: Pick<AppDown, 'appStatus' | 'stopReason' | 'error'>, idleMinutes = 30): string {
+  if (down.appStatus === 'starting') return 'Starting…';
+  if (down.appStatus === 'failed') return `Failed to start${down.error ? `: ${down.error}` : '.'}`;
+  if (down.appStatus === 'running') return 'Running.';
+  switch (down.stopReason) {
+    case 'idle': return `Stopped after ${idleMinutes} min idle.`;
+    case 'stopped': return 'Stopped with its container.';
+    case 'restart': return 'Stopped when the app restarted.';
+    case 'exited': return `Its server exited${down.error ? `: ${down.error}` : '.'}`;
+    case 'manual': return 'Stopped.';
+    default: return 'Not running.';
+  }
+}
+/** The Apps dialog's status line of an app. */
+export function appStatusLine(app: Pick<AppStatusView, 'status' | 'enabled' | 'stopReason' | 'error'>): string {
+  if (app.status === 'running') return app.enabled ? 'Running' : 'Disabled';
+  if (app.status === 'starting') return 'Starting…';
+  return appDownReason({ appStatus: app.status, ...(app.stopReason ? { stopReason: app.stopReason } : {}), ...(app.error ? { error: app.error } : {}) }).replace(/\.$/, '');
+}
 
 /** An app action waiting for a person (`GET /v1/threads/:id/apps/approvals`). */
 export type AppApprovalView = {
@@ -70,7 +98,9 @@ export type AppStatusView = {
   id: string; name: string; version?: string; packageName?: string; status: 'starting' | 'running' | 'failed' | 'stopped'; error?: string; enabled: boolean; origins?: string[];
   tools?: { name: string; agentTool?: string; title?: string; description?: string; visibility: ('model' | 'app')[]; policy: 'allow' | 'ask' | 'deny'; resourceUri?: string; granted?: 'tool' | 'app' }[];
   /** "Allow all from this app" was chosen; dev apps: whether calls from its views ask first. */
-  grantedAll?: boolean; grantedMessages?: boolean; grantedContext?: boolean; dev?: { conversationId: string }; viewsAsk?: boolean;
+  grantedAll?: boolean; grantedMessages?: boolean; grantedContext?: boolean; dev?: { conversationId: string; folder?: string; command?: string; transport?: 'http' | 'stdio' }; viewsAsk?: boolean;
+  /** Why it is stopped; whether Restart works now; whether it restarts by itself. */
+  stopReason?: AppStopReason; restartable?: boolean; autoRestart?: boolean;
   views?: { uri: string; declared: Record<string, string[] | undefined>; granted: Record<string, string[]>; fingerprint?: string }[];
 };
 

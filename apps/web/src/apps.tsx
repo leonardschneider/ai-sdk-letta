@@ -4,7 +4,7 @@ import { api, errorCode } from './api.js';
 import { Modal } from './modal.js';
 import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
 import { useToast } from './toasts.js';
-import { appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewPolicy, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
+import { appStatusLine, appToolLabel, approvalTitle, type AppApprovalView, type AppStatusView, type DevGenerations, type DisplayMode, type ViewPolicy, type ViewTool, devGenerationsKey, viewGeneration } from './apps-model.js';
 
 /** The view frame carries the MCP SDK: loaded only when a view shows. */
 const AppFrame = lazy(() => import('./app-view.js'));
@@ -205,6 +205,22 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
     try { await api(`/v1/apps/${encodeURIComponent(app.id)}/grants/reset`, { tool }); toast(tool === '*' ? `${app.name}: its actions ask again.` : tool === '@message' ? `${app.name}: its messages ask again.` : tool === '@context' ? `${app.name}: its context updates ask again.` : `${tool} asks again.`); load(); }
     catch { toast('Couldn’t reset it. Try again.', { tone: 'error' }); }
   };
+  const [busy, setBusy] = useState<string>();
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const lifecycle = async (app: AppStatusView, action: 'restart' | 'stop') => {
+    setBusy(app.id);
+    try {
+      const after = await api<{ status: string; error?: string }>(`/v1/apps/${encodeURIComponent(app.id)}/${action}`, {});
+      toast(action === 'stop' ? `${app.name} stopped.` : after.status === 'running' ? `${app.name} restarted.` : `${app.name} did not start${after.error ? `: ${after.error}` : ''}.`, after.status === 'failed' ? { tone: 'error' } : undefined);
+      onChanged();
+    } catch (error) { toast(errorCode(error) === 'app_unavailable' ? `${app.name} can be restarted once its conversation is open again.` : 'Couldn’t do it. Try again.', { tone: 'error' }); }
+    finally { setBusy(undefined); load(); }
+  };
+  const readLogs = async (app: AppStatusView) => {
+    if (logs[app.id] !== undefined) { setLogs(({ [app.id]: _, ...rest }) => rest); return; }
+    try { const data = await api<{ logs: string }>(`/v1/apps/${encodeURIComponent(app.id)}/logs`); setLogs(l => ({ ...l, [app.id]: data.logs || '(no output)' })); }
+    catch { setLogs(l => ({ ...l, [app.id]: 'Couldn’t read the logs.' })); }
+  };
   const devAsk = async (app: AppStatusView, ask: boolean) => {
     try { await api(`/v1/apps/${encodeURIComponent(app.id)}/dev`, { ask }, 'PATCH'); load(); }
     catch { toast('Couldn’t change it. Try again.', { tone: 'error' }); }
@@ -221,7 +237,9 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
       {apps?.map(app => <li key={app.id} className="token-row app-row" data-inactive={!app.enabled || app.status !== 'running' || undefined}>
         <span className="member-text">
           <span className="member-name">{app.name}{app.version ? <span className="muted"> {app.version}</span> : null} <span className="mono muted">({app.id})</span></span>
-          <span className="member-login">{app.status === 'running' ? (app.enabled ? 'Running' : 'Disabled') : app.status === 'starting' ? 'Starting…' : app.status === 'failed' ? <span className="token-warning">Failed to start: {app.error}</span> : 'Stopped'}{app.packageName ? ` · ${app.packageName}` : ''}</span>
+          <span className="member-login" data-app-status={app.status}>{app.status === 'failed' ? <span className="token-warning">{appStatusLine(app)}</span> : appStatusLine(app)}{app.autoRestart ? ' · restarts when used' : ''}{app.packageName ? ` · ${app.packageName}` : ''}</span>
+          {app.dev && <span className="member-login mono muted">{app.dev.folder ? `${app.dev.folder} $ ` : ''}{app.dev.command?.slice(0, 160)}</span>}
+          {logs[app.id] !== undefined && <pre className="appview-logs" aria-label={`Logs of ${app.name}`}>{logs[app.id]}</pre>}
           {!!app.tools?.length && <table className="app-tools"><thead><tr><th>Tool</th><th>Visible to</th><th>Policy</th></tr></thead><tbody>
             {app.tools.map(tool => <tr key={tool.name}><td><span className="mono">{tool.name}</span>{tool.resourceUri ? <span className="app-badge small" title={tool.resourceUri}>view</span> : null}</td><td>{VISIBILITY(tool.visibility)}</td><td data-policy={tool.policy}>{POLICY[tool.policy]}{tool.granted === 'tool' && <> (allowed always) <button type="button" className="link-btn" aria-label={`Reset ${tool.name}: ask again`} onClick={() => void reset(app, tool.name)}>Reset</button></>}{tool.granted === 'app' && ' (all allowed)'}</td></tr>)}
           </tbody></table>}
@@ -240,7 +258,12 @@ export function AppsDialog({ onClose, onChanged, viewPolicy, onViewPolicy }: { o
             </select>
           </label>}
         </span>
-        <button type="button" className="btn ghost small" onClick={() => void toggle(app)} disabled={app.status !== 'running' && app.enabled}>{app.enabled ? 'Disable' : 'Enable'}</button>
+        <span className="app-row-actions">
+          <button type="button" className="btn ghost small" disabled={busy === app.id || app.status === 'starting' || app.restartable === false || !app.enabled} onClick={() => void lifecycle(app, 'restart')} title={app.restartable === false ? 'It can be restarted once its conversation is open again' : undefined}>{busy === app.id ? 'Working…' : app.status === 'running' ? 'Restart' : 'Restart app'}</button>
+          {app.status === 'running' && <button type="button" className="btn ghost small" disabled={busy === app.id} onClick={() => void lifecycle(app, 'stop')}>Stop</button>}
+          {app.dev && <button type="button" className="btn ghost small" onClick={() => void readLogs(app)}>{logs[app.id] !== undefined ? 'Hide logs' : 'Logs'}</button>}
+          <button type="button" className="btn ghost small" onClick={() => void toggle(app)} disabled={app.status !== 'running' && app.enabled}>{app.enabled ? 'Disable' : 'Enable'}</button>
+        </span>
       </li>)}
     </ul>
   </Modal>;
