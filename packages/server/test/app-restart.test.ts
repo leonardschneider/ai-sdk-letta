@@ -66,6 +66,9 @@ test('instance: a dev app stopped after its idle timeout restarts by itself (sta
     assert.equal(failed.restartable, true);
     assert.equal(failed.app.dev, true);
     assert.equal(f.state.launches, launches, 'not restarted by itself');
+    // Its view stays known to the page (it shows why, with Restart), but its tools are not the agent's while it fails.
+    assert.ok(f.apps.viewTools().dev_clock__show);
+    assert.equal(f.apps.agentTools(f.conversationId).names.has('dev_clock__show'), false);
     // Fixed: Restart works and the view loads again.
     f.state.fail = false;
     const restarted = await f.gate.restart('owner', f.thread, 'dev_clock');

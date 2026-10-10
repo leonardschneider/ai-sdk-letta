@@ -1228,7 +1228,7 @@ export class McpApps {
     const known = this.live.get(id);
     if (known?.dev && known.dev.conversationId !== spec.conversationId) throw new McpAppError('app_unknown', `The dev app name "${spec.name}" is used by another conversation; choose another name`);
     if (!known && this.devApps(spec.conversationId).length >= MCP_APP_LIMITS.maxDevApps) throw new McpAppError('app_unknown', `At most ${MCP_APP_LIMITS.maxDevApps} dev apps per conversation; stop one first`);
-    const before = known ? { tools: known.tools, views: new Map(known.views) } : undefined;
+    const before = known ? { tools: known.tools, views: new Map(known.views), serverInfo: known.serverInfo } : undefined;
     if (known) await this.stopOne(known);
     const live: Live = known ?? { tools: [], views: new Map(), status: 'stopped' };
     live.dev = { ...spec, generation: (known?.dev?.generation ?? 0) + 1, startedAt: new Date().toISOString() };
@@ -1253,8 +1253,10 @@ export class McpApps {
       const message = error instanceof Error ? (error.message === 'start_timeout' ? `The server did not answer within ${MCP_APP_LIMITS.startTimeoutMs / 1000} s (${live.runtime?.http ? `does it serve Streamable HTTP at ${live.runtime.http.url}?` : 'does it speak MCP over stdio?'} see mcp_app_dev_logs)` : error.message.slice(0, 500)) : 'The dev app could not start.';
       await this.stopOne(live);
       live.status = 'failed'; live.error = message;
+      // The previous tools stay known (not the agent's while it fails): its views say why, with Restart and Logs.
+      if (!live.tools.length && before?.tools.length) { live.tools = before.tools; if (before.serverInfo) live.serverInfo = before.serverInfo; }
     } finally { this.persistDev(); this.changed(); }
-    const tools = this.status().find(s => s.id === id)?.tools ?? [];
+    const tools = live.status === 'running' ? this.status().find(s => s.id === id)?.tools ?? [] : [];
     const views = [...new Set([...live.views.keys(), ...viewErrors.keys()])].map(uri => ({ uri, fingerprint: live.views.get(uri)?.fingerprint ?? '', ...(before && before.views.get(uri)?.fingerprint !== live.views.get(uri)?.fingerprint ? { changed: true } : {}), ...(viewErrors.has(uri) ? { error: viewErrors.get(uri)! } : {}) }));
     const changes = before ? (() => {
       const old = new Map(before.tools.map(t => [t.name, JSON.stringify(t)]));
