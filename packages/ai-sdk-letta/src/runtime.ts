@@ -17,6 +17,7 @@ import { resolveStateDirectory, statePaths } from './state.js';
 import { AttachmentStore, ResourceStore } from './resources.js';
 import { ATTACHMENTS_CONTEXT, filesEnabled } from './file-tools.js';
 import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sandboxToolTimeout, withProjectDescriptions } from './sandbox.js';
+import { backgroundCommandsAt, type BackgroundCommands } from './background.js';
 import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDevToolTimeouts, type WebDevServices, type WebDevServicesOptions } from './webdev.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
@@ -100,6 +101,12 @@ export interface OpenAgentOptions {
    * (the server passes one, and shows them). Without it they answer `jobs_unavailable`.
    */
   jobs?: JobDesk;
+  /**
+   * Where background commands (`run_command` with `background: true`) are
+   * recorded and followed. Default: one per state directory and process
+   * (`<state>/background-commands.json`, see `backgroundCommandsAt`).
+   */
+  background?: BackgroundCommands;
   /**
    * Web search for the `web_search` tool: a SearXNG base URL (with the
    * default summarizer, a tool-less Letta sub-agent on the definition's
@@ -337,7 +344,7 @@ export type ConversationCheck = { unlocked: boolean; active: boolean; delivered?
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'jobs' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'jobs' | 'background' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -587,7 +594,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           // command, with all resources at /workspace and the conversation's folder as the working directory.
           if (sandboxEnabled(definition)) {
             const store = resources;
-            sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}` });
+            sandbox = new SandboxManager(definition.sandbox!, { workspace: () => store.workTree(), folder: () => workspace.path, owner: `${identity.agentId}.${conversationId}`, background: { commands: options.background ?? backgroundCommandsAt(paths.root), conversationId } });
             // Web development: a services container next to the sandbox (dev server, browser); approved origins kept per conversation.
             if (webDevRegistry) webDev = webDevRegistry.attach(identity.agentId, conversationId, sandbox, definition.webDev);
           }

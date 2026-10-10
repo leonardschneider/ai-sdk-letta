@@ -73,6 +73,7 @@ export {
   type JobDesk, type JobContext, type JobPaths, type JobTurn, type JobImage, type JobImageType, type JobStatus, type JobStartRequest, type JobUpdateRequest, type JobEndRequest,
   type JobStartInput, type JobUpdateInput, type JobEndInput, type JobOutput, type JobToolName,
 } from './jobs.js';
+export { BackgroundCommands, backgroundCommandsAt, backgroundScript, backgroundNotice, backgroundRunId, lastLines, BACKGROUND_LIMITS, BACKGROUND_MARK, BACKGROUND_JOB_VAR, BACKGROUND_NOTE, type BackgroundRecord, type BackgroundState, type BackgroundSummary } from './background.js';
 export { commandJob, commandGoal, parseProgressLine, visibleLine, OutputLines, COMMAND_PROGRESS, type CommandJob, type CommandEnd, type CommandOutputChunk, type ParsedProgress } from './command-progress.js';
 export { adfToMarkdown, markdownToAdf, spliceMarkdown, splitBlocks, blockMarkdown, protectedElements, lostElements, validateAdf, isAdfDocument, adfHash, type AdfDocument, type AdfNode, type AdfMark, type MarkdownOptions, type ProtectedElement, type SpliceChange, type SpliceResult } from './adf.js';
 export { ADF_SCHEMA, ADF_SCHEMA_VERSION } from './adf-schema.js';
