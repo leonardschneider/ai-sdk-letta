@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hostCapabilities, VIEW_STATE_EXTENSION, VIEW_STATE_SAVE, viewStateContext, viewStateParams, acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES } from '../src/apps-model.js';
+import { hostCapabilities, VIEW_STATE_EXTENSION, VIEW_STATE_SAVE, viewStateContext, viewStateParams, acceptFrameMessage, appToolLabel, approvalError, approvalTitle, devGenerationsKey, hostContext, isAppToolName, viewGeneration, inlineHeight, INLINE_HEIGHT, nextDisplayMode, openableLink, THEME_VARIABLES, appDownReason, appStatusLine, VIEW_HEARTBEAT_MS } from '../src/apps-model.js';
 import { historyMessages, knownApp } from '../src/messages.js';
 
 test('display modes: only modes the view declared and the host offers; otherwise the current one', () => {
@@ -156,4 +156,20 @@ test('view state (host extension): namespaced capability and host context key, {
   assert.deepEqual(viewStateParams['~standard'].validate({ state: [1] }), { value: { state: [1] } });
   assert.ok('issues' in viewStateParams['~standard'].validate({}));
   assert.ok('issues' in viewStateParams['~standard'].validate(null));
+});
+
+test('not-running reasons: idle, failed, starting, exited, manual; the Apps dialog line', () => {
+  assert.equal(appDownReason({ appStatus: 'stopped', stopReason: 'idle' }), 'Stopped after 30 min idle.');
+  assert.equal(appDownReason({ appStatus: 'failed', error: 'Cannot find module' }), 'Failed to start: Cannot find module');
+  assert.equal(appDownReason({ appStatus: 'failed' }), 'Failed to start.');
+  assert.equal(appDownReason({ appStatus: 'starting' }), 'Starting…');
+  assert.equal(appDownReason({ appStatus: 'stopped', stopReason: 'exited', error: 'The dev app server exited' }), 'Its server exited: The dev app server exited');
+  assert.equal(appDownReason({ appStatus: 'stopped', stopReason: 'restart' }), 'Stopped when the app restarted.');
+  assert.equal(appDownReason({ appStatus: 'stopped', stopReason: 'manual' }), 'Stopped.');
+  assert.equal(appDownReason({ appStatus: 'stopped' }), 'Not running.');
+  assert.equal(appStatusLine({ status: 'running', enabled: true }), 'Running');
+  assert.equal(appStatusLine({ status: 'running', enabled: false }), 'Disabled');
+  assert.equal(appStatusLine({ status: 'stopped', enabled: true, stopReason: 'idle' }), 'Stopped after 30 min idle');
+  assert.equal(appStatusLine({ status: 'failed', enabled: true, error: 'boom' }), 'Failed to start: boom');
+  assert.ok(VIEW_HEARTBEAT_MS <= 60_000);
 });
