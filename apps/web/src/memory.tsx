@@ -100,6 +100,23 @@ function FileProvenance() {
  * file; and which model reviews (Jiminy).
  */
 export function MemoryDialog({ agentName, admin, viewOnly, onClose, onOpenThread }: { agentName: string; admin: boolean; /** View only: nothing is reviewed or reverted here. */ viewOnly?: boolean; onClose(): void; onOpenThread?(id: string): void }) {
+  return <Modal label={`Memory of ${agentName}`} onClose={onClose} className="automations memory">
+    <div className="members-head">
+      <div><h2 className="modal-title">Memory</h2>
+        <MemoryIntro agentName={agentName} viewOnly={!!viewOnly}/></div>
+      <button type="button" className="icon-btn small" aria-label="Close" data-autofocus onClick={onClose}><X size={16}/></button>
+    </div>
+    <MemoryPanel admin={admin} {...(onOpenThread ? { onOpenThread } : {})}/>
+  </Modal>;
+}
+
+/** What the Memory view shows, in a sentence. */
+export function MemoryIntro({ agentName, viewOnly }: { agentName: string; viewOnly: boolean }) {
+  return viewOnly ? <p className="modal-text">{agentName} is view only here: its memory changes in Letta Code, and the app neither reviews nor reverts them. Earlier reviews, if any, stay listed below.</p> : <p className="modal-text">Every change to {agentName}’s memory is recorded with who asked for it and what the agent had read, and reviewed by Jiminy, a separate reviewer. Changes it doubts are reverted, or held until someone approves them in the bell.</p>;
+}
+
+/** The reviewer model and the review history (the Memory dialog and the settings page). */
+export function MemoryPanel({ admin, onOpenThread }: { admin: boolean; onOpenThread?(id: string): void }) {
   const toast = useToast();
   const [data, setData] = useState<MemoryData>();
   const [failed, setFailed] = useState('');
@@ -112,13 +129,7 @@ export function MemoryDialog({ agentName, admin, viewOnly, onClose, onOpenThread
     try { await api('/v1/memory/reviewer', { model }, 'PUT'); toast(model === 'auto' ? 'Jiminy now picks its model automatically.' : `Jiminy now reviews with ${model}.`); await load(); }
     catch (e) { toast(memoryError(errorCode(e)), { tone: 'error' }); }
   };
-  return <Modal label={`Memory of ${agentName}`} onClose={onClose} className="automations memory">
-    <div className="members-head">
-      <div><h2 className="modal-title">Memory</h2>
-        {viewOnly ? <p className="modal-text">{agentName} is view only here: its memory changes in Letta Code, and the app neither reviews nor reverts them. Earlier reviews, if any, stay listed below.</p> : <p className="modal-text">Every change to {agentName}’s memory is recorded with who asked for it and what the agent had read, and reviewed by Jiminy, a separate reviewer. Changes it doubts are reverted, or held until someone approves them in the bell.</p>}</div>
-      <button type="button" className="icon-btn small" aria-label="Close" data-autofocus onClick={onClose}><X size={16}/></button>
-    </div>
-    {data?.reviewer && <section className="memory-section memory-reviewer">
+  return <>    {data?.reviewer && <section className="memory-section memory-reviewer">
       <label className="memory-reviewer-label" htmlFor="jiminy-model">Reviewer model</label>
       <select id="jiminy-model" className="member-role" value={data.reviewer.model} disabled={!admin} onChange={event => void setModel(event.target.value)}>
         {reviewerOptions(data.reviewer.available, data.reviewer.model).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -146,7 +157,7 @@ export function MemoryDialog({ agentName, admin, viewOnly, onClose, onOpenThread
       </ul>
     </section>}
     <FileProvenance/>
-  </Modal>;
+  </>;
 }
 
 /**

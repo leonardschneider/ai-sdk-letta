@@ -1296,3 +1296,51 @@ button.crumb-agent:hover, button.crumb-agent[data-state="open"] { background: va
   .breadcrumb { flex: 1; justify-content: center; }
   .breadcrumb .crumb-agent, .breadcrumb .crumb-sep { display: none; }
 }
+
+/* Agent settings page: in the main area in place of the conversation. */
+.settings-page { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
+.settings-inner { max-width: 920px; margin: 0 auto; padding: 18px 24px 64px; }
+.settings-top { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; margin-bottom: 18px; }
+.settings-back { display: inline-flex; align-items: center; gap: 5px; grid-column: 1 / -1; justify-self: start; text-decoration: none; font-size: 13.5px; }
+.settings-back:hover { text-decoration: underline; }
+.settings-title { margin: 0; font-size: 22px; font-weight: 650; display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.settings-title-sub { font-size: 14px; font-weight: 500; color: var(--text-3); }
+.settings-open-chat { justify-self: end; }
+.settings-body { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 28px; align-items: start; }
+.settings-toc { position: sticky; top: 0; }
+.settings-toc ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.settings-toc a { display: block; padding: 6px 10px; border-radius: 8px; color: var(--text-2); text-decoration: none; font-size: 13.5px; }
+.settings-toc a:hover { background: var(--hover); color: var(--text); }
+.settings-toc a[aria-current] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.settings-sections { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.settings-section { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 16px 18px; scroll-margin-top: 12px; }
+.settings-section.danger { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.settings-heading { margin: 0 0 8px; font-size: 16px; font-weight: 650; }
+.settings-intro .modal-text { margin-top: 0; }
+.settings-section .modal-actions { justify-content: flex-start; margin-top: 10px; }
+.settings-sub { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.settings-fields { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0 0 10px; font-size: 14px; }
+.settings-fields dt { color: var(--text-3); }
+.settings-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.settings-code { margin-left: 8px; }
+.settings-change { margin-left: 10px; font-size: 13.5px; }
+.settings-switch { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); cursor: pointer; }
+.settings-switch > span { display: flex; flex-direction: column; gap: 2px; }
+.settings-switch input { margin-top: 3px; accent-color: var(--accent); }
+.settings-danger-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.settings-danger-row .adopt-meta { margin: 2px 0 0; }
+.settings-status { margin: 0; }
+.settings-section .model-list { max-height: 340px; overflow-y: auto; }
+.settings-row[data-active] { color: var(--text); }
+.agent-row[data-settings] .agent-row-main { background: var(--accent-soft); }
+.breadcrumb[data-settings] .topbar-title { color: var(--text); }
+@media (max-width: 760px) {
+  .settings-inner { padding: 12px 14px 48px; }
+  .settings-body { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .settings-toc { position: static; }
+  .settings-toc ul { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .settings-toc a { padding: 4px 9px; border: 1px solid var(--border); border-radius: 999px; font-size: 12.5px; }
+  .settings-section { padding: 14px; }
+}
+.thread[hidden] { display: none; }
+.breadcrumb[data-settings] .crumb-agent { max-width: 60vw; }

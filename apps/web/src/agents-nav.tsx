@@ -1,10 +1,12 @@
 import React from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, Cpu, Eye, FileDiff, FolderGit2, Trash2, Users, Wrench } from 'lucide-react';
+import { Check, Cpu, Eye, FileDiff, FolderGit2, Settings, Trash2, Users, Wrench } from 'lucide-react';
 import type { AgentInfo } from './api.js';
 
 /** What an agent's ⋯ menu can do (each absent action is hidden). */
 export type AgentActions = {
+  /** The agent's settings page. */
+  onSettings?(agent: AgentInfo): void;
   onModel?(agent: AgentInfo): void; onTools?(agent: AgentInfo): void; onProject?(agent: AgentInfo): void; onInstructions?(agent: AgentInfo): void;
   onViewOnly?(agent: AgentInfo, value: boolean): void; onRemove?(agent: AgentInfo): void;
   /** Team servers: the members of the agent (only for the current one). */
@@ -18,12 +20,13 @@ export function agentModel(agent: AgentInfo): string | undefined {
   return handle && effort ? `${handle} · ${effort}` : handle;
 }
 
-/** An agent's ⋯ menu (Model…, Tools…, Project folder…, Update instructions…, View only, Remove from app; Members… on team servers), around any trigger. */
+/** An agent's ⋯ menu (Settings, Model…, Tools…, Project folder…, Update instructions…, View only, Remove from app; Members… on team servers), around any trigger. */
 export function AgentActionsMenu({ agent, actions, children, open, onOpenChange }: { agent: AgentInfo; actions: AgentActions; children: React.ReactNode; open?: boolean; onOpenChange?(open: boolean): void }) {
   const viewOnly = !!agent.viewOnly;
   const model = agentModel(agent);
-  const { onModel, onTools, onProject, onInstructions, onViewOnly, onRemove, onMembers } = actions;
+  const { onSettings, onModel, onTools, onProject, onInstructions, onViewOnly, onRemove, onMembers } = actions;
   const items = [
+    onSettings && <DropdownMenu.Item key="settings" className="menu-item" onSelect={() => onSettings(agent)}><Settings size={15} aria-hidden="true"/>Settings</DropdownMenu.Item>,
     onModel && (!agent.adopted || !viewOnly) && <DropdownMenu.Item key="model" className="menu-item" onSelect={() => onModel(agent)}><Cpu size={15} aria-hidden="true"/>Model…</DropdownMenu.Item>,
     agent.adopted && !viewOnly && onTools && <DropdownMenu.Item key="tools" className="menu-item" onSelect={() => onTools(agent)}><Wrench size={15} aria-hidden="true"/>Tools…</DropdownMenu.Item>,
     agent.adopted && !viewOnly && onProject && <DropdownMenu.Item key="project" className="menu-item" onSelect={() => onProject(agent)}><FolderGit2 size={15} aria-hidden="true"/>Project folder…</DropdownMenu.Item>,
