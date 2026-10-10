@@ -1343,3 +1343,4 @@ button.crumb-agent:hover, button.crumb-agent[data-state="open"] { background: va
   .settings-section { padding: 14px; }
 }
 .thread[hidden] { display: none; }
+.breadcrumb[data-settings] .crumb-agent { max-width: 60vw; }
