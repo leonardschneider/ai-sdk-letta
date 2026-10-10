@@ -73,6 +73,8 @@ test('background script: detached, marked, wall-clock limited, writes exit last'
 test('run_command background: returns at once with a jobId; status, output and its end', async () => {
   const s = setup();
   try {
+    // The first command creates the sandbox (a Python venv in the workspace: slow on CI); time only the background call.
+    await s.manager.run({ command: 'true' });
     const started = Date.now();
     const out = await s.call('run_command', { command: 'for i in 1 2 3; do echo "step $i/3"; sleep 0.3; done; echo bye >&2', background: true });
     assert.ok(Date.now() - started < 3000, 'returns at once');
