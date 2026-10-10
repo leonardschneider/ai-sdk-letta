@@ -468,7 +468,7 @@ export class AdoptionRegistry {
     try { return hosted.runtime.conversationOf(this.options.owner, decodeURIComponent(match[1]!)); } catch { return undefined; }
   }
   /** What the GUI app needs (see {@link GuiAdoption}). */
-  gui(): GuiAdoption { return { routes: this.routes(), agents: () => this.agents(), bindFeed: feed => this.bindFeed(feed) }; }
+  gui(): GuiAdoption { return { routes: this.routes(), agents: () => this.agents(), bindFeed: feed => this.bindFeed(feed), activity: () => [...this.hosted.values()].map(h => ({ id: h.definition.id, name: h.definition.name, runtime: h.runtime, owner: this.options.owner })) }; }
   async close() {
     if (this.closing) return;
     this.closing = true;

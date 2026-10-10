@@ -283,6 +283,10 @@ export type WebDevStatus = {
   devServer?: { folder: string; command: string; startedAt: string };
   /** Origins approved in this conversation (the browser and the preview may load from them). */
   origins: string[];
+  /** When the running container stops if nothing uses it (absent while a tool holds it, or when stopped). */
+  idleStopsAt?: string;
+  /** The headless browser is open. */
+  browser?: boolean;
 };
 
 /** Options of {@link WebDevServices}. */
@@ -347,8 +351,10 @@ export class WebDevServices {
 
   /** The current status (for the app). */
   status(): WebDevStatus {
-    return { container: this.container ? (this.started ? 'running' : 'starting') : 'stopped', ...(this.dev ? { devServer: { ...this.dev } } : {}), origins: [...this.approved] };
+    return { container: this.container ? (this.started ? 'running' : 'starting') : 'stopped', ...(this.dev ? { devServer: { ...this.dev } } : {}), origins: [...this.approved],
+      ...(this.container && !this.busy && this.idleAt ? { idleStopsAt: new Date(this.idleAt).toISOString() } : {}), ...(this.browser ? { browser: true } : {}) };
   }
+  private idleAt?: number;
   private started = false;
   /** Approved origins. */
   get origins(): readonly string[] { return this.approved; }
@@ -364,6 +370,7 @@ export class WebDevServices {
     if (!this.container || this.closed) return;
     clearTimeout(this.idle);
     if (this.busy) return;
+    this.idleAt = Date.now() + this.config.idleTimeoutMs;
     this.idle = setTimeout(() => { void this.stop('idle'); }, this.config.idleTimeoutMs);
     this.idle.unref?.();
   }
@@ -397,7 +404,7 @@ export class WebDevServices {
     const container = this.container;
     // Told first, before the tunnels close: dev apps stop with the container (and keep their spec), not as failures.
     if (container) for (const listener of [...this.stopListeners]) { try { listener(reason); } catch { /* observer */ } }
-    this.container = undefined; this.started = false; this.dev = undefined; this.resolved = undefined;
+    this.container = undefined; this.started = false; this.dev = undefined; this.resolved = undefined; this.idleAt = undefined;
     const browser = this.browser; this.browser = undefined;
     await browser?.then(client => client.close(), () => {}).catch(() => {});
     this.closeTunnels();
@@ -752,6 +759,13 @@ export class WebDevRegistry {
     });
     this.services.set(key, created);
     return created;
+  }
+  /** Conversations with services (open, not closed): `{ agentId, conversationId, status }`, for an activity view. */
+  conversations(): { agentId: string; conversationId: string; status: WebDevStatus }[] {
+    return [...this.services.entries()].filter(([, services]) => !services.isClosed).map(([key, services]) => {
+      const slash = key.indexOf('/');
+      return { agentId: key.slice(0, slash), conversationId: key.slice(slash + 1), status: services.status() };
+    });
   }
   /** The services of a conversation, if it has any yet. */
   get(agentId: string, conversationId: string): WebDevServices | undefined {

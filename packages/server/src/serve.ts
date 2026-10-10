@@ -277,6 +277,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
       const service = new AutomationService({ agents: [automationEntry], ...scheduling.service, log });
       scheduling.bind(service);
       runtime.rewindHooks = rewindHooks(service, automationEntry);
+      runtime.upcoming = upcoming(service, automationEntry);
       const listening = await listenAutomation(service, options.automation);
       automation = { service, ...listening, endpoint: endpointOf(listening.url, options.automation) };
     }
@@ -469,7 +470,7 @@ export async function startTeamServer(definitions: readonly AgentDefinition<Tool
       // A token acts for a member of the agent; once they are no longer a member, it stops working.
       const service = automationService = new AutomationService({ agents: automationAgents, members: (agentId, userId) => { const user = directory.user(userId); return user && directory.role(agentId, userId) ? authorOf(user) : undefined; }, ...scheduling.service, log });
       scheduling.bind(service);
-      for (const entry of automationAgents) entry.runtime.rewindHooks = rewindHooks(service, entry);
+      for (const entry of automationAgents) { entry.runtime.rewindHooks = rewindHooks(service, entry); entry.runtime.upcoming = upcoming(service, entry); }
       const listening = await listenAutomation(service, options.automation);
       automationServer = listening.server;
       automation = { service, url: listening.url, port: listening.port, endpoint: endpointOf(listening.url, options.automation) };
@@ -524,6 +525,10 @@ export function preApprovableTools(definition: AgentDefinition): string[] {
 }
 
 /** What a rewind withdraws through the automation service: the tasks the rewound turns scheduled. */
+/** Scheduled tasks still to fire, for the activity view (`ThreadRuntime.upcoming`). */
+function upcoming(service: AutomationService, agent: AutomationAgent) {
+  return () => service.schedules(agent).filter(s => s.state === 'scheduled' || s.state === 'scheduling').map(s => ({ id: s.id, at: s.at, prompt: s.prompt.slice(0, 200), ...(s.threadId ? { threadId: s.threadId } : {}), ...(s.title ? { title: s.title } : {}) }));
+}
 function rewindHooks(service: AutomationService, agent: AutomationAgent): RewindHooks {
   return { schedules: runIds => service.schedulesOf(agent, runIds), cancelSchedules: runIds => service.cancelSchedulesOf(agent, runIds) };
 }

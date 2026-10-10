@@ -4,6 +4,7 @@ import { FILE_LIMITS, IMAGE_LIMITS, IMAGE_MEDIA_TYPES, TEXT_EXTENSIONS } from 'a
 import type { RunAuthor, RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault, ThreadRuntime as Runtime } from './runtime.js';
 import { runtimeVersions } from './versions.js';
+import { activitySummary, agentActivity } from './activity.js';
 import { authorOf, servedOrigin, tailscaleIdentity, type TailscaleIdentity, type TeamDirectory, type TeamUser } from './team.js';
 import { atlassianMediaRoute, integrationError, integrationRoutes } from './integrations.js';
 import { LOCAL_USER_ID, type CredentialStore } from 'ai-sdk-letta';
@@ -224,6 +225,10 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
   /** The conversation's dev server, approved origins and preview URL (`{ enabled: false }` without web development). */
   app.get('/v1/threads/:id/preview', (req, res) => res.json(runtime.webDevStatus(owner, req.params.id)));
   /** Revoke an origin approved in the conversation: `{ origin }`. Only ever makes it stricter. */
+  /** Stop the conversation's dev server (the services container keeps running). */
+  app.post('/v1/threads/:id/preview/stop-dev-server', async (req, res) => { if (access && !access.mayAct(req, {})) throw new RuntimeFault('admin_required', 403); res.json(await runtime.stopDevServer(owner, req.params.id)); });
+  /** What the agent does now (see `agentActivity`): turns, prompts waiting for you, services, background work. No Letta call. */
+  app.get('/v1/activity', (_req, res) => res.json(agentActivity(runtime, owner)));
   app.post('/v1/threads/:id/preview/revoke', async (req, res) => res.json(await runtime.revokeWebOrigin(owner, req.params.id, req.body)));
   app.get('/v1/threads/:id/view', async (req, res) => res.json(await runtime.view(owner, req.params.id)));
   /* ---------------- MCP Apps ---------------- */
@@ -453,6 +458,47 @@ export interface GuiAdoption {
   agents(): GuiAgentInfo[];
   /** Called once with the app's decision feed (created if the app has none), so adopted agents' decisions join the bell. */
   bindFeed(feed: DecisionFeed): void;
+  /** The adopted agents' runtimes, for the activity summary. */
+  activity?(): ActivityAgent[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Activity: what every agent does now                                 */
+/* ------------------------------------------------------------------ */
+
+/** An agent whose activity the summary counts. */
+export type ActivityAgent = { id: string; name: string; runtime: ThreadRuntime; owner: string };
+
+/**
+ * `GET .../activity?since=<version>`: `{ version, agents }` (counts per agent,
+ * see {@link activitySummary}), at once or when they change (about 25 seconds
+ * at most). Waits on the runtimes' change channel; nothing is polled.
+ */
+export function activitySummaryRoute(agents: () => readonly ActivityAgent[]): express.RequestHandler {
+  let version = 0; let key = '';
+  const current = () => {
+    const summary = activitySummary(agents());
+    const next = JSON.stringify(summary);
+    if (next !== key) { key = next; version++; }
+    return summary;
+  };
+  return async (req, res) => {
+    const since = req.query.since === undefined ? -1 : Number(req.query.since);
+    if (!Number.isSafeInteger(since)) throw new RuntimeFault('invalid_cursor', 400);
+    let summary = current();
+    if (since === version) {
+      const control = new AbortController();
+      res.on('close', () => control.abort());
+      await new Promise<void>(resolve => {
+        const unobserve: (() => void)[] = [];
+        const done = () => { clearTimeout(timer); for (const off of unobserve) off(); control.signal.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, 25_000);
+        control.signal.addEventListener('abort', done, { once: true });
+        for (const agent of agents()) unobserve.push(agent.runtime.observe(() => { summary = current(); if (version !== since) done(); }));
+      });
+    }
+    if (!res.writableEnded && !res.destroyed) res.json({ version, agents: summary });
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -605,6 +651,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   ...(integrations ? [integrationsApp(integrations)] : []),
   // The local user owns the single-user app: they manage its automation tokens.
   ...(automation ? [express.Router().use('/automations', automationAdminRoutes(automation.service, () => agent.id, { actor: () => ({ id: LOCAL_USER_ID, name: 'You' }), isAdmin: () => true }, automation.endpoint))] : []),
+  // What every agent does now (the header's status pill and the agent switcher): `?since=<version>` waits until it changes.
+  express.Router().get('/activity', activitySummaryRoute(() => [{ id: agent.id, name: agent.name, runtime, owner }, ...(adoption?.activity?.() ?? [])])),
   // Pending decisions (the notification bell): `?since=<version>` waits until they change.
   ...(feed ? [express.Router().get('/decisions', decisionFeedRoute(feed, () => () => true))] : []),
   // Adopted agents: the picker and each agent's API (`/api/agents/<id>/v1/...`).
