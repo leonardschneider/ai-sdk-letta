@@ -11,6 +11,12 @@ export function settingsAgent(hash: string): string | undefined {
   try { return decodeURIComponent(match[1]!) || undefined; } catch { return undefined; }
 }
 
+/** The agent a hash opens settings for, when it is one of `known` (a reload keeps the page; an unknown or removed agent closes it). */
+export function settingsTarget(hash: string, known: readonly string[]): string | undefined {
+  const id = settingsAgent(hash);
+  return id && known.includes(id) ? id : undefined;
+}
+
 /** What opening or closing the settings page does from the current agent: show it in place, switch agents first, or close it. */
 export function settingsPlan(currentId: string, hash: string): { kind: 'open' } | { kind: 'switch'; agentId: string } | { kind: 'close' } {
   const id = settingsAgent(hash);

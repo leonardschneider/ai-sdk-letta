@@ -416,13 +416,14 @@ export function ModelPanel({ agent, onSaved, onClose }: { agent: AgentInfo; onSa
       await adoptionApi(path, { model: chosen, ...(effort && efforts.length ? { effort } : {}) }, 'PUT');
       const label = chosenModel?.label ?? chosen;
       toast(`${agent.name} now uses ${label}${effort && efforts.length ? ` (${efforts.find(e => e.value === effort)?.label.toLowerCase() ?? effort} reasoning)` : ''}. Its next message uses it.`);
+      if (!onClose) setEditing(false);
       onSaved();
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
   return <>
     <p className="model-current"><span className="automations-heading">{onClose ? 'Current' : 'Model'}</span> <code>{current || 'unknown'}</code>{currentLabel && <span className="adopt-meta"> · {currentLabel.label} · {currentLabel.providerLabel}</span>}
       <span className="adopt-meta"> · reasoning: {adopted ? currentEffort ?? 'model default' : agent.adopted?.effort ?? agent.effort ?? 'default'}</span>
-      {!onClose && !adopted && <span className="role-badge small settings-code" title="LETTA_MODEL or the agent definition">Set in code</span>}
+      {!onClose && !adopted && (agent.adopted ? <span className="role-badge small settings-code">View only</span> : <span className="role-badge small settings-code" title="LETTA_MODEL or the agent definition">Set in code</span>)}
       {!onClose && adopted && !editing && <button type="button" className="link-btn settings-change" onClick={() => setEditing(true)}>Change model</button>}</p>
     {adopted && editing && <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
       <div className="member-list adopt-list model-list" role="radiogroup" aria-label="Models" aria-busy={!models || undefined}>

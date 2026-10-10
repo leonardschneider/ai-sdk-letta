@@ -47,6 +47,10 @@ export type Nav = {
   onOpen(agentId: string, threadId?: string): void;
   /** The ⋯ menu of an agent; undefined: no menu. */
   actionsFor(agent: AgentInfo): AgentActions | undefined;
+  /** Open an agent's settings page (clicking it in the Agents section). */
+  onSettings?(agentId: string): void;
+  /** The agent whose settings page is open. */
+  settingsOf?: string;
   onAdd?(): void;
 };
 
@@ -179,7 +183,7 @@ export function Sidebar(props: SidebarProps) {
           <ChevronRight size={14} className="chev" aria-hidden="true"/><span>Agents</span><span className="count">{nav.agents.length}</span>
         </button></h2>
         <div id="nav-agents" className="nav-body agents-list" hidden={!sections.agents}>
-          {nav.agents.map(a => <AgentRow key={a.id} agent={a} current={a.id === current} state={activityOf(a.id)?.state} actions={nav.actionsFor(a)} disabled={busy} onOpen={() => { if (a.id !== current) nav.onOpen(a.id, undefined); }}/>)}
+          {nav.agents.map(a => <AgentRow key={a.id} agent={a} current={a.id === current} settings={nav.settingsOf === a.id} state={activityOf(a.id)?.state} actions={nav.actionsFor(a)} disabled={busy} onOpen={() => { if (nav.onSettings) nav.onSettings(a.id); else if (a.id !== current) nav.onOpen(a.id, undefined); }}/>)}
           {nav.onAdd && <button type="button" className="agent-add" onClick={nav.onAdd}><Plus size={15} aria-hidden="true"/>Add agent…</button>}
         </div>
       </section>
@@ -205,19 +209,18 @@ function OtherThreadRow({ thread, archived, agentName, running, disabled, onOpen
   </div>;
 }
 
-/** An agent in the Agents section: its name, model and state; the ⋯ menu holds its settings. */
-function AgentRow({ agent, current, state, actions, disabled, onOpen }: { agent: AgentInfo; current: boolean; state?: ActivityCounts['state']; actions?: AgentActions; disabled: boolean; onOpen(): void }) {
+/** An agent in the Agents section: its name, model and state; clicking it opens its settings page, the ⋯ menu holds quick actions. */
+function AgentRow({ agent, current, settings, state, actions, disabled, onOpen }: { agent: AgentInfo; current: boolean; settings?: boolean; state?: ActivityCounts['state']; actions?: AgentActions; disabled: boolean; onOpen(): void }) {
   const [open, setOpen] = useState(false);
   const model = agentModel(agent);
   const status = agent.viewOnly ? 'view only' : state === 'waiting' ? 'needs you' : state === 'working' ? 'working' : 'idle';
-  return <div className="agent-row" data-current={current || undefined} data-menu-open={open || undefined}>
-    <button type="button" className="agent-row-main" aria-current={current || undefined} disabled={disabled && !current} title={model ? `${agent.name} · ${model}` : agent.name} onClick={onOpen}>
+  return <div className="agent-row" data-current={current || undefined} data-settings={settings || undefined} data-menu-open={open || undefined}>
+    <button type="button" className="agent-row-main" aria-current={settings ? 'page' : undefined} disabled={disabled && !current} title={`${agent.name}${model ? ` · ${model}` : ''}: settings`} aria-label={`${agent.name}, ${status}: settings`} onClick={onOpen}>
       {agent.viewOnly ? <Eye size={13} className="agent-row-eye" aria-hidden="true"/> : <span className="activity-dot" data-state={state && state !== 'idle' ? state : undefined} aria-hidden="true"/>}
       <span className="agent-row-text"><span className="agent-row-name">{agent.name}</span>{model && <span className="agent-row-model">{model}</span>}</span>
-      <span className="sr-only">, {status}</span>
     </button>
     {actions && <AgentActionsMenu agent={agent} actions={actions} open={open} onOpenChange={setOpen}>
-      <button type="button" className="row-menu" aria-label={`Settings for ${agent.name}`}><Ellipsis size={16} aria-hidden="true"/></button>
+      <button type="button" className="row-menu" aria-label={`Actions for ${agent.name}`}><Ellipsis size={16} aria-hidden="true"/></button>
     </AgentActionsMenu>}
   </div>;
 }

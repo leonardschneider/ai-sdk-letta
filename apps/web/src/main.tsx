@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantRuntimeProvider, ComposerPrimitive, type AssistantRuntime, MessageNotSentError, ThreadPrimitive, useAuiEvent, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadData, type ThreadMessageLike } from '@assistant-ui/react';
-import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
+import { AppWindow, ArchiveRestore, ArrowDown, ArrowUp, Blocks, Eye, FolderTree, Menu, Settings, PanelLeftOpen, Paperclip, Square, SquarePen, TriangleAlert, X } from 'lucide-react';
 import { ActivityPill, useActivitySummary, useAgentActivity } from './activity.js';
 import { CurrentUser, MembersDialog, NoAccess, QueueList, TypingLine, type QueuedTurn } from './team.js';
 import { ReplyModeMenu } from './reply-mode-menu.js';
@@ -19,8 +19,10 @@ import { AutomationsDialog, AutomationsRow } from './automations.js';
 import { api, apiPath, errorCode, metadataError, setAgentBase, setCsrf, setCsrfHeader, uploadFile, uuid, type AgentInfo, type Person, type Session } from './api.js';
 import { activityTimes, DEFAULT_TITLE, deriveTitle, isDefaultTitle, nextAfterArchive, sortThreads, type ThreadSummary } from './thread-model.js';
 import { Sidebar, type Nav } from './sidebar.js';
-import { AgentActionsMenu, type AgentActions } from './agents-nav.js';
+import type { AgentActions } from './agents-nav.js';
 import { NEW_CHAT, openPlan, savedThreadKey } from './nav-model.js';
+import { SettingsPage } from './settings.js';
+import { settingsAgent, settingsHash, settingsPlan, settingsTarget } from './settings-model.js';
 import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
@@ -78,12 +80,13 @@ function Root() {
       const loaded = await api<Session>('/session');
       if (loaded.csrf) setCsrf(loaded.csrf);
       if (loaded.mode === 'team') {
-        const saved = localStorage.getItem(AGENT_SAVED);
+        const saved = settingsTarget(location.hash, loaded.agents.map(a => a.id)) ?? localStorage.getItem(AGENT_SAVED);
         const chosen = loaded.agents.find(a => a.id === saved) ?? loaded.agents[0];
         setAgentBase(chosen?.id); setAgentId(chosen?.id);
       } else if (loaded.adoption) {
         // Single-user app with adopted agents: the app's own agent lives at /api, adopted ones at /api/agents/<id>.
-        const wanted = prefer ?? localStorage.getItem(AGENT_SAVED);
+        // A settings page in the URL (a reload) opens its agent.
+        const wanted = prefer ?? settingsTarget(location.hash, [loaded.agent.id, ...(loaded.agents ?? []).map(a => a.id)]) ?? localStorage.getItem(AGENT_SAVED);
         const chosen = loaded.agents?.find(a => a.id === wanted);
         if (prefer) localStorage.setItem(AGENT_SAVED, prefer);
         setAgentBase(chosen?.id); setAgentId(chosen?.id ?? loaded.agent.id);
@@ -127,6 +130,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [projectOf, setProjectOf] = useState<AgentInfo>();
   const [toolsOf, setToolsOf] = useState<AgentInfo>();
   const [modelOf, setModelOf] = useState<AgentInfo>();
+  // The agent's settings page, in place of the conversation (`#/agents/<id>/settings`, so a reload keeps it).
+  const [settingsOpen, setSettingsOpen] = useState(() => settingsAgent(location.hash) === agent.id);
   const isAdmin = agent.role === 'admin';
   const [queue, setQueue] = useState<QueuedTurn[]>([]);
   const [liveAuthor, setLiveAuthor] = useState<Author>();
@@ -738,7 +743,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     onNew: send, onCancel: cancel, unstable_enableToolInvocations: false,
     adapters: { attachments, threadList: {
       threadId: current.id, isLoading: listLoading, threads: adapterThreads, archivedThreads: adapterArchived,
-      onSwitchToThread: id => select(id), onSwitchToNewThread: () => { if (!agentRef.current.viewOnly) startDraft(); },
+      onSwitchToThread: id => { closeSettingsRef.current(); return select(id); }, onSwitchToNewThread: () => { closeSettingsRef.current(); if (!agentRef.current.viewOnly) startDraft(); },
       onRename: (id, title) => rename(id, title), onArchive: id => archive(id), onUnarchive: id => restore(id),
     } },
   });
@@ -814,6 +819,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
       if (event.key === 'Escape' && !event.defaultPrevented) {
         if (document.querySelector('[role="menu"], [role="dialog"]')) return;
         if (drawer) { setDrawer(false); return; }
+        // The settings page handles its own Escape (back to the conversation).
+        if (settingsOpen) return;
         // A full-screen view handles its own Escape (it is above everything); picture-in-picture does not hold it.
         if (appOverlay?.mode === 'fullscreen') return;
         if (narrow && sideDrawer) { setSideDrawer(false); return; }
@@ -886,16 +893,42 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [team, local, agent.id]);
   /** The ⋯ menu of an agent (the Agents section and the breadcrumb): the adoption dialogs, or Members… on a team server (the current agent). */
+  const switcherOf = team ?? local;
+  /** Open an agent's settings page: in place for this agent, else after switching to it (the remounted app reads the hash). */
+  const openSettings = (agentId: string) => {
+    if (narrow) setDrawer(false);
+    if (location.hash !== settingsHash(agentId)) history.pushState(null, '', settingsHash(agentId));
+    if (agentId === agent.id) { setSettingsOpen(true); return; }
+    switcherOf?.onSwitch(agentId);
+  };
+  /** Back to the conversation (the link, Escape, picking a conversation). */
+  const closeSettings = () => {
+    if (settingsAgent(location.hash)) history.pushState(null, '', location.pathname + location.search);
+    setSettingsOpen(false);
+  };
+  const closeSettingsRef = useRef(closeSettings); closeSettingsRef.current = closeSettings;
+  // Back and forward follow the hash.
+  useEffect(() => {
+    const onHash = () => {
+      const plan = settingsPlan(agentRef.current.id, location.hash);
+      if (plan.kind === 'switch') { (team ?? local)?.onSwitch(plan.agentId); return; }
+      setSettingsOpen(plan.kind === 'open');
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const actionsFor = (target: AgentInfo): AgentActions | undefined => {
-    if (team) return target.id === agent.id ? { onMembers: () => setMembersOpen(true) } : undefined;
+    const onSettings = (a: AgentInfo) => openSettings(a.id);
+    if (team) return target.id === agent.id ? { onSettings, onMembers: () => setMembersOpen(true) } : { onSettings };
     if (!local) return undefined;
     const close = () => { if (narrow) setDrawer(false); };
-    return { onModel: a => { close(); setModelOf(a); }, onTools: a => { close(); setToolsOf(a); }, onProject: a => { close(); setProjectOf(a); }, onInstructions: a => { close(); setInstructionsOf(a); }, onRemove: a => { close(); setRemoving(a); }, onViewOnly: (a, value) => void setViewOnly(a, value) };
+    return { onSettings, onModel: a => { close(); setModelOf(a); }, onTools: a => { close(); setToolsOf(a); }, onProject: a => { close(); setProjectOf(a); }, onInstructions: a => { close(); setInstructionsOf(a); }, onRemove: a => { close(); setRemoving(a); }, onViewOnly: (a, value) => void setViewOnly(a, value) };
   };
-  const switcherOf = team ?? local;
   const nav: Nav | undefined = navAgents && switcherOf && navAgents.length > 0 ? {
-    agents: navAgents, lists: otherLists, activity: summary.agents, actionsFor,
+    agents: navAgents, lists: otherLists, activity: summary.agents, actionsFor, onSettings: openSettings, ...(settingsOpen ? { settingsOf: agent.id } : {}),
     onOpen: (agentId, threadId) => {
+      closeSettings();
       const plan = openPlan(agent.id, agentId, threadId, { team: !!team, adopted: !!navAgents.find(a => a.id === agentId)?.adopted });
       if (plan.kind === 'select') { setDrawer(false); if (plan.threadId !== current.id) void select(plan.threadId); return; }
       if (plan.kind === 'new') { startDraft(); return; }
@@ -903,8 +936,6 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     },
     ...(local ? { onAdd: () => { if (narrow) setDrawer(false); setAdoptOpen(true); } } : {}),
   } : undefined;
-  const [crumbMenu, setCrumbMenu] = useState(false);
-  const crumbActions = nav ? actionsFor(agent) : undefined;
   const bell = decisionsEnabled ? <DecisionBell decisions={feed.decisions} showAgent={(!!team && team.agents.length > 1) || (!!local && local.agents.length > 1)} {...(team ? { me: { id: team.user.id, name: team.user.name } } : {})} onOpen={openDecision}/> : undefined;
 
   const title = current.draft ? 'New chat' : selected?.title ?? '';
@@ -946,11 +977,12 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="layout" data-drawer={drawer || undefined} data-side-drawer={(narrow && sideOpen) || undefined} data-sidebar-collapsed={(!narrow && !layout.sidebar) || undefined} data-side-open={(!narrow && sideOpen) || undefined}
         data-loading={loading || listLoading || undefined} data-running={running || undefined} data-editing={editing ? true : undefined} style={{ '--side-width': `${side.width}px` } as React.CSSProperties}>
-        <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}>
+        <aside id="sidebar" className="sidebar" aria-label="Sidebar" inert={!narrow && !layout.sidebar ? true : undefined}
+          onClickCapture={event => { if (settingsOpen && (event.target as HTMLElement).closest('.thread-trigger, .new-chat')) closeSettings(); }}>
           <Sidebar active={active} archived={archived} times={times} query={query} onQuery={setQuery} searchRef={searchRef} busy={busy} {...(viewOnly ? { newHidden: true } : {})} runningId={team ? undefined : liveThread} archivingIds={archiving} isDraft={current.draft} onClose={() => setDrawer(false)} onCollapse={() => setLayout(l => ({ ...l, sidebar: false }))} agent={agent} versions={versions}
             agentLatex={resolveLatex(agentLatex, 'inherit')} onLatex={(id, value) => void setLatex(id, value)} actions={bell}
             {...(nav ? { nav } : {})}
-            footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
+            footer={<>{appsEnabled && (!team || isAdmin) && <AppsRow onOpen={() => { if (narrow) setDrawer(false); setAppsOpen(true); }}/>}{memoryEnabled && <MemoryRow pending={memoryPending} onOpen={() => { if (narrow) setDrawer(false); setMemoryOpen(true); }}/>}{mayManageAutomations && <AutomationsRow onOpen={() => setAutomationsOpen(true)}/>}{atlassianEnabled && <AtlassianRow status={atlassianStatus} onOpen={() => setAtlassianOpen(true)}/>}{!nav && !connecting && !unreachable && <button type="button" className="integration-row settings-row" data-active={settingsOpen || undefined} aria-label={`Settings of ${agent.name}`} onClick={() => openSettings(agent.id)}><span className="integration-mark" aria-hidden="true"><Settings size={13}/></span><span className="integration-label">Settings</span></button>}{team && <CurrentUser user={team.user} role={agent.role}/>}</>}/>
         </aside>
         <div className="scrim" aria-hidden="true" onClick={() => { setDrawer(false); setSideDrawer(false); }}/>
         <main className="main">
@@ -960,24 +992,26 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
               <button type="button" className="icon-btn" aria-label="Show sidebar" aria-controls="sidebar" aria-expanded="false" title="Show sidebar (⌘B)" onClick={toggleSidebar}><PanelLeftOpen size={18}/></button>
               {!viewOnly && <button type="button" className="icon-btn" aria-label="New chat" title="New chat (⌘K)" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>}
             </>}
-            {nav ? <nav className="breadcrumb" aria-label="Breadcrumb">
-              {crumbActions ? <AgentActionsMenu agent={agent} actions={crumbActions} open={crumbMenu} onOpenChange={setCrumbMenu}>
-                <button type="button" className="crumb-agent" title={`${agent.name}: settings`}>{agent.name}</button>
-              </AgentActionsMenu> : <span className="crumb-agent">{agent.name}</span>}
+            {nav || settingsOpen ? <nav className="breadcrumb" aria-label="Breadcrumb" data-settings={settingsOpen || undefined}>
+              <button type="button" className="crumb-agent" title={`${agent.name}: settings`} aria-current={settingsOpen ? 'page' : undefined} disabled={connecting || unreachable} onClick={() => openSettings(agent.id)}>{agent.name}</button>
               <span className="crumb-sep" aria-hidden="true">&gt;</span>
-              <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>
+              {settingsOpen ? <h1 className="topbar-title">Settings</h1> : <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>}
             </nav> : <h1 className="topbar-title" title={titleText(title)}><TitleView title={title}/></h1>}
             {!connecting && !unreachable && <ActivityPill activity={activity} others={otherAgents} narrow={narrow} onOpenThread={id => { if (id !== current.id) void select(id); }} onChanged={reloadActivity}/>}
-            {team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
+            {!settingsOpen && team && !current.draft && selected?.state === 'ready' && selected.replyModeInEffect && <ReplyModeMenu value={selected.replyMode ?? 'inherit'} inEffect={selected.replyModeInEffect} agentDefault={agent.replyMode} members={selected.members}
               showListened={showListened} onShowListened={setShowListened} onChange={value => void setReplyMode(selected.id, value)}/>}
             {viewOnly && <span className="live-badge" role="status" title="View only: changes made in Letta Code appear here live"><span className="live-dot" aria-hidden="true"/>Live</span>}
-            {memoryEnabled && !viewOnly && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
-            {!current.draft && !viewOnly && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
+            {!settingsOpen && memoryEnabled && !viewOnly && !current.draft && selected?.state === 'ready' && <TrustMenu value={selected.trustJiminy ?? 'inherit'} agentDefault={!!agent.trustJiminy} mayChange={!team || isAdmin} onChange={value => void setTrust(selected.id, value)}/>}
+            {!settingsOpen && !current.draft && !viewOnly && selected?.state === 'ready' && <LatexMenu value={selected.latex ?? 'inherit'} agentDefault={resolveLatex(agentLatex, 'inherit')} onChange={value => void setLatex(selected.id, value)}/>}
             {webDevEnabled && !current.draft && <button type="button" className="icon-btn preview-btn" aria-label={previewOpen ? 'Hide preview' : 'Show preview'} aria-controls="side-panel" aria-expanded={previewOpen} data-active={previewOpen || undefined} data-live={devServerRunning(previewStatus) || undefined} title={devServerRunning(previewStatus) ? 'Preview (dev server running)' : 'Preview'} onClick={() => toggleTab('preview')}><AppWindow size={18}/></button>}
             {resourcesEnabled && <button type="button" className="icon-btn resources-btn" aria-label={resourcesOpen ? 'Hide resources' : 'Show resources'} aria-controls="side-panel" aria-expanded={resourcesOpen} data-active={resourcesOpen || undefined} title={`Resources (${navigator.platform.startsWith('Mac') ? '⌘⇧E' : 'Ctrl+Shift+E'})`} onClick={toggleResources}><FolderTree size={18}/></button>}
             {!viewOnly && <button type="button" className="icon-btn menu-btn" aria-label="New chat" disabled={busy} onClick={startDraft}><SquarePen size={18}/></button>}
           </header>
-          <ThreadPrimitive.Root className="thread">
+          {settingsOpen && <SettingsPage agent={agent} team={!!team} onBack={closeSettings} onSaved={() => local?.reload(agent.id)}
+            {...(local && agent.adopted ? { onViewOnly: (value: boolean) => void setViewOnly(agent, value), onRemove: () => setRemoving(agent) } : {})}
+            onAppsChanged={() => setAppsVersion(v => v + 1)} viewPolicy={viewPolicy} onViewPolicy={setViewPolicy}
+            onOpenThread={id => { closeSettings(); if (id !== current.id) void select(id); }}/>}
+          <ThreadPrimitive.Root className="thread" hidden={settingsOpen}>
             <ThreadPrimitive.Viewport className="viewport">
               <div className="column">
                 {!messages.length && (loading
@@ -1069,7 +1103,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         </aside>}
         {membersOpen && team && <MembersDialog agent={agent} onClose={() => setMembersOpen(false)}/>}
         {adoptOpen && local && <AddAgentDialog onClose={() => setAdoptOpen(false)} onAdded={id => { setAdoptOpen(false); local.reload(id); }}/>}
-        {removing && local && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(undefined)} onRemoved={() => { setRemoving(undefined); local.reload(); }}/>}
+        {removing && local && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(undefined)} onRemoved={() => { setRemoving(undefined); if (settingsAgent(location.hash) === removing.id) history.replaceState(null, '', location.pathname + location.search); local.reload(); }}/>}
         {instructionsOf && <InstructionsDialog agent={instructionsOf} onClose={() => setInstructionsOf(undefined)}/>}
         {toolsOf && local && <ToolsDialog agent={toolsOf} onClose={() => setToolsOf(undefined)} onSaved={() => { setToolsOf(undefined); local.reload(toolsOf.id); }}/>}
         {modelOf && local && <ModelDialog agent={modelOf} onClose={() => setModelOf(undefined)} onSaved={() => { setModelOf(undefined); local.reload(modelOf.id); }}/>}
