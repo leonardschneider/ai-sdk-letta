@@ -82,12 +82,12 @@ export function SettingsPage(props: SettingsProps) {
               <span><strong>View only</strong><span className="adopt-meta">Watch it work in Letta Code: conversations update live, nothing is sent from here.</span></span>
             </label>}
           </>)}
-          {section('tools', <p className="modal-text">What {agent.name} can do in this app. Every tool call follows the app’s permissions. Once its instructions were applied, the app keeps them current after a change.</p>, <>
-            <ToolsPanel key={(agent.adopted?.tools ?? []).join()} agent={agent} onSaved={props.onSaved}/>
-            <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>
+          {section('tools', <p className="modal-text">{agent.adopted ? <>What {agent.name} can do in this app. Every tool call follows the app’s permissions. Once its instructions were applied, the app keeps them current after a change.</> : <>{agent.name} is defined in code: you can make a tool ask before each call, or turn it off. Loosening is done in code.</>}</p>, <>
+            <ToolsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent} onSaved={props.onSaved}/>
+            {agent.adopted && <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>}
           </>)}
           {section('instructions', <p className="modal-text">A short section appended to {agent.name}’s system prompt: the tools it has in this app, and how its memory is protected here. Nothing else changes, and you can undo it.</p>,
-            <InstructionsPanel key={(agent.adopted?.tools ?? []).join()} agent={agent}/>)}
+            <InstructionsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent}/>)}
           {section('apps', <p className="modal-text">MCP Apps installed for this agent. Each runs in its own container without network access; its views run in a sandbox on their own origin.</p>,
             <AppsPanel onChanged={props.onAppsChanged} {...(props.viewPolicy ? { viewPolicy: props.viewPolicy } : {})} {...(props.onViewPolicy ? { onViewPolicy: props.onViewPolicy } : {})}/>)}
           {section('memory', <MemoryIntro agentName={agent.name} viewOnly={viewOnly}/>, <MemoryPanel admin={!viewOnly && admin} onOpenThread={props.onOpenThread}/>)}
