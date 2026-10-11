@@ -204,7 +204,7 @@ function projectOf(definition: AgentDefinition<ToolSet>): string | undefined {
   return path;
 }
 
-function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps, jobs?: JobDesk, overrides?: DefinitionToolOverrides<TOOLS>): RuntimeHost {
+function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDirectory: string, scheduler?: TaskScheduler, decisions?: DecisionDesk, webSearch?: OpenAgentOptions['webSearch'], memory?: MemoryWiring, webDev?: WebDevRegistry, apps?: McpApps, jobs?: JobDesk, overrides?: DefinitionToolOverrides<TOOLS>, innerVoices?: OpenAgentOptions['innerVoices']): RuntimeHost {
   let runtime: LettaRuntime<TOOLS> | undefined;
   const project = projectOf(definition as AgentDefinition<ToolSet>);
   return {
@@ -214,7 +214,7 @@ function host<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, stateDi
       // The single-user GUI and API act for the local user (their own Atlassian connection, if any).
       // Per-tool overrides (tighten only) apply when a session opens; a change since reopens it before the next turn.
       const opened = overrides?.version;
-      runtime = await createLettaAgent(overrides?.effective() ?? definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}) });
+      runtime = await createLettaAgent(overrides?.effective() ?? definition, { ...options, stateDirectory, foregroundExternalTools: true, ...(scheduler ? { scheduler } : {}), ...(decisions ? { decisions } : {}), ...(jobs ? { jobs } : {}), ...(webSearch ? { webSearch } : {}), ...(memory ? { memoryReview: { events: memory.events, model: memory.model } } : {}), ...(webDev ? { webDev: { registry: webDev } } : {}), ...(apps ? { mcpApps: { apps } } : {}), ...(innerVoices ? { innerVoices } : {}) });
       const { agent } = runtime;
       if (!agent.lettaAgentId || !agent.presentation) throw new Error('Runtime identity unavailable');
       return { agent, agentId: agent.lettaAgentId, conversationId: agent.presentation.conversationId, history: agent.presentation.initialMessages, rewind: runtime.rewind, memory: runtime.memory, harnessCommand: runtime.harnessCommand, ...(runtime.toolsStale || overrides ? { toolsStale: () => (overrides ? overrides.version !== opened : false) || !!runtime?.toolsStale?.() } : {}) };
@@ -312,11 +312,14 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const info: GuiAgentInfo = { ...agentInfo(definition), toolControl: true };
     const toolOverrides = new DefinitionToolOverrides(definition, stateDirectory, effective => { info.approvalTools = Object.keys(effective.permissions).filter(name => effective.permissions[name] === 'ask'); });
     info.approvalTools = Object.keys(toolOverrides.effective().permissions).filter(name => toolOverrides.effective().permissions[name] === 'ask');
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    // The inner_voices tool is offered while the voices are on and the agent decides (read from the runtime set below).
+    let voicesOf: ThreadRuntime | undefined;
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides, () => voicesOf?.innerVoicesBounds()), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     // The inner voices (Ambition and Prudence) of the app's own agent: off until turned on (<state>/server/<id>/voices.json).
     const voiceSettings = new DefinitionVoices(definition.id, stateDirectory, settings => { const on = enabledVoices(settings); if (on.length) info.voices = on; else delete info.voices; });
     if (enabledVoices(voiceSettings.get()).length) info.voices = enabledVoices(voiceSettings.get());
     runtime.voices = voiceCounsellor({ settings: () => voiceSettings.get(), agentModel: () => definition.model, directory: join(directory, 'voices') });
+    voicesOf = runtime;
     const { webDev, apps } = dev;
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
@@ -345,7 +348,9 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
         const wiring = memoryWiring(adopted, folder);
         // Its own web development services and MCP App servers (web_dev, mcp_app_dev), on the shared preview listener.
         const services = devServices(adopted, stateDirectory, log);
-        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps, adoptedJobs.desk), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        let voicesOf: ThreadRuntime | undefined;
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps, adoptedJobs.desk, undefined, () => voicesOf?.innerVoicesBounds()), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        voicesOf = hosted;
         const member = services.bind(hosted, { owner, directory: folder, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port });
         previewMembers.add(member);
         const hostedBoard = desk.bind(hosted, folder, owner);

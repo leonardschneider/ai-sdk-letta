@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { jsonSchema, tool, type Tool } from 'ai';
 import { sweepTemporaryAgents, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
 import { askTemporaryAdvisor, inert } from './temporary-advisor.js';
 
@@ -90,8 +91,36 @@ export const PRUDENCE_PERSONA = [
 /** Persona of each voice. */
 export const VOICE_PERSONAS: Readonly<Record<VoiceName, string>> = Object.freeze({ ambition: AMBITION_PERSONA, prudence: PRUDENCE_PERSONA });
 
-/** What the voices weigh: the person's goal or last message, the agent's latest reply or plan, and recent tool results (each bounded). */
-export type CounselRequest = { goal: string; reply: string; toolResults?: string };
+/**
+ * How the voices review a turn: `calibrated` (their personas as they are) or
+ * `debate` (a paired stance: Prudence prosecutes the answer with specific,
+ * checkable objections; Ambition defends it). Still independent in both:
+ * neither sees nor names the other.
+ */
+export const VOICE_MODES = Object.freeze(['calibrated', 'debate'] as const);
+export type VoiceMode = typeof VOICE_MODES[number];
+
+/** What each voice is told on top of its persona in `debate` mode. */
+export const DEBATE_ADDENDA: Readonly<Record<VoiceName, string>> = Object.freeze({
+  prudence: [
+    'Debate stance for this review: you prosecute. Try to show that the reply is wrong, unsupported or incomplete.',
+    'Every objection must be specific and checkable: a concrete counterexample, a check or test that would fail, a missing case, a number that does not add up, or a claim with no evidence in the data. Vague doubt ("might be wrong", "consider risks", "double-check") is not allowed; if you cannot make an objection checkable, leave it out.',
+    'If you find nothing checkable against the reply, say so in one point with low confidence instead of inventing objections.',
+  ].join('\n'),
+  ambition: [
+    'Debate stance for this review: you defend. Steelman the reply: state its strongest form and why its core should stand.',
+    'Say which objections someone could raise that would be weak or irrelevant here, and why. Do not invent a critic or quote one; argue from the reply and the data alone.',
+    'Then say how to strengthen the reply (a sharper claim, the evidence to add, the next step) without abandoning what is right in it.',
+  ].join('\n'),
+});
+
+/** A voice's system prompt in a mode: its persona, plus the debate addendum in `debate`. */
+export function voicePersona(voice: VoiceName, mode: VoiceMode = 'calibrated'): string {
+  return mode === 'debate' ? `${VOICE_PERSONAS[voice]}\n${DEBATE_ADDENDA[voice]}` : VOICE_PERSONAS[voice];
+}
+
+/** What the voices weigh: the person's goal or last message, the agent's latest reply or plan, and recent tool results (each bounded); `mode`: their stance (default `calibrated`). */
+export type CounselRequest = { goal: string; reply: string; toolResults?: string; mode?: VoiceMode };
 /** Bounds of a counsel's input. */
 export const COUNSEL_LIMITS = Object.freeze({ goal: 4000, reply: 8000, toolResults: 4000 });
 
@@ -142,19 +171,45 @@ export async function counsel(request: CounselRequest, voices: Partial<Record<Vo
   return Object.fromEntries(outcomes) as Counsel;
 }
 
-/** Suffix of the OTID of a turn's hidden reflection prompt: `<run id>:reflect` (see {@link reflectionPrompt}). */
+/** Suffix of the OTID of a turn's hidden reflection prompt: `<run id>:reflect` (round 1), `<run id>:reflect2`, `<run id>:reflect3` (see {@link reflectionPrompt}). */
 export const REFLECTION_OTID_SUFFIX = ':reflect';
+/** Most revision rounds a turn may take (the `maxRevisions` setting is 1 to this). */
+export const MAX_REVISIONS = 3;
+/** The OTID suffix of a reflection round (1-based). */
+export const reflectionOtidSuffix = (round = 1) => round > 1 ? `${REFLECTION_OTID_SUFFIX}${round}` : REFLECTION_OTID_SUFFIX;
+/** The round of a reflection prompt's OTID (`…:reflect` 1, `…:reflect2` 2, `…:reflect3` 3), else undefined. */
+export function reflectionRound(otid: unknown): number | undefined {
+  if (typeof otid !== 'string' || !/^[A-Za-z0-9._:-]{1,100}$/.test(otid)) return undefined;
+  const match = /:reflect([2-9])?$/.exec(otid);
+  if (!match) return undefined;
+  const round = match[1] ? Number(match[1]) : 1;
+  return round <= MAX_REVISIONS ? round : undefined;
+}
 /** The reflection's answer when the draft stands as is. */
 export const REFLECTION_KEEP = 'KEEP';
-/** Whether a reflection's text means "keep the draft" (`KEEP`, any case, an optional final period). */
-export const keepsDraft = (text: string) => /^\s*keep\.?\s*$/i.test(text) || !text.trim();
+/**
+ * Whether a reflection's text means "keep the draft": `KEEP` (any case, an
+ * optional final period), nothing, or `KEEP` followed by a separator (`:`,
+ * `-`, `–`, `—`) and a one-line rebuttal (debate mode asks for one; see
+ * {@link rebuttalOf}). Never shown to the person as a reply.
+ */
+export const keepsDraft = (text: string): boolean => /^\s*keep\.?\s*$/i.test(text) || !text.trim() || rebuttalOf(text) !== undefined;
+/** The one-line rebuttal of a debate KEEP (`KEEP — the counterexample assumes…`), at most 300 characters; else undefined. */
+export function rebuttalOf(text: string): string | undefined {
+  const match = /^\s*keep\s*[:\-–—]\s*([^\n]{1,300})\s*$/i.exec(text);
+  return match?.[1]?.trim() || undefined;
+}
+/** Where a reflection prompt stands: the stance, and the round (1-based) of how many at most. */
+export type ReflectionContext = { mode?: VoiceMode; round?: number; maxRounds?: number };
 /**
  * The hidden prompt of a turn's reflection step: the voices' notes on the
- * draft reply, and the instruction to revise it or answer exactly `KEEP`.
- * Failed voices are left out; undefined when none answered. It is sent as a
- * `<system-reminder>` only, so display history never shows it as a message.
+ * draft reply (or, after round 1, on the latest revision), and the
+ * instruction to revise it or answer `KEEP` (in `debate`, `KEEP` may carry a
+ * one-line rebuttal). Failed voices are left out; undefined when none
+ * answered. It is sent as a `<system-reminder>` only, so display history
+ * never shows it as a message.
  */
-export function reflectionPrompt(notes: Counsel): string | undefined {
+export function reflectionPrompt(notes: Counsel, context: ReflectionContext = {}): string | undefined {
   const lines: string[] = [];
   for (const name of VOICES) {
     const note = notes[name];
@@ -163,8 +218,95 @@ export function reflectionPrompt(notes: Counsel): string | undefined {
     lines.push(`${label} (${note.confidence} confidence): ${note.points.map(p => p.replace(/\s+/g, ' ')).join(' / ')}${note.suggestion ? ` Suggestion: ${note.suggestion.replace(/\s+/g, ' ')}` : ''}`);
   }
   if (!lines.length) return undefined;
-  return ['<system-reminder>', 'Your inner voices reviewed your draft reply (advisory; they may be wrong):', ...lines.map(line => line.replace(/<\/?system-reminder[^>]*>/gi, '')),
-    `Reflect. If your reply should change, write the complete revised reply now (it replaces the draft for the person); you may use tools first. If it stands as is, answer exactly ${REFLECTION_KEEP}.`, '</system-reminder>'].join('\n');
+  const round = context.round ?? 1;
+  const what = round > 1 ? 'your revised reply' : 'your draft reply';
+  const intro = context.mode === 'debate'
+    ? `Your inner voices debated ${what} (advisory; they may be wrong). Prudence argued against it with checkable objections; Ambition defended it:`
+    : `Your inner voices reviewed ${what} (advisory; they may be wrong):`;
+  const keep = context.mode === 'debate'
+    ? `If it stands, answer ${REFLECTION_KEEP} followed by a one-line rebuttal of the strongest objection (for example: ${REFLECTION_KEEP} — the counterexample assumes a case the person ruled out).`
+    : `If it stands as is, answer exactly ${REFLECTION_KEEP}.`;
+  const more = context.maxRounds && round < context.maxRounds ? ' A revision is reviewed again.' : '';
+  return ['<system-reminder>', intro, ...lines.map(line => line.replace(/<\/?system-reminder[^>]*>/gi, '')),
+    `Reflect. If your reply should change, write the complete revised reply now (it replaces the previous version for the person); you may use tools first.${more} ${keep}`, '</system-reminder>'].join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* The agent chooses the review per turn, within the person's bounds   */
+/* ------------------------------------------------------------------ */
+
+/** Name of the always-allowed tool the agent calls to choose how its inner voices review this turn. */
+export const INNER_VOICES_TOOL = 'inner_voices';
+/** What the agent may choose: skip the review this turn, or a mode. */
+export const VOICE_CHOICES = Object.freeze(['skip', 'calibrated', 'debate'] as const);
+export type VoiceChoice = typeof VOICE_CHOICES[number];
+/** The lowest review a turn gets: none, calibrated when the turn used a tool (other than {@link INNER_VOICES_TOOL}), calibrated, or debate. */
+export const VOICE_MINIMUMS = Object.freeze(['none', 'calibrated_if_tools', 'calibrated', 'debate'] as const);
+export type VoiceMinimum = typeof VOICE_MINIMUMS[number];
+/** The person's bounds of a turn's review, and the mode when the agent does not choose. */
+export type VoiceBounds = { minimum: VoiceMinimum; maximum: VoiceMode; defaultMode: VoiceChoice };
+const RANK: Readonly<Record<VoiceChoice, number>> = Object.freeze({ skip: 0, calibrated: 1, debate: 2 });
+const CHOICE_OF: readonly VoiceChoice[] = ['skip', 'calibrated', 'debate'];
+/** The rank of a minimum (`calibrated_if_tools`: calibrated when the turn used tools, else none). */
+export const minimumRank = (minimum: VoiceMinimum, usedTools: boolean) => minimum === 'none' ? 0 : minimum === 'calibrated_if_tools' ? (usedTools ? 1 : 0) : RANK[minimum];
+/** A choice clamped to the bounds: raised to the minimum (a `skip` below it too), lowered to the maximum. */
+export function clampVoiceChoice(choice: VoiceChoice, bounds: Pick<VoiceBounds, 'minimum' | 'maximum'>, usedTools: boolean): VoiceChoice {
+  return CHOICE_OF[Math.min(Math.max(RANK[choice], minimumRank(bounds.minimum, usedTools)), RANK[bounds.maximum])]!;
+}
+/** Whether bounds are consistent: minimum ≤ maximum, and the default between them (`calibrated_if_tools` allows a `skip` default). */
+export function validVoiceBounds(bounds: VoiceBounds): boolean {
+  const low = bounds.minimum === 'calibrated_if_tools' ? 0 : minimumRank(bounds.minimum, true);
+  return minimumRank(bounds.minimum, true) <= RANK[bounds.maximum] && RANK[bounds.defaultMode] >= low && RANK[bounds.defaultMode] <= RANK[bounds.maximum];
+}
+/** The input of {@link INNER_VOICES_TOOL}. */
+export type InnerVoicesInput = { mode: VoiceChoice; reason: string };
+/** Bounds of the tool's reason. */
+export const INNER_VOICES_REASON_MAX = 200;
+/** Validate the tool's input, else undefined. */
+export function parseInnerVoices(input: unknown): InnerVoicesInput | undefined {
+  const o = input as Record<string, unknown> | null;
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return undefined;
+  if (!VOICE_CHOICES.includes(o.mode as VoiceChoice) || typeof o.reason !== 'string') return undefined;
+  const reason = o.reason.replace(/\s+/g, ' ').trim();
+  if (reason.length < 1 || reason.length > INNER_VOICES_REASON_MAX) return undefined;
+  return { mode: o.mode as VoiceChoice, reason };
+}
+/** What the agent is told about inner_voices (with the voices on and the agent deciding). */
+export const VOICES_NOTE = 'Use inner_voices to choose how your inner voices review this turn: skip trivial replies, debate claims, plans and results; you may only skip for this turn.';
+/** The tool's result: the mode in effect for this turn (as far as known when called). */
+export type InnerVoicesOutput = { ok: true; requested: VoiceChoice; mode: VoiceChoice; note: string } | { ok: false; error: string };
+/**
+ * The {@link INNER_VOICES_TOOL} tool: the agent chooses how its inner voices
+ * review this turn (`skip`, `calibrated`, `debate`) with a short reason. Its
+ * last call in a turn counts, for that turn only. The result says the
+ * effective mode within the person's `bounds()` (undefined: the voices are
+ * off or the mode is fixed; the call changes nothing).
+ */
+export function innerVoicesTool(bounds: () => VoiceBounds | undefined): Tool<InnerVoicesInput, InnerVoicesOutput> {
+  return tool({
+    description: 'Choose how your inner voices (two advisors) review your reply in this turn, before the person sees it: "skip" (trivial replies, small talk), "calibrated" (a normal review), or "debate" (one argues against the reply with checkable objections, the other defends it: for claims, plans and results). For this turn only; your last call counts. The person sets bounds: the result says the mode in effect.',
+    inputSchema: jsonSchema<InnerVoicesInput>({
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: [...VOICE_CHOICES] },
+        reason: { type: 'string', minLength: 1, maxLength: INNER_VOICES_REASON_MAX, description: 'Why, in a few words (shown to the person).' },
+      },
+      required: ['mode', 'reason'], additionalProperties: false,
+    }),
+    execute: async (input: InnerVoicesInput): Promise<InnerVoicesOutput> => {
+      const request = parseInnerVoices(input);
+      if (!request) return { ok: false, error: 'invalid_input' };
+      const current = bounds();
+      if (!current) return { ok: false, error: 'voices_unavailable' };
+      const mode = clampVoiceChoice(request.mode, current, false);
+      const conditional = current.minimum === 'calibrated_if_tools' && mode === 'skip';
+      const note = mode === request.mode
+        ? `Your inner voices will ${mode === 'skip' ? 'skip this turn' : `review this turn in ${mode} mode`}.${conditional ? ' If you use other tools in this turn, the person\'s minimum raises it to calibrated.' : ''}`
+        : `The person's bounds change "${request.mode}" to "${mode}": your inner voices will ${mode === 'skip' ? 'skip this turn' : `review this turn in ${mode} mode`}.`;
+      return { ok: true, requested: request.mode, mode, note };
+    },
+    toModelOutput: ({ output }: { output: InnerVoicesOutput }) => output.ok ? { type: 'text' as const, value: output.note } : { type: 'error-text' as const, value: output.error === 'voices_unavailable' ? 'Your inner voices are off or their mode is fixed in this turn; nothing changed.' : 'Invalid input: mode is "skip", "calibrated" or "debate", and reason is 1 to 200 characters.' },
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,7 +336,7 @@ export function lettaVoice(options: LettaVoiceOptions): InnerVoice {
     const { output, ...rest } = await askTemporaryAdvisor({
       ...options, kind: KINDS[options.voice], model, signal, timeoutMs: options.timeoutMs ?? VOICE_TIMEOUT_MS, errorPrefix: 'voice', schema: VOICE_NOTE_SCHEMA,
       description: `Temporary: the inner voice ${options.voice === 'ambition' ? 'Ambition' : 'Prudence'} weighs one reply for ai-sdk-letta, then is deleted. No tools, no memory.`,
-      systemPrompt: VOICE_PERSONAS[options.voice], prompt: counselPrompt(request),
+      systemPrompt: voicePersona(options.voice, request.mode), prompt: counselPrompt(request),
     });
     return { ...validateVoiceNote(output), ...rest };
   };
