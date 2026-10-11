@@ -65,6 +65,7 @@ test('turn step: the open tool, thinking, writing, waiting', () => {
   assert.equal(turnStep({ events: [ev('tool_started', { toolCallId: 'a', name: 'x' }), ev('interaction')] }), 'waiting');
   assert.equal(turnStep({ events: [ev('tool_started', { toolCallId: 'a', name: 'x' }), ev('interaction'), ev('interaction_resolved')] }), 'tool:x');
   assert.equal(stepLabel('tool:web_search'), 'Searching the web (summarizing)');
+  assert.equal(stepLabel('reflecting'), 'Reflecting');
   assert.equal(stepLabel('tool:run_command'), 'Running run_command');
   assert.equal(stepLabel(undefined), 'Starting');
 });

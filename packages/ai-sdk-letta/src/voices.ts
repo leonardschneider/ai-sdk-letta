@@ -142,8 +142,19 @@ export async function counsel(request: CounselRequest, voices: Partial<Record<Vo
   return Object.fromEntries(outcomes) as Counsel;
 }
 
-/** A note to show the agent in its next turn (advisory, once). Failed voices are left out; undefined when none answered. */
-export function counselReminder(notes: Counsel): string | undefined {
+/** Suffix of the OTID of a turn's hidden reflection prompt: `<run id>:reflect` (see {@link reflectionPrompt}). */
+export const REFLECTION_OTID_SUFFIX = ':reflect';
+/** The reflection's answer when the draft stands as is. */
+export const REFLECTION_KEEP = 'KEEP';
+/** Whether a reflection's text means "keep the draft" (`KEEP`, any case, an optional final period). */
+export const keepsDraft = (text: string) => /^\s*keep\.?\s*$/i.test(text) || !text.trim();
+/**
+ * The hidden prompt of a turn's reflection step: the voices' notes on the
+ * draft reply, and the instruction to revise it or answer exactly `KEEP`.
+ * Failed voices are left out; undefined when none answered. It is sent as a
+ * `<system-reminder>` only, so display history never shows it as a message.
+ */
+export function reflectionPrompt(notes: Counsel): string | undefined {
   const lines: string[] = [];
   for (const name of VOICES) {
     const note = notes[name];
@@ -152,7 +163,8 @@ export function counselReminder(notes: Counsel): string | undefined {
     lines.push(`${label} (${note.confidence} confidence): ${note.points.map(p => p.replace(/\s+/g, ' ')).join(' / ')}${note.suggestion ? ` Suggestion: ${note.suggestion.replace(/\s+/g, ' ')}` : ''}`);
   }
   if (!lines.length) return undefined;
-  return ['Your inner voices weighed in on your last reply (advisory notes; you decide, and they may be wrong):', ...lines].join('\n');
+  return ['<system-reminder>', 'Your inner voices reviewed your draft reply (advisory; they may be wrong):', ...lines.map(line => line.replace(/<\/?system-reminder[^>]*>/gi, '')),
+    `Reflect. If your reply should change, write the complete revised reply now (it replaces the draft for the person); you may use tools first. If it stands as is, answer exactly ${REFLECTION_KEEP}.`, '</system-reminder>'].join('\n');
 }
 
 /* ------------------------------------------------------------------ */

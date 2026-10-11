@@ -7,7 +7,7 @@ import { Markdown } from './markdown.js';
 import { MessageFile, MessageImage } from './images.js';
 import { IMAGE_PLACEHOLDER } from './attachments.js';
 import { Avatar } from './team.js';
-import type { Listened, MessageApp, MessageAuthor as Author, MessageBackground, MessageSource } from './messages.js';
+import type { Listened, Reflection, MessageApp, MessageAuthor as Author, MessageBackground, MessageSource } from './messages.js';
 import { AppToolLine } from './apps.js';
 import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
@@ -151,6 +151,8 @@ function BubbleMessage({ role, time }: { role: string; time?: string | undefined
   // The inner voices weigh in on a finished reply (the run of the message before it).
   const replyRun = useAuiState(s => (s.message.metadata.custom as { replyRun?: string } | undefined)?.replyRun);
   const finished = useAuiState(s => s.message.status?.type === 'complete' || (s.message.role === 'assistant' && !s.message.status));
+  // The inner voices reviewed the draft and the agent reflected (the visible reply is the final answer).
+  const reflection = useAuiState(s => (s.message.metadata.custom as { reflection?: Reflection } | undefined)?.reflection);
   return <MessagePrimitive.Root className="msg" data-role={role} data-editing={editing || undefined}>
     <MessageAuthor role={role}/>
     <div className="msg-body">
@@ -158,7 +160,7 @@ function BubbleMessage({ role, time }: { role: string; time?: string | undefined
         ? editing ? <EditBubble runId={runId} text={text}/> : <UserBubble/>
         : <AssistantParts/>}
     </div>
-    {role === 'assistant' && finished && <ReplyVoices runId={replyRun}/>}
+    {role === 'assistant' && (finished || reflection) && <ReplyVoices runId={replyRun} reflection={reflection} tools={reflection?.tools?.length ? reflection.tools.map(part => part.type === 'tool-call' ? <PartBoundary key={part.toolCallId} resetKey={part.toolCallId}><ToolPart toolCallId={part.toolCallId!} toolName={part.toolName} argsText={part.argsText ?? '{}'} result={part.result} isError={part.isError}/></PartBoundary> : null) : undefined}/>}
     {!editing && (hasText || time) && <ActionBarPrimitive.Root className="msg-actions" hideWhenRunning autohide="never">
       {hasText && <ActionBarPrimitive.Copy className="icon-btn small copy-btn" aria-label="Copy message" title="Copy">
         <Copy size={14} className="when-idle" aria-hidden="true"/><Check size={14} className="when-copied" aria-hidden="true"/>

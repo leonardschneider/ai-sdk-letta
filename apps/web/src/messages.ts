@@ -119,6 +119,47 @@ export function markListened(message: ThreadMessageLike): ThreadMessageLike {
   return { ...message, content: message.content.filter(part => !isListenedMarker(part)), metadata: { ...message.metadata, custom: { ...message.metadata?.custom, listened: reason ? { reason } : {} } } };
 }
 
+/** Marks where a turn's reflection starts (after the inner voices reviewed the draft): from the server's history and live events. */
+export const REFLECTION = 'data-reflection';
+export type ReflectionOutcome = 'kept' | 'revised' | 'skipped';
+/**
+ * A reply the inner voices reviewed (in `custom.reflection`): `reviewing` (the
+ * voices read the draft), `reflecting` (the agent weighs their notes), or
+ * `done` with its outcome. `draft`: the first reply when it was revised;
+ * `tools`: the reflection's tool calls (shown in the collapsed section).
+ */
+export type Reflection = { state: 'reviewing' | 'reflecting' | 'done'; outcome?: ReflectionOutcome; draft?: string; tools?: Part[] };
+const isReflectionMarker = (part: Part) => (part.type as string) === REFLECTION;
+const textOf = (parts: readonly Part[]) => parts.map(part => part.type === 'text' ? part.text : '').join('');
+/** Mirrors `keepsDraft` in ai-sdk-letta: the reflection kept the draft. */
+export const keepsDraft = (text: string) => /^\s*keep\.?\s*$/i.test(text) || !text.trim();
+export function reflectionOf(message: Pick<ThreadMessageLike, 'metadata'>): Reflection | undefined {
+  return (message.metadata?.custom as { reflection?: Reflection } | undefined)?.reflection;
+}
+/**
+ * One reply with a reflection: the parts before the marker are the draft,
+ * those after it the reflection. The visible reply is the final answer (the
+ * revision's text after the draft's tool calls, or the draft itself); the
+ * rest moves to `custom.reflection`. `live`: what the turn's events say so far
+ * (the voices are reviewing; the outcome once known). Without an outcome,
+ * restored history infers it from the reflection's text (KEEP or a revision).
+ */
+export function markReflection(message: ThreadMessageLike, live?: { reviewing?: boolean; outcome?: ReflectionOutcome }): ThreadMessageLike {
+  if (message.role !== 'assistant' || typeof message.content === 'string') return message;
+  const custom = (reflection: Reflection, content: Part[]): ThreadMessageLike => ({ ...message, content, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, reflection } } });
+  const index = message.content.findIndex(isReflectionMarker);
+  if (index < 0) return live?.outcome ? custom({ state: 'done', outcome: live.outcome }, [...message.content]) : live?.reviewing ? custom({ state: 'reviewing' }, [...message.content]) : message;
+  const marker = message.content[index] as { data?: { outcome?: unknown } };
+  const before = message.content.slice(0, index).filter(part => !isReflectionMarker(part));
+  const after = message.content.slice(index + 1).filter(part => !isReflectionMarker(part));
+  const tools = after.filter(part => part.type === 'tool-call');
+  const recorded = ['kept', 'revised', 'skipped'].includes(String(marker.data?.outcome)) ? marker.data!.outcome as ReflectionOutcome : undefined;
+  const outcome = live ? live.outcome : recorded ?? (keepsDraft(textOf(after)) ? 'kept' : 'revised');
+  if (!outcome) return custom({ state: 'reflecting', tools }, before);
+  if (outcome === 'revised') return custom({ state: 'done', outcome, draft: textOf(before).trim(), tools }, [...before.filter(part => part.type !== 'text'), ...after.filter(part => part.type === 'text')]);
+  return custom({ state: 'done', outcome, tools }, before);
+}
+
 /** A user bubble's content: images first (as the composer shows them), then file chips, then the text. */
 export function userContent(text: string, images: readonly string[] = [], files: readonly FileChip[] = []): Part[] {
   return [...images.map((image): Part => image.startsWith('data:image/') ? { type: 'image', image } : { type: 'text', text: IMAGE_PLACEHOLDER }), ...fileParts(files), ...(text.trim() ? [{ type: 'text' as const, text }] : [])];
@@ -137,6 +178,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
   const converted = visible.map(message => withAuthor(withTime({ id: message.id, role: message.role, content: orderUserParts(message.role, message.parts.flatMap((part): Part[] => {
     if (part.type === 'reasoning' && message.role === 'assistant') return part.text.trim() ? [{ type: 'reasoning', text: part.text }] : [];
     if ((part.type as string) === LISTENED && message.role === 'assistant') return [{ type: LISTENED, data: (part as { data?: unknown }).data ?? {} } as unknown as Part];
+    if ((part.type as string) === REFLECTION && message.role === 'assistant') return [{ type: REFLECTION, data: (part as { data?: unknown }).data ?? {} } as unknown as Part];
     if (part.type === 'text') {
       if (message.role !== 'user') return [{ type: 'text', text: part.text }];
       // The attachment note becomes file chips; the rest stays text.
@@ -153,7 +195,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     }
     return [];
   })) }, knownTime(message)), message.role === 'user' ? knownAuthor(message) : undefined)).map((item, index) => withApp(withRun(withDecision(withSource(item, visible[index]!.role === 'user' ? knownSource(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownOutcome(visible[index]!.metadata) : undefined), visible[index]!.role === 'user' ? knownRun(visible[index]!) : undefined), visible[index]!.role === 'user' ? knownApp(visible[index]!) : undefined)).map((item, index) => withBackground(item, visible[index]!.role === 'user' ? knownBackground(visible[index]!) : undefined));
-  return mergeAssistantRuns(converted).map(markListened);
+  return mergeAssistantRuns(converted).map(markListened).map(message => markReflection(message));
 }
 
 /** Images (and image placeholders), then file chips, then text in user bubbles; assistant parts keep their order. */
@@ -202,7 +244,8 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
       const last = parts.at(-1);
       if (last?.type === 'reasoning') parts[parts.length - 1] = { type: 'reasoning', text: last.text + String(d.text) };
       else parts.push({ type: 'reasoning', text: String(d.text) });
-    } else if (event.type === 'listened') parts.push({ type: LISTENED, data: typeof d.reason === 'string' ? { reason: d.reason } : {} } as unknown as Part);
+    } else if (event.type === 'reflecting' && d.phase === 'reflect') parts.push({ type: REFLECTION, data: {} } as unknown as Part);
+    else if (event.type === 'listened') parts.push({ type: LISTENED, data: typeof d.reason === 'string' ? { reason: d.reason } : {} } as unknown as Part);
     else if (event.type === 'tool_started') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'tool-call' && p.toolCallId === d.toolCallId);
@@ -219,7 +262,7 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
     ? { ...part, isError: true, result: stopped ? 'Turn stopped; the tool was interrupted.' : `Turn ended: ${String(failure!.data.code)}; execution not confirmed.` } : part);
 }
 
-/** Each assistant reply carries the run of the user message before it (`custom.replyRun`): the inner voices are asked about that run. */
+/** Each assistant reply carries the run of the user message before it (`custom.replyRun`): the inner voices' review of that run shows under it. */
 export function withReplyRuns(messages: readonly ThreadMessageLike[]): ThreadMessageLike[] {
   let run: string | undefined;
   return messages.map(message => {

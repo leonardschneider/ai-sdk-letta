@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { dirname } from 'node:path';
 import type { Server } from 'node:http';
 import { DEFAULT_AUTOMATION_FLOOR, LOCAL_USER_ID, MAX_INPUT_CHARACTERS, REPLY_MODES, type ReplyMode, type ScheduleRequest, type ScheduledTask, type TaskScheduler, type TurnActor } from 'ai-sdk-letta';
-import { RuntimeFault, type Run, type RunAuthor, type RunAutomation, type RunSource, type ThreadRuntime } from './runtime.js';
+import { RuntimeFault, runReply, type Run, type RunAuthor, type RunAutomation, type RunSource, type ThreadRuntime } from './runtime.js';
 import { contentDisposition } from './http.js';
 import type { Orchestrator, OrchestratorHandle } from './scheduler.js';
 import type { PublicDecision } from './decisions.js';
@@ -428,7 +428,7 @@ export class AutomationService {
       return { ...base, status: this.starting.has(record.id) ? 'queued' : 'failed', ...(this.starting.has(record.id) ? {} : { error: { code: 'not_sent', message: message('not_sent') } }) };
     }
     const tools = toolsOf(run);
-    const text = run.events.filter(event => event.type === 'text').map(event => String(event.data.text)).join('');
+    const text = runReply(run);
     const ended = !['queued', 'running'].includes(run.status);
     const times = { ...(run.startedAt ? { startedAt: run.startedAt } : {}), ...(run.endedAt ? { endedAt: run.endedAt } : {}) };
     if (!ended) return { ...base, ...times, status: run.status === 'queued' ? 'queued' : 'running', ...(tools.length ? { tools } : {}) };
