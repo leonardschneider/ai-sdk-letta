@@ -124,40 +124,52 @@ export const REFLECTION = 'data-reflection';
 export type ReflectionOutcome = 'kept' | 'revised' | 'skipped';
 /**
  * A reply the inner voices reviewed (in `custom.reflection`): `reviewing` (the
- * voices read the draft), `reflecting` (the agent weighs their notes), or
- * `done` with its outcome. `draft`: the first reply when it was revised;
- * `tools`: the reflection's tool calls (shown in the collapsed section).
+ * voices read the draft), `reflecting` (the agent weighs their notes; after a
+ * revision the voices may review it again), or `done` with its outcome.
+ * `draft`: the first reply when it was revised; `revisions`: how many rounds
+ * revised it; `tools`: the reflections' tool calls (shown in the collapsed section).
  */
-export type Reflection = { state: 'reviewing' | 'reflecting' | 'done'; outcome?: ReflectionOutcome; draft?: string; tools?: Part[] };
+export type Reflection = { state: 'reviewing' | 'reflecting' | 'done'; outcome?: ReflectionOutcome; draft?: string; revisions?: number; tools?: Part[] };
 const isReflectionMarker = (part: Part) => (part.type as string) === REFLECTION;
 const textOf = (parts: readonly Part[]) => parts.map(part => part.type === 'text' ? part.text : '').join('');
-/** Mirrors `keepsDraft` in ai-sdk-letta: the reflection kept the draft. */
-export const keepsDraft = (text: string) => /^\s*keep\.?\s*$/i.test(text) || !text.trim();
+/** Mirrors `keepsDraft` in ai-sdk-letta: the reflection kept the draft (`KEEP`, or `KEEP — <one-line rebuttal>` in debate). */
+export const keepsDraft = (text: string) => /^\s*keep\.?\s*$/i.test(text) || !text.trim() || /^\s*keep\s*[:\-–—]\s*[^\n]{1,300}\s*$/i.test(text);
 export function reflectionOf(message: Pick<ThreadMessageLike, 'metadata'>): Reflection | undefined {
   return (message.metadata?.custom as { reflection?: Reflection } | undefined)?.reflection;
 }
+/** What a live turn's events say about its review so far (see {@link markReflection}). */
+export type ReflectionLive = { reviewing?: boolean; outcome?: ReflectionOutcome; rounds?: ReflectionOutcome[] };
 /**
- * One reply with a reflection: the parts before the marker are the draft,
- * those after it the reflection. The visible reply is the final answer (the
- * revision's text after the draft's tool calls, or the draft itself); the
- * rest moves to `custom.reflection`. `live`: what the turn's events say so far
- * (the voices are reviewing; the outcome once known). Without an outcome,
- * restored history infers it from the reflection's text (KEEP or a revision).
+ * One reply with reflections: the parts before the first marker are the
+ * draft; those after each marker are that round's reflection (KEEP or a
+ * revision, which the next round may review again). The visible reply is the
+ * final answer (the last revision's text after the draft's tool calls, or the
+ * draft itself); the rest moves to `custom.reflection`. `live`: what the
+ * turn's events say so far (the voices are reviewing; each round's outcome
+ * and the review's once known). Without outcomes, restored history takes each
+ * round's from its marker, else infers it from its text (KEEP or a revision).
  */
-export function markReflection(message: ThreadMessageLike, live?: { reviewing?: boolean; outcome?: ReflectionOutcome }): ThreadMessageLike {
+export function markReflection(message: ThreadMessageLike, live?: ReflectionLive): ThreadMessageLike {
   if (message.role !== 'assistant' || typeof message.content === 'string') return message;
+  const content: Part[] = [...message.content];
   const custom = (reflection: Reflection, content: Part[]): ThreadMessageLike => ({ ...message, content, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, reflection } } });
-  const index = message.content.findIndex(isReflectionMarker);
-  if (index < 0) return live?.outcome ? custom({ state: 'done', outcome: live.outcome }, [...message.content]) : live?.reviewing ? custom({ state: 'reviewing' }, [...message.content]) : message;
-  const marker = message.content[index] as { data?: { outcome?: unknown } };
-  const before = message.content.slice(0, index).filter(part => !isReflectionMarker(part));
-  const after = message.content.slice(index + 1).filter(part => !isReflectionMarker(part));
-  const tools = after.filter(part => part.type === 'tool-call');
-  const recorded = ['kept', 'revised', 'skipped'].includes(String(marker.data?.outcome)) ? marker.data!.outcome as ReflectionOutcome : undefined;
-  const outcome = live ? live.outcome : recorded ?? (keepsDraft(textOf(after)) ? 'kept' : 'revised');
+  const markers = content.map((part, index) => isReflectionMarker(part) ? index : -1).filter(index => index >= 0);
+  if (!markers.length) return live?.outcome ? custom({ state: 'done', outcome: live.outcome }, [...content]) : live?.reviewing ? custom({ state: 'reviewing' }, [...content]) : message;
+  const before = content.slice(0, markers[0]);
+  const segments = markers.map((start, i) => content.slice(start + 1, markers[i + 1] ?? content.length));
+  const tools = segments.flat().filter(part => part.type === 'tool-call');
+  const valid = (value: unknown) => ['kept', 'revised', 'skipped'].includes(String(value)) ? value as ReflectionOutcome : undefined;
+  const rounds = segments.map((segment, i) => {
+    const recorded = valid((content[markers[i]!] as { data?: { outcome?: unknown } }).data?.outcome);
+    if (live) return live.rounds?.[i] ?? (live.outcome ? recorded ?? (keepsDraft(textOf(segment)) ? 'kept' : live.outcome === 'skipped' ? 'skipped' : 'revised') : undefined);
+    return recorded ?? (keepsDraft(textOf(segment)) ? 'kept' : 'revised');
+  });
+  const revisedRounds = rounds.map((outcome, i) => outcome === 'revised' ? i : -1).filter(i => i >= 0);
+  const outcome = live ? live.outcome : revisedRounds.length ? 'revised' : rounds[0];
   if (!outcome) return custom({ state: 'reflecting', tools }, before);
-  if (outcome === 'revised') return custom({ state: 'done', outcome, draft: textOf(before).trim(), tools }, [...before.filter(part => part.type !== 'text'), ...after.filter(part => part.type === 'text')]);
-  return custom({ state: 'done', outcome, tools }, before);
+  const last = revisedRounds.at(-1);
+  if (outcome === 'revised' && last !== undefined) return custom({ state: 'done', outcome, draft: textOf(before).trim(), revisions: revisedRounds.length, tools }, [...before.filter(part => part.type !== 'text'), ...segments[last]!.filter(part => part.type === 'text')]);
+  return custom({ state: 'done', outcome: outcome === 'revised' ? 'kept' : outcome, tools }, before);
 }
 
 /** A user bubble's content: images first (as the composer shows them), then file chips, then the text. */
