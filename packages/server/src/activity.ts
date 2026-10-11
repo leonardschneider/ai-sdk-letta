@@ -15,7 +15,7 @@ export type ActivityItem = {
   detail?: string;
   threadId?: string; title?: string;
   since?: string;
-  /** Turns: the current step (`tool:<name>`, `thinking`, `writing`, `waiting`, `starting`). */
+  /** Turns: the current step (`tool:<name>`, `thinking`, `writing`, `reflecting`, `waiting`, `starting`). */
   step?: string;
   /** Services container: when it stops if idle. Schedules: when they fire. */
   until?: string;
@@ -48,6 +48,7 @@ export function stepLabel(step: string | undefined): string {
   if (step === 'waiting') return 'Waiting for you';
   if (step === 'thinking') return 'Thinking';
   if (step === 'writing') return 'Writing';
+  if (step === 'reflecting') return 'Reflecting';
   if (step.startsWith('tool:')) { const tool = step.slice(5); return tool === 'web_search' ? 'Searching the web (summarizing)' : `Running ${tool}`; }
   return step;
 }

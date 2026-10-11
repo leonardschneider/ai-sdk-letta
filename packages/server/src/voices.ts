@@ -11,9 +11,9 @@ import { RuntimeFault } from './runtime.js';
  * The inner voices Ambition and Prudence (see `ai-sdk-letta`'s `voices.ts`)
  * as the server offers them: per-agent settings (each voice on or off, and
  * its model: `auto` picks another family than the agent's), and the
- * counsellor a runtime asks after every finished reply (on its own, in the
- * background) or on demand (`POST /v1/threads/:id/runs/:runId/counsel`, "Ask again").
- * Both voices are off until the person turns them on.
+ * counsellor a runtime asks within a turn: they review the draft reply, then
+ * the agent reflects on their notes and keeps or revises it (see
+ * `ThreadRuntime`). Both voices are off until the person turns them on.
  */
 
 /** One voice's setting. */

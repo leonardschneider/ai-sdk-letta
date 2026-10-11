@@ -1,63 +1,63 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { ChevronRight, LoaderCircle, RotateCw, Sparkles } from 'lucide-react';
-import { api, ApiError, serverApi, type AgentInfo } from './api.js';
+import { ChevronRight, LoaderCircle, Sparkles } from 'lucide-react';
+import { serverApi, type AgentInfo } from './api.js';
+import type { Reflection, ReflectionOutcome } from './messages.js';
 import { useToast } from './toasts.js';
 
 /**
- * The inner voices Ambition and Prudence in the app: they weigh in on their own
- * after a finished reply (when they are on). Under it: a muted "thinking" line
- * while they write, then the collapsed "weighed in" line with both notes side
- * by side and "Ask again"; and the settings' "Inner voices" section.
+ * The inner voices Ambition and Prudence in the app. When they are on, they
+ * review a reply's draft within the turn and the agent reflects on their
+ * notes: under the draft, a muted "reviewing" then "Reflecting…" line; then
+ * the reply shows only the final answer, with a collapsed "Revised (or Kept)
+ * after Ambition & Prudence" line holding the draft, both notes side by side
+ * and the reflection's tool calls. Also the settings' "Inner voices" section.
  */
 
 export type VoiceName = 'ambition' | 'prudence';
 export type VoiceNote = { points: string[]; confidence: 'low' | 'medium' | 'high'; suggestion?: string; model?: string; costUsd?: number } | { error: string };
-export type RunCounsel = { at: string; notes: Partial<Record<VoiceName, VoiceNote>>; delivered?: string; auto?: boolean; late?: boolean };
+export type RunCounsel = { at: string; notes: Partial<Record<VoiceName, VoiceNote>>; outcome: ReflectionOutcome; draft?: string; reason?: 'no_notes' | 'stopped' };
 
-/** The conversation's voices: which are on, the stored counsels by run, the runs they are weighing on their own (`thinking`) or on request (`asking`), and asking again. */
-export type VoicesState = { enabled: boolean; counsels: Record<string, RunCounsel>; asking: Set<string>; thinking?: Set<string>; ask(runId: string): void };
-export const VoicesContext = createContext<VoicesState>({ enabled: false, counsels: {}, asking: new Set(), thinking: new Set(), ask() {} });
+/** The conversation's voices: whether any is on, and the stored reviews by run. */
+export type VoicesState = { enabled: boolean; counsels: Record<string, RunCounsel> };
+export const VoicesContext = createContext<VoicesState>({ enabled: false, counsels: {} });
 
 const LABEL: Record<VoiceName, string> = { ambition: 'Ambition', prudence: 'Prudence' };
-const FAILED: Record<string, string> = { voice_timeout: 'took too long', voice_invalid: 'answered in a form the app could not read', voice_unsafe: 'was stopped (unexpected tool use)' };
+const FAILED: Record<string, string> = { voice_timeout: 'took too long', voice_invalid: 'answered in a form the app could not read', voice_unsafe: 'was stopped (unexpected tool use)', voice_cancelled: 'was stopped' };
 
-/** Ask the voices about a run of the thread (`POST /v1/threads/:id/runs/:runId/counsel`). */
-export async function askCounsel(threadId: string, runId: string) {
-  return api<{ runId: string; counsel: RunCounsel }>(`/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/counsel`, {});
-}
-/** The thread's notes and the runs being weighed now (`GET /v1/threads/:id/counsels`). */
-export async function fetchCounsels(threadId: string) {
-  return api<{ counsels: Record<string, RunCounsel>; pending: string[] }>(`/v1/threads/${encodeURIComponent(threadId)}/counsels`);
-}
-/** What the line under a reply shows: the notes, "thinking", or nothing (no notes and none coming). */
-export function voicesLine(state: Pick<VoicesState, 'counsels' | 'asking' | 'thinking'>, runId: string | undefined): 'notes' | 'thinking' | 'none' {
-  if (!runId) return 'none';
-  if (state.asking.has(runId) || state.thinking?.has(runId)) return 'thinking';
-  return state.counsels[runId] ? 'notes' : 'none';
-}
-export function counselError(error: unknown): string {
-  const code = error instanceof ApiError ? error.code : '';
-  return code === 'voices_off' ? 'Ambition and Prudence are off for this agent (Settings → Inner voices).'
-    : code === 'run_not_finished' ? 'The voices weigh in on finished replies only.'
-      : code === 'counsel_running' ? 'They are already weighing in on this reply.' : 'Couldn’t ask Ambition & Prudence. Nothing was changed.';
+/**
+ * What the line under a reply shows: `reviewing` / `reflecting` while the
+ * turn runs, then `kept` / `revised` (or `notes`: the reflection was skipped
+ * but notes exist), else `none`.
+ */
+export function voicesLine(reflection: Reflection | undefined, counsel: RunCounsel | undefined): 'reviewing' | 'reflecting' | 'kept' | 'revised' | 'notes' | 'none' {
+  if (reflection?.state === 'reviewing') return 'reviewing';
+  if (reflection?.state === 'reflecting') return 'reflecting';
+  const outcome = reflection?.outcome ?? counsel?.outcome;
+  if (outcome === 'kept' || outcome === 'revised') return outcome;
+  return counsel && Object.values(counsel.notes).some(note => note && !('error' in note)) ? 'notes' : 'none';
 }
 
-/** Under a finished assistant reply: "thinking" while the voices write, then the collapsed notes with "Ask again". */
-export function ReplyVoices({ runId }: { runId: string | undefined }) {
+/** Under an assistant reply: the review's progress, then the collapsed section (draft, notes, the reflection's tool lines). */
+export function ReplyVoices({ runId, reflection, tools }: { runId: string | undefined; reflection: Reflection | undefined; tools?: React.ReactNode }) {
   const state = useContext(VoicesContext);
   const [open, setOpen] = useState(false);
-  const shown = voicesLine(state, runId);
-  if (shown === 'thinking') return <div className="voices"><span className="voices-thinking"><LoaderCircle size={13} className="spin" aria-hidden="true"/>Ambition &amp; Prudence are thinking…</span></div>;
+  const counsel = runId ? state.counsels[runId] : undefined;
+  const shown = voicesLine(reflection, counsel);
   if (shown === 'none') return null;
-  const counsel = state.counsels[runId!]!;
+  if (shown === 'reviewing' || shown === 'reflecting') return <div className="voices" aria-live="polite"><span className="voices-thinking"><LoaderCircle size={13} className="spin" aria-hidden="true"/>{shown === 'reviewing' ? <>Ambition &amp; Prudence are reviewing…</> : 'Reflecting…'}</span></div>;
+  const draft = reflection?.draft ?? counsel?.draft;
+  const label = shown === 'revised' ? 'Revised after Ambition & Prudence' : shown === 'kept' ? 'Kept after Ambition & Prudence' : 'Ambition & Prudence weighed in';
   return <div className="voices" data-open={open || undefined}>
     <button type="button" className="voices-line" aria-expanded={open} onClick={() => setOpen(o => !o)}>
-      <Sparkles size={13} aria-hidden="true"/><span>Ambition &amp; Prudence weighed in</span><ChevronRight size={13} className="voices-chevron" aria-hidden="true"/>
+      <Sparkles size={13} aria-hidden="true"/><span>{label}</span><ChevronRight size={13} className="voices-chevron" aria-hidden="true"/>
     </button>
-    {open && <div className="voices-notes">
-      {(['ambition', 'prudence'] as const).filter(name => counsel.notes[name]).map(name => <VoiceCard key={name} name={name} note={counsel.notes[name]!}/>)}
-      <p className="voices-foot">Advisory notes{counsel.delivered ? '; the agent saw them in its next turn' : counsel.late ? '; they came after the next turn had started, so the agent did not see them' : '; the agent sees them with your next message'}.
-        {state.enabled && <button type="button" className="voices-ask" onClick={() => state.ask(runId!)}><RotateCw size={12} aria-hidden="true"/><span>Ask again</span></button>}</p>
+    {open && <div className="voices-open">
+      {shown === 'revised' && draft && <div className="voices-draft"><span className="voices-draft-label">First draft</span><p>{draft}</p></div>}
+      {counsel && <div className="voices-notes">
+        {(['ambition', 'prudence'] as const).filter(name => counsel.notes[name]).map(name => <VoiceCard key={name} name={name} note={counsel.notes[name]!}/>)}
+      </div>}
+      {tools && <div className="voices-tools">{tools}</div>}
+      <p className="voices-foot">{shown === 'revised' ? 'The agent reflected on these advisory notes and revised its reply.' : shown === 'kept' ? 'The agent reflected on these advisory notes and kept its reply.' : counsel?.reason === 'stopped' ? 'The reply was stopped before the agent reflected on these notes.' : 'Advisory notes.'}</p>
     </div>}
   </div>;
 }
@@ -124,12 +124,12 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
         </select>
       </label>
     </div>)}
-    <label className="voice-speak-after"><span>Speak after</span>
-      <select className="member-role" value={data.speakAfter ?? 'every'} disabled={saving || !!agent.viewOnly} onChange={event => void put({ speakAfter: event.target.value }, event.target.value === 'long' ? 'They speak only after long turns.' : 'They speak after every reply.')}>
+    <label className="voice-speak-after"><span>Review</span>
+      <select className="member-role" value={data.speakAfter ?? 'every'} disabled={saving || !!agent.viewOnly} onChange={event => void put({ speakAfter: event.target.value }, event.target.value === 'long' ? 'They review only long turns.' : 'They review every reply.')}>
         <option value="every">Every reply</option>
         <option value="long">Only long turns (a tool call, or 30 s or more)</option>
       </select>
-      <span className="adopt-meta">Each voice that is on runs once per reply it weighs in on, on its own model: it costs tokens every time. “Only long turns” skips quick chat replies.</span>
+      <span className="adopt-meta">Each voice that is on reviews the reply’s draft on its own model; then the agent takes one more step to reflect on their notes (keep or revise). Both cost tokens and time on every reply they review. “Only long turns” skips quick chat replies.</span>
     </label>
     {problem && <p className="form-error">{problem}</p>}
   </div>;

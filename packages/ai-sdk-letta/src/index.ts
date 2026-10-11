@@ -29,7 +29,7 @@ export {
   type Verdict, type JiminyVerdict, type JiminyDrop, type JiminyClaim, type ReviewRequest, type MemoryReviewer, type LettaReviewerOptions,
 } from './jiminy.js';
 export {
-  counsel, counselPrompt, counselReminder, lettaVoice, sweepVoices, validateVoiceNote, AMBITION_PERSONA, PRUDENCE_PERSONA, VOICE_PERSONAS, VOICES, VOICE_CONFIDENCE, VOICE_LIMITS, VOICE_NOTE_SCHEMA, VOICE_KINDS, VOICE_TIMEOUT_MS, COUNSEL_LIMITS,
+  counsel, counselPrompt, reflectionPrompt, keepsDraft, REFLECTION_OTID_SUFFIX, REFLECTION_KEEP, lettaVoice, sweepVoices, validateVoiceNote, AMBITION_PERSONA, PRUDENCE_PERSONA, VOICE_PERSONAS, VOICES, VOICE_CONFIDENCE, VOICE_LIMITS, VOICE_NOTE_SCHEMA, VOICE_KINDS, VOICE_TIMEOUT_MS, COUNSEL_LIMITS,
   type VoiceName, type VoiceConfidence, type VoiceNote, type VoiceAnswer, type InnerVoice, type VoiceOutcome, type Counsel, type CounselRequest, type LettaVoiceOptions,
 } from './voices.js';
 export { askTemporaryAdvisor, advisorSessionOptions, type AdvisorCall, type AdvisorAnswer } from './temporary-advisor.js';
@@ -38,7 +38,7 @@ export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenA
 export { planRevert, changedBy, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
 export { acquireIdentity, claimsOf, forgetIdentity, validConversationId, type Identity, type IdentityBackend, type IdentityLease, type PendingTurn, type SettledTurn } from './identity.js';
 export { TurnClock, resolveTurnLimits, turnLimits, envTurnLimits, formatDuration, DEFAULT_TURN_IDLE_MS, DEFAULT_TURN_MAX_MS, SDK_TURN_TIMEOUT_MS, TURN_LIMIT_ENV, type TurnLimits, type TurnStopReason } from './turn-limits.js';
-export { HISTORY_LIMIT, FOREIGN_OUTPUT_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
+export { HISTORY_LIMIT, FOREIGN_OUTPUT_LIMIT, HISTORY_IMAGE_BUDGET, IMAGE_PLACEHOLDER, LISTENED_PART, REFLECTION_PART, sanitizeText, historyPage, loadHistory, projectHistory, assertHistorySettled, listConversations, type ProjectionOptions } from './history.js';
 export { listNavigationEntries, searchConversations, snippet, SEARCH_CONVERSATIONS, SEARCH_RECORDS, SEARCH_TOTAL, SEARCH_MATCHES, SEARCH_MILLISECONDS, type ConversationEntry, type NavigationSource, type SearchMatch } from './navigation.js';
 export { ToolInteractions, validateQuestion, validateResponse, type Question, type InteractionRequest, type InteractionResponse, type InteractionHandler, type ApprovalPreview } from './interactions.js';
 export {

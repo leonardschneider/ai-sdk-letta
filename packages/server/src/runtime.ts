@@ -11,13 +11,13 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel, BACKGROUND_NOTE, type BackgroundCommands,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  counselReminder, type Counsel, type CounselRequest,
+  reflectionPrompt, keepsDraft, REFLECTION_OTID_SUFFIX, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest,
   appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
 /**
  * What a running turn does now, from its last events: `tool:<name>` (a tool
- * runs), `waiting` (a prompt waits for a person), `thinking`, `writing`, or
+ * runs), `waiting` (a prompt waits for a person), `thinking`, `writing`, `reflecting` (the inner voices review the draft, or the agent reflects on their notes), or
  * `starting` (nothing streamed yet).
  */
 export function turnStep(run: Pick<Run, 'events'>): string {
@@ -28,8 +28,9 @@ export function turnStep(run: Pick<Run, 'events'>): string {
     if (event.type === 'tool_started' && id) { open.set(id, String(event.data.name ?? 'tool')); last = 'tool'; }
     else if ((event.type === 'tool_completed' || event.type === 'tool_failed') && id) { open.delete(id); last = 'thinking'; }
     else if (event.type === 'reasoning') last = 'thinking';
-    else if (event.type === 'text') last = 'writing';
+    else if (event.type === 'text') last = event.data.phase === 'reflection' ? 'reflecting' : 'writing';
     else if (event.type === 'interaction') last = 'waiting';
+    else if (event.type === 'reflecting') last = 'reflecting';
     else if (event.type === 'interaction_resolved' || event.type === 'interaction_ended') last = open.size ? 'tool' : 'thinking';
   }
   if (last === 'waiting') return 'waiting';
@@ -136,17 +137,28 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   checked?: { at: string; delivered?: boolean; automatic?: boolean };
   /** Why a failed turn failed (bounded, single line: the harness's error, HTTP status and provider message when given). */
   error?: string;
-  /**
-   * The inner voices' notes on this turn (on their own after the reply, or asked again: see {@link ThreadRuntime.counsel}).
-   * `delivered`: the run whose turn brought them to the agent (once).
-   */
+  /** The inner voices' review of this turn's draft reply and the agent's reflection on it (see {@link RunCounsel}). */
   counsel?: RunCounsel };
 /**
- * The inner voices' notes on a turn: when they were asked, each voice's note (or its error), and the turn that brought
- * them to the agent. `auto`: they spoke on their own after the reply. `late`: they came after the next turn had started
- * (shown in the app, never brought to the agent).
+ * The inner voices' review of a turn's draft reply, within the turn: when they
+ * were asked, each voice's note (or its error), and what the agent's
+ * reflection did with them: `kept` the draft (it answered KEEP), `revised` it
+ * (the reflection's text is the final reply; `draft` keeps the first one), or
+ * `skipped` (no voice answered, or the reflection was stopped: the draft stands;
+ * `reason` says which).
  */
-export type RunCounsel = { at: string; notes: Counsel; delivered?: string; auto?: boolean; late?: boolean };
+export type RunCounsel = { at: string; notes: Counsel; outcome: 'kept' | 'revised' | 'skipped'; draft?: string; reason?: 'no_notes' | 'stopped' };
+/** The OTID of a run's hidden reflection prompt. */
+export const reflectionOtid = (runId: string) => `${runId}${REFLECTION_OTID_SUFFIX}`;
+/**
+ * A run's final reply text: the reflection's revision when the agent revised
+ * its draft, else the draft (text events before the reflection).
+ */
+export function runReply(run: Pick<Run, 'events' | 'counsel'>): string {
+  const draft = run.events.filter(event => event.type === 'text' && event.data.phase !== 'reflection').map(event => String(event.data.text ?? '')).join('');
+  if (run.counsel?.outcome !== 'revised') return draft;
+  return run.events.filter(event => event.type === 'text' && event.data.phase === 'reflection').map(event => String(event.data.text ?? '')).join('');
+}
 /**
  * A run's state. `stopped`: someone pressed Stop, or a turn limit was
  * reached (see `TurnLimits`), and the backend confirmed the run ended: the
@@ -388,7 +400,8 @@ export function displayRun(run: Run): UIMessage[] {
       const last = parts.at(-1);
       if (last?.type === 'reasoning') last.text += String(data.text);
       else parts.push({ type: 'reasoning', text: String(data.text) });
-    } else if (event.type === 'listened') parts.push({ type: LISTENED_PART as `data-${string}`, data: typeof data.reason === 'string' ? { reason: data.reason } : {} });
+    } else if (event.type === 'reflecting' && data.phase === 'reflect') parts.push({ type: REFLECTION_PART as `data-${string}`, data: { otid: reflectionOtid(run.id), ...(run.counsel ? { outcome: run.counsel.outcome } : {}) } });
+    else if (event.type === 'listened') parts.push({ type: LISTENED_PART as `data-${string}`, data: typeof data.reason === 'string' ? { reason: data.reason } : {} });
     else if (event.type === 'tool_started') parts.push({ type: 'dynamic-tool', toolName: String(data.name), toolCallId: String(data.toolCallId), state: 'input-available', input: data.input });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'dynamic-tool' && p.toolCallId === data.toolCallId);
@@ -418,6 +431,7 @@ export function counselRequest(run: Run, runs: readonly Run[] = []): CounselRequ
   let reply = '';
   const tools: string[] = [];
   for (const event of run.events) {
+    if (event.data.phase === 'reflection') continue;
     if (event.type === 'text') reply += String(event.data.text ?? '');
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const output = event.type === 'tool_failed' ? `failed: ${String(event.data.reason ?? event.data.code ?? '')}` : typeof event.data.output === 'string' ? event.data.output : JSON.stringify(event.data.output ?? null);
@@ -1194,7 +1208,8 @@ export class ThreadRuntime {
    * (matched by the OTID they were sent with). A combined turn (several queued
    * messages sent as one) is shown as its messages again, each with its author.
    */
-  private annotate(threadId: string, messages: UIMessage[]): UIMessage[] {
+  private annotate(threadId: string, rows: UIMessage[]): UIMessage[] {
+    const messages = this.markReflections(threadId, rows);
     if (!this.queueing) {
       // Single-user runtimes tag only automation turns (their OTID is the run ID), to show what started them.
       // (and the turns that brought a decision's outcome, shown as a compact line).
@@ -1216,6 +1231,17 @@ export class ThreadRuntime {
         metadata: { ...(message.metadata as object), otid: member.id, ...(member.author ? { author: member.author } : {}) } }));
       return [run.author || run.source || run.decision || run.app || run.background ? { ...message, metadata: { ...(message.metadata as object), ...(run.author ? { author: run.author } : {}), ...(run.source ? { source: publicSource(run.source) } : {}), ...(run.decision ? { decision: publicDecisionRun(run.decision) } : {}), ...(run.app ? { app: publicRunApp(run.app) } : {}), ...(run.background ? { background: publicRunBackground(run.background) } : {}) } } : message];
     }));
+  }
+  /** Reflection markers (see `REFLECTION_PART`) carry what the reflection did (`outcome`), from the run's record. */
+  private markReflections(threadId: string, messages: UIMessage[]): UIMessage[] {
+    const runs = new Map(this.state.runs.filter(r => r.threadId === threadId && r.counsel).map(r => [reflectionOtid(r.id), r]));
+    if (!runs.size) return messages;
+    return messages.map(message => message.role !== 'assistant' || !message.parts.some(part => part.type === REFLECTION_PART) ? message : { ...message, parts: message.parts.map(part => {
+      if (part.type !== REFLECTION_PART) return part;
+      const otid = (part as { data?: { otid?: unknown } }).data?.otid;
+      const run = typeof otid === 'string' ? runs.get(otid) : undefined;
+      return run ? { type: REFLECTION_PART as `data-${string}`, data: { otid, outcome: run.counsel!.outcome } } : part;
+    }) });
   }
   /**
    * A turn the runtime recorded as listened (`run.listened`) whose history has
@@ -1779,11 +1805,7 @@ export class ThreadRuntime {
       const backgroundNote = run.background ? BACKGROUND_NOTE : undefined;
       let context: { reminder?: string; sources?: ContentSource[] } = {};
       try { context = this.turnContext?.(run.threadId) ?? {}; } catch { /* no context */ }
-      // The inner voices' notes on an earlier turn, not yet shown to the agent: once, in this turn. Notes still
-      // being written wait a little (never long); later ones are shown in the app but no longer brought to the agent.
-      await this.awaitCounsel(run);
-      const voicesNote = this.takeCounsel(run);
-      const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNote].filter((r): r is string => !!r);
+      const reminders = [reminder, appNote, backgroundNote, context.reminder].filter((r): r is string => !!r);
       const decision = { ...(reminders.length ? { reminder: reminders.join('\n\n') } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name, ...(run.unattended?.memoryFloor ? { memoryFloor: run.unattended.memoryFloor } : {}) } } : {};
       // Trust mode: the conversation's override of the agent's setting (undefined: the agent's).
@@ -1799,14 +1821,17 @@ export class ThreadRuntime {
         ? { prompt: content, abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust, ...limits }
         : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust, ...limits });
       streamed = true;
+      // One step of the turn: the draft, then (with the inner voices) the reflection, whose events say so (`phase`).
+      const consume = async (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection') => {
+      const marked = phase ? { phase } : {};
       for await (const part of result.fullStream) {
-        if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text });
-        else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text }); }
-        else if (part.type === 'tool-call') this.emit(run, 'tool_started', { toolCallId: part.toolCallId, name: part.toolName, input: part.input, execution: 'external' });
-        else if (part.type === 'tool-result') this.emit(run, 'tool_completed', { toolCallId: part.toolCallId, name: part.toolName, output: part.output, execution: 'external' });
+        if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text, ...marked });
+        else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text, ...marked }); }
+        else if (part.type === 'tool-call') this.emit(run, 'tool_started', { toolCallId: part.toolCallId, name: part.toolName, input: part.input, execution: 'external', ...marked });
+        else if (part.type === 'tool-result') this.emit(run, 'tool_completed', { toolCallId: part.toolCallId, name: part.toolName, output: part.output, execution: 'external', ...marked });
         else if (part.type === 'tool-error') {
           const failure = toolFailureReason(part.error);
-          this.emit(run, 'tool_failed', { toolCallId: part.toolCallId, name: part.toolName, code: 'tool_failed', ...failure, execution: 'external' });
+          this.emit(run, 'tool_failed', { toolCallId: part.toolCallId, name: part.toolName, code: 'tool_failed', ...failure, execution: 'external', ...marked });
           // An unattended turn needed a person: remember the first such call (the agent then ends the turn).
           if (run.source && !run.refused && (failure.reason === 'approval_required' || failure.reason === 'question_required')) { run.refused = { code: failure.reason, tool: part.toolName }; this.emit(run, 'refused', { ...run.refused }); }
         }
@@ -1817,8 +1842,12 @@ export class ThreadRuntime {
       if (control.signal.aborted) throw new RuntimeFault('runtime_failed');
       const finish = await result.finishReason;
       if (finish !== 'stop') { failure ??= new Error(`The turn ended with finish reason "${finish}"`); throw new RuntimeFault('runtime_failed'); }
-      const letta = (await result.providerMetadata)?.letta as { listened?: unknown; reason?: unknown } | undefined;
+      return (await result.providerMetadata)?.letta as { listened?: unknown; reason?: unknown } | undefined;
+      };
+      const letta = await consume(result);
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
+      // The inner voices review the draft, and the agent reflects on their notes in the same turn (at most once).
+      if (this.wantsReflection(run)) await this.reflect(session, run, control, consume, { ...shared, ...unattended, ...trust, ...limits });
       run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
       clearTimeout(timer);
@@ -1860,8 +1889,6 @@ export class ThreadRuntime {
       // closing a running SDK session or replaying any transcript into the agent.
       session.history = [...session.history, ...this.displayTurn(run, turn.others)];
       lane.pending = undefined; disconnect(); clearTimeout(timer); lane.active = undefined; lane.usedAt = Date.now();
-      // The inner voices weigh in on a finished reply on their own, in the background (never delaying the next turn).
-      this.autoCounsel(run);
       this.changed();
       // The next queued turn of this conversation (or another waiting for a free slot).
       if (this.queueing) {
@@ -1882,7 +1909,7 @@ export class ThreadRuntime {
     const events: RuntimeEvent[] = [];
     for (const event of run.events) {
       const last = events.at(-1);
-      if ((event.type === 'text' || event.type === 'reasoning') && last?.type === event.type) events[events.length - 1] = { sequence: event.sequence, type: event.type, data: { text: String(last.data.text) + String(event.data.text) } };
+      if ((event.type === 'text' || event.type === 'reasoning') && last?.type === event.type && last.data.phase === event.data.phase) events[events.length - 1] = { sequence: event.sequence, type: event.type, data: { text: String(last.data.text) + String(event.data.text), ...(event.data.phase ? { phase: event.data.phase } : {}) } };
       else events.push(event);
     }
     run.events = events;
@@ -1898,112 +1925,89 @@ export class ThreadRuntime {
     const listeners = this.listeners.get(id) ?? new Set(); listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
   }
-  /** Turns being weighed by the inner voices now (one counsel per turn at a time), with when that ends. */
-  private readonly counselling = new Map<string, Promise<unknown>>();
-  /** Turns the voices weighed (or are weighing) on their own: never twice for the same run. */
-  private readonly autoCounselled = new Set<string>();
-  /** Turns whose notes came too late for the next turn: shown, never brought to the agent. */
-  private readonly lateCounsel = new Set<string>();
-  /** How long a turn waits for the notes on the turn before it (ms). */
-  counselWaitMs = 10_000;
+  /** How long the inner voices may take to review a draft (ms; each voice). */
+  counselTimeoutMs = 60_000;
   /**
-   * Whether the voices speak on their own after `run`: it completed with a
-   * reply (not failed, stopped or listened), voices are on, it was never
-   * weighed before, and (`speakAfter: 'long'`) it called a tool or took at
-   * least 30 seconds.
+   * Whether the inner voices review `run`'s draft: it ended normally with a
+   * reply (not listened), voices are on, and (`speakAfter: 'long'`) it called
+   * a tool or took at least 30 seconds.
    */
-  private wantsCounsel(run: Run): boolean {
-    if (!this.voices || run.status !== 'completed' || run.listened || run.rewound || run.counsel || this.autoCounselled.has(run.id) || this.counselling.has(run.id)) return false;
-    if (!this.voices.enabled().length) return false;
-    if (!run.events.some(event => event.type === 'text' && String(event.data.text ?? '').trim())) return false;
-    if ((this.voices.speakAfter?.() ?? 'every') === 'long') {
-      const tools = run.events.some(event => event.type === 'tool_started');
-      const took = run.startedAt && run.endedAt ? Date.parse(run.endedAt) - Date.parse(run.startedAt) : 0;
-      if (!tools && !(took >= 30_000)) return false;
-    }
-    return true;
-  }
-  /**
-   * The voices weigh a finished turn on their own, in the background (same
-   * input as {@link counsel}). A voice that fails or times out stays silent
-   * (its note is left out; nothing is stored when none answered).
-   */
-  private autoCounsel(run: Run): void {
-    try { if (!this.wantsCounsel(run)) return; } catch { return; }
-    this.autoCounselled.add(run.id);
-    const voices = this.voices!;
-    const work = (async () => {
-      try {
-        const notes = await voices.ask(counselRequest(run, this.state.runs));
-        const answered = Object.fromEntries(Object.entries(notes).filter(([, note]) => note && !('error' in note))) as Counsel;
-        if (!Object.keys(answered).length || run.rewound || run.counsel) return;
-        run.counsel = { at: new Date().toISOString(), notes: answered, auto: true, ...(this.lateCounsel.has(run.id) ? { late: true } : {}) };
-        this.save();
-      } catch { /* silent: the voices are advisory */ }
-    })().finally(() => { this.counselling.delete(run.id); this.lateCounsel.delete(run.id); this.changed(); });
-    this.counselling.set(run.id, work);
-  }
-  /** Before a turn: wait (at most {@link counselWaitMs}) for notes still being written on earlier turns of its thread; any later are late. */
-  private async awaitCounsel(run: Run) {
-    const pending = [...this.counselling].filter(([id]) => id !== run.id && this.state.runs.find(r => r.id === id)?.threadId === run.threadId);
-    if (!pending.length) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([Promise.allSettled(pending.map(([, work]) => work)), new Promise(resolve => { timer = setTimeout(resolve, this.counselWaitMs); })]);
-    clearTimeout(timer);
-    for (const [id] of pending) if (this.counselling.has(id)) this.lateCounsel.add(id);
-  }
-  /** Runs of a thread the voices are weighing now (the app shows "Ambition & Prudence are thinking…"). */
-  counselsPending(threadId: string): string[] {
-    return [...this.counselling.keys()].filter(id => this.state.runs.find(r => r.id === id)?.threadId === threadId);
-  }
-  /** A thread's stored counsels and those being written (`GET /v1/threads/:id/counsels`). */
-  threadCounsels(owner: string, threadId: string): { counsels: Record<string, RunCounsel>; pending: string[] } {
-    this.thread(owner, threadId);
-    return { counsels: this.counsels(threadId), pending: this.counselsPending(threadId) };
-  }
-  /**
-   * Ask the inner voices (Ambition and Prudence, those that are on) about a
-   * finished turn: the person's message, the agent's reply, and a bounded
-   * summary of its tool results. Their notes are stored with the run and go
-   * to the agent once, as a reminder in its next turn. Refusals:
-   * `voices_off` (none on), `run_not_finished`, `counsel_running`.
-   */
-  async counsel(owner: string, threadId: string, runId: string, signal?: AbortSignal): Promise<{ runId: string; counsel: RunCounsel }> {
-    const found = this.run(owner, runId);
-    if (found.threadId !== threadId) throw new RuntimeFault('not_found', 404);
-    // A combined turn: its first message carries the reply.
-    const run = found.batchOf ? this.state.runs.find(r => r.id === found.batchOf) ?? found : found;
-    if (!this.voices || !this.voices.enabled().length) throw new RuntimeFault('voices_off');
-    if (run.status !== 'completed' || run.rewound) throw new RuntimeFault('run_not_finished');
-    if (this.counselling.has(run.id)) throw new RuntimeFault('counsel_running');
-    // Asked again (or for the first time): the automatic counsel never runs for this turn after this.
-    this.autoCounselled.add(run.id);
-    const work = this.voices.ask(counselRequest(run, this.state.runs), signal);
-    this.counselling.set(run.id, work.catch(() => undefined));
-    this.changed();
+  private wantsReflection(run: Run): boolean {
     try {
-      const notes = await work;
-      run.counsel = { at: new Date().toISOString(), notes };
-      this.save();
-      return { runId: run.id, counsel: structuredClone(run.counsel) };
-    } finally { this.counselling.delete(run.id); this.lateCounsel.delete(run.id); this.changed(); }
+      if (!this.voices || run.listened || run.counsel || !this.voices.enabled().length) return false;
+      if (!run.events.some(event => event.type === 'text' && String(event.data.text ?? '').trim())) return false;
+      if ((this.voices.speakAfter?.() ?? 'every') === 'long') {
+        const tools = run.events.some(event => event.type === 'tool_started');
+        const took = run.startedAt ? Date.now() - Date.parse(run.startedAt) : 0;
+        if (!tools && !(took >= 30_000)) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
+  /**
+   * The draft is done: the voices review it (in parallel, each on its own; a
+   * voice that fails is left out), then, when at least one answered, the agent
+   * reflects in a second step of the same turn and conversation, prompted by a
+   * hidden reminder (OTID `<run id>:reflect`, never shown as a message). It
+   * answers KEEP or writes the revised reply. Stop during the review or the
+   * reflection keeps the draft (the turn completes). The voices never review
+   * the revision. Anything else that fails the reflection fails the turn.
+   */
+  private async reflect(session: RuntimeSession, run: Run, control: AbortController, consume: (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection') => Promise<unknown>, options: Record<string, unknown>) {
+    const at = new Date().toISOString();
+    this.emit(run, 'reflecting', { phase: 'review' });
+    const draft = counselRequest(run, this.state.runs).reply;
+    let notes: Counsel = {};
+    try { notes = await this.voices!.ask(counselRequest(run, this.state.runs), control.signal); } catch { /* advisory: skipped */ }
+    const answered = Object.fromEntries(Object.entries(notes).filter(([, note]) => note && !('error' in note))) as Counsel;
+    const skip = (reason: 'no_notes' | 'stopped') => { run.counsel = { at, notes, outcome: 'skipped', reason }; this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) }); };
+    const prompt = reflectionPrompt(answered);
+    if (control.signal.aborted) return skip('stopped');
+    if (!prompt) return skip('no_notes');
+    this.emit(run, 'reflecting', { phase: 'reflect' });
+    // The draft's step must have ended in the agent (its stream's last callback) before the next step starts.
+    for (let i = 0; i < 50 && control.signal.aborted === false; i++) {
+      try {
+        // Turn limits apply across both steps: the reflection gets what is left of the hard cap.
+        const elapsed = run.startedAt ? Date.now() - Date.parse(run.startedAt) : 0;
+        const maxMs = Math.max(1000, ((options.limits as { maxMs?: number } | undefined)?.maxMs ?? DEFAULT_TURN_MAX_MS) - elapsed);
+        const limits = { limits: { ...(options.limits as object | undefined), maxMs } };
+        // The turn's own options (who acts, an automation's policy, trust mode), without its speaker notes or reply mode.
+        const { otid: _otid, speaker: _speaker, speakers: _speakers, replyMode: _replyMode, addressed: _addressed, ...kept } = options;
+        const result = await session.agent.stream({ ...kept, prompt, abortSignal: control.signal, otid: reflectionOtid(run.id), ...limits });
+        try { await consume(result, 'reflection'); }
+        catch (error) {
+          if (!control.signal.aborted) throw error;
+          // Stopped while reflecting: once Letta confirms the step ended, the draft stands and the turn completes.
+          const outcome = session.agent.lastTurn ? await settledWithin(session.agent.lastTurn(), ThreadRuntime.STOP_SETTLE_MS) : undefined;
+          if (outcome?.end !== 'stopped') throw error;
+          return skip('stopped');
+        }
+        const revision = run.events.filter(event => event.type === 'text' && event.data.phase === 'reflection').map(event => String(event.data.text ?? '')).join('');
+        run.counsel = keepsDraft(revision) ? { at, notes, outcome: 'kept' } : { at, notes, outcome: 'revised', draft: draft.slice(0, 8000) };
+        this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) });
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.message === 'A turn is already running') { await new Promise(resolve => setTimeout(resolve, 20)); continue; }
+        throw error;
+      }
+    }
+    if (control.signal.aborted) return skip('stopped');
+    throw new RuntimeFault('runtime_failed');
+  }
+  /** A thread's stored reviews by run (`GET /v1/threads/:id/counsels`). */
+  threadCounsels(owner: string, threadId: string): { counsels: Record<string, RunCounsel> } {
+    this.thread(owner, threadId);
+    return { counsels: this.counsels(threadId) };
   }
   /** `counsels` for a thread's view (only when there are any). */
   private counselField(threadId: string) {
-    const counsels = this.counsels(threadId); const pending = this.counselsPending(threadId);
-    return { ...(Object.keys(counsels).length ? { counsels } : {}), ...(pending.length ? { counselsPending: pending } : {}) };
+    const counsels = this.counsels(threadId);
+    return Object.keys(counsels).length ? { counsels } : {};
   }
-  /** The thread's stored counsels by run ID (for the app: the notes under each reply). */
+  /** The thread's stored reviews by run ID (for the app: the collapsed section under each reply). */
   counsels(threadId: string): Record<string, RunCounsel> {
     return Object.fromEntries(this.state.runs.filter(r => r.threadId === threadId && r.counsel && !r.rewound).map(r => [r.id, structuredClone(r.counsel!)]));
-  }
-  /** The newest undelivered counsel of the run's thread, as a reminder; every undelivered one is marked as brought by `run` (once). */
-  private takeCounsel(run: Run): string | undefined {
-    const waiting = this.state.runs.filter(r => r.threadId === run.threadId && r.id !== run.id && r.counsel && !r.counsel.delivered && !r.counsel.late && !r.rewound);
-    if (!waiting.length) return undefined;
-    for (const r of waiting) r.counsel!.delivered = run.id;
-    this.save();
-    return counselReminder(waiting.at(-1)!.counsel!.notes);
   }
   /** Who wrote a run and its state, for authorization by a shared server. */
   runInfo(owner: string, id: string): { threadId: string; status: Run['status']; author?: RunAuthor } {

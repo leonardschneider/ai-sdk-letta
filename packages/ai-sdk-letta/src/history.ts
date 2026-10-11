@@ -114,6 +114,14 @@ function timestamp(row: Row, user = false): { metadata?: { createdAt?: string; o
   return { metadata: { ...(Number.isFinite(time) ? { createdAt: new Date(time).toISOString() } : {}), ...(otid ? { otid } : {}) } };
 }
 
+/**
+ * Data part that marks where a turn's reflection step starts (see
+ * `reflectionPrompt`): the hidden prompt (sent with the OTID `<run id>:reflect`)
+ * is never shown as a message; this assistant part (`{ otid }`) stands in its
+ * place, so an app can tell the draft reply (before it) from the reflection (after).
+ */
+export const REFLECTION_PART = 'data-reflection';
+const isReflectionOtid = (otid: unknown): otid is string => typeof otid === 'string' && otid.endsWith(':reflect') && /^[A-Za-z0-9._:-]{1,100}$/.test(otid);
 /** Data part that marks a turn the agent listened to without replying (see {@link projectHistory}'s `listening`). */
 export const LISTENED_PART = 'data-listened';
 /** Options of {@link projectHistory}. */
@@ -166,6 +174,8 @@ export function projectHistory(messages: ListMessagesResult['messages'], appTool
   let replied = false;
   for (const message of messages) {
     const row = message as unknown as Row;
+    // A reflection's hidden prompt: never a user message; a marker in the reply instead.
+    if (row.message_type === 'user_message' && isReflectionOtid(row.otid)) { projected.push({ id: `history-${message.id}`, role: 'assistant', parts: [{ type: REFLECTION_PART, data: { otid: row.otid } }], ...timestamp(row) }); continue; }
     if (row.message_type === 'user_message' || row.message_type === 'assistant_message') {
       const role = row.message_type === 'user_message' ? 'user' : 'assistant';
       const text = textContent(row.content, role === 'user');
@@ -233,7 +243,7 @@ export function assertHistorySettled(messages: ListMessagesResult['messages'], s
   for (const [index, message] of messages.entries()) {
     if (index <= through) continue;
     const row = message as unknown as Row;
-    if (row.message_type === 'user_message' && (textContent(row.content, true) || imageItems(row.content).length)) pendingUser = true;
+    if (row.message_type === 'user_message' && (textContent(row.content, true) || imageItems(row.content).length || isReflectionOtid(row.otid))) pendingUser = true;
     if (row.message_type === 'assistant_message' && textContent(row.content)) pendingUser = false;
     if (row.message_type === 'tool_call_message' || row.message_type === 'approval_request_message') {
       const call = record(row.tool_call);
