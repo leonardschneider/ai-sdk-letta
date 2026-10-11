@@ -109,8 +109,8 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
         <span><strong>{LABEL[name]}</strong><span className="adopt-meta">{BLURB[name]}</span></span>
       </label>
       <label className="voice-model-pick"><span>Model</span>
-        <select value={data[name].model} disabled={saving || !!agent.viewOnly} onChange={event => void save(name, { ...data[name], model: event.target.value })}>
-          <option value="auto">Automatic (another model family than the agent’s)</option>
+        <select className="member-role" value={data[name].model} disabled={saving || !!agent.viewOnly} onChange={event => void save(name, { ...data[name], model: event.target.value })}>
+          <option value="auto">Auto (another model family)</option>
           {[...groups].map(([provider, models]) => <optgroup key={provider} label={provider}>{models.map(m => <option key={m.handle} value={m.handle}>{m.label}</option>)}</optgroup>)}
           {data[name].model !== 'auto' && !data.models.some(m => m.handle === data[name].model) && <option value={data[name].model}>{data[name].model}</option>}
         </select>

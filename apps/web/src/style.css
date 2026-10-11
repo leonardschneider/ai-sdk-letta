@@ -1474,7 +1474,8 @@ button.job-last:hover { color: var(--text); }
 .voice-setting[data-voice="ambition"] strong { color: var(--ambition); }
 .voice-setting[data-voice="prudence"] strong { color: var(--prudence); }
 .voice-model-pick { display: grid; gap: 4px; font-size: 12.5px; color: var(--text-2); }
-.voice-model-pick select { width: 100%; min-width: 0; }
+.voice-model-pick select { width: 100%; min-width: 0; height: 34px; font-size: 13px; }
+.voice-setting .settings-switch { margin-top: 0; padding-top: 0; border-top: 0; }
 @media (max-width: 640px) {
   .voices-notes, .voices-settings { grid-template-columns: 1fr; }
 }
