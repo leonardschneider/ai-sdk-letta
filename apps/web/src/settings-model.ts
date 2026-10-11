@@ -31,7 +31,8 @@ export const SECTION_LABELS: Record<SettingsSection, string> = {
 
 /**
  * The sections of an agent's settings page, in order. Adopted agents get Tools,
- * Instructions and the Danger zone (Tools and Instructions not while view only);
+ * Instructions and the Danger zone (Tools and Instructions not while view only),
+ * the app's own agent Tools (tighten only, `toolControl`);
  * Apps and Automations need the feature, admins on a team server, and not view
  * only; Memory needs memory review; Members is for team admins.
  */
@@ -41,6 +42,7 @@ export function settingsSections(agent: AgentInfo, options: { team?: boolean } =
   const adopted = !!agent.adopted && !options.team;
   const sections: SettingsSection[] = ['general'];
   if (adopted && !viewOnly) sections.push('tools', 'instructions');
+  else if (agent.toolControl && !options.team && !viewOnly) sections.push('tools');
   if (agent.apps && admin && !viewOnly) sections.push('apps');
   if (agent.memory) sections.push('memory');
   if (agent.automations && admin && !viewOnly) sections.push('automations');

@@ -1,7 +1,7 @@
 import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
 import { ASK_USER_TOOL } from './tools.js';
-import { REQUEST_DECISION_TOOL } from './decisions.js';
+import { lockedPermissionError } from './tool-control.js';
 import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { includesMcpAppDevTools } from './mcp-app-dev.js';
 import { jobsEnabled, JOBS_NOTE } from './jobs.js';
@@ -244,17 +244,9 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
     if (!permissionValues.includes(mode as ToolPermission)) throw new Error(`Invalid permission for "${name}"`);
     permissions[name] = mode as ToolPermission;
   }
-  if (names.includes(REQUEST_DECISION_TOOL) && permissions[REQUEST_DECISION_TOOL] === 'ask') throw new Error('request_decision already asks people (it is the human gate); use "allow" or "deny"');
-  if (names.includes(ASK_USER_TOOL)) {
-    permissions[ASK_USER_TOOL] ??= 'allow';
-    if (permissions[ASK_USER_TOOL] === 'ask') throw new Error('ask_user is already interactive; use "allow" or "deny"');
-  }
-  // Every web search result is reviewed by a person (or pre-approved by an automation): never 'allow'.
-  if (permissions.web_search === 'allow') throw new Error('web_search results are reviewed by a person before the agent sees them; its permission must be "ask" or "deny"');
-  // Network commands always need a human: approval is the only network switch.
-  if (permissions.run_command_online === 'allow') throw new Error('run_command_online uses the network; its permission must be "ask" or "deny"');
-  // Approving an outside origin for the app always needs a person.
-  if (permissions.allow_web_origin === 'allow') throw new Error('allow_web_origin lets the app reach the internet; its permission must be "ask" or "deny"');
+  if (names.includes(ASK_USER_TOOL)) permissions[ASK_USER_TOOL] ??= 'allow';
+  // Safety rules no definition (or per-tool override) loosens: web_search, run_command_online and allow_web_origin always ask; request_decision and ask_user never do (see LOCKED_PERMISSIONS).
+  for (const name of names) { const refused = lockedPermissionError(name, permissions[name]); if (refused) throw new Error(refused); }
   // Web development needs Node and Chromium: its image, unless the definition names another.
   const sandbox = input.sandbox === undefined ? undefined : resolveSandboxConfig(includesWebDevTools(input.tools) && input.sandbox && typeof input.sandbox === 'object' && input.sandbox.image === undefined ? { ...input.sandbox, image: WEBDEV_IMAGE } : input.sandbox);
   const webDev = resolveWebDevConfig(input.webDev);

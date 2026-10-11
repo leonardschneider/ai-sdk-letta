@@ -90,7 +90,9 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[];
   /** An existing Letta agent adopted in place (single-user app): its Letta ID, model and tool sets here. */
   /** View only: an adopted agent that works in Letta Code; its conversations update live and nothing is sent. */
   viewOnly?: boolean;
-  adopted?: { agentId: string; model: string; effort?: string; tools: string[]; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; commandTimeoutMs?: number; available?: string[] };
+  /** The app's own agent: its tools can be tightened in the settings (`/api/tools`). */
+  toolControl?: boolean;
+  adopted?: { agentId: string; model: string; effort?: string; tools: string[]; overrides?: Record<string, string>; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; commandTimeoutMs?: number; available?: string[] };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;
   /** The agent has MCP Apps: app tool lines show their views; admins see the Apps list. */

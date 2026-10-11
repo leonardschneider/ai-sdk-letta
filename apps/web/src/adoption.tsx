@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { Check, ChevronDown, Cpu, Eye, FileDiff, FolderGit2, LoaderCircle, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
+import { Check, ChevronDown, Cpu, Eye, FileDiff, FolderGit2, LoaderCircle, Lock, Plus, RotateCcw, Trash2, Wrench, X } from 'lucide-react';
 import { ApiError, serverApi, type AgentInfo } from './api.js';
 import { Modal } from './modal.js';
 import { useToast } from './toasts.js';
-import { toggleToolSet } from './tool-sets.js';
+import { modeRefusal, resetSet, sameOverrides, setToolMode, setTokens, shortDescription, toggleToolSet, tokenLabel, toolMode, totalTokens, TOOL_MODES, type ToolControlData, type ToolMode } from './tool-sets.js';
 
 /** A local Letta agent as the "Add agent" picker lists it (`GET /api/adoption/agents`). */
 export type LocalAgent = { agentId: string; name: string; model: string; lastActivity?: string; conversations: number; adoptedAs?: string; refusal?: string; inApp?: boolean; busy?: boolean };
@@ -14,9 +14,9 @@ const TOOL_LABELS: Record<string, string> = { files: 'Files', sandbox: 'Shell co
 /** The server's message for a refusal, or a fixed text. */
 export const adoptionMessage = (error: unknown) => (error instanceof AdoptionError ? error.message : undefined) ?? 'That didn’t work. Nothing was changed.';
 class AdoptionError extends Error { constructor(readonly code: string, message: string) { super(message); } }
-async function adoptionApi<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
+async function adoptionApi<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', prefix = '/adoption'): Promise<T> {
   // A DELETE carries an empty body, so the method is sent (serverApi sends a body-less call as GET).
-  try { return await serverApi<T>(`/adoption${path}`, method === 'DELETE' && body === undefined ? {} : body, method); }
+  try { return await serverApi<T>(`${prefix}${path}`, method === 'DELETE' && body === undefined ? {} : body, method); }
   catch (error) {
     if (!(error instanceof ApiError)) throw new AdoptionError('network', 'Couldn’t reach the local server. Check that it is running.');
     const messages: Record<string, string> = {
@@ -30,6 +30,8 @@ async function adoptionApi<T>(path: string, body?: unknown, method = body === un
       mcp_app_dev_needs_web_dev: 'MCP App development needs web development: turn both on.', web_dev_needs_sandbox: 'Web development needs shell commands (the sandbox): turn both on.',
     };
     // A refused project folder: the server says why (no such folder, credentials in .git/config, home folder...).
+    // A refused tool override: the server says why (a locked tool, tighten only).
+    if (['tool_locked', 'tighten_only', 'invalid_input'].includes(error.code) && error.detail) throw new AdoptionError(error.code, error.detail);
     const project = (error.code === 'project_unsafe' || error.code === 'project_has_credentials') && error.detail ? error.detail : undefined;
     throw new AdoptionError(error.code, project ?? messages[error.code] ?? 'That didn’t work. Nothing was changed.');
   }
@@ -168,36 +170,110 @@ export function ToolsDialog({ agent, onClose, onSaved }: { agent: AgentInfo; onC
   </Modal>;
 }
 
-/** The tool sets form (the Tools dialog and the settings page); Cancel only when `onCancel` is given. */
+/**
+ * The tools form (the Tools dialog and the settings page); Cancel only when
+ * `onCancel` is given. Each tool set is a row (checkbox, cost, chevron); expanded,
+ * its tools with Allow / Ask / Off (the default marked with a dot, locked ones with
+ * a lock and the reason). An adopted agent's sets and overrides are saved with
+ * `PUT /api/adoption/agents/<id>/tools`; the app's own agent (`toolControl`) is
+ * tighten only (`PUT /api/tools`): its sets are chosen in code.
+ */
 export function ToolsPanel({ agent, onSaved, onCancel }: { agent: AgentInfo; onSaved(): void; onCancel?(): void }) {
   const toast = useToast();
+  const own = !agent.adopted;
+  const path = own ? '/tools' : `/adoption/agents/${encodeURIComponent(agent.id)}/tools`;
+  const [data, setData] = useState<ToolControlData>();
   const current = agent.adopted?.tools ?? [];
-  const available = agent.adopted?.available ?? current;
   const [tools, setTools] = useState<string[]>(current);
+  const [savedOverrides, setSavedOverrides] = useState<Record<string, ToolMode>>({});
+  const [overrides, setOverrides] = useState<Record<string, ToolMode>>({});
+  const [open, setOpen] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState('');
-  const changed = tools.length !== current.length || tools.some(t => !current.includes(t));
+  const load = useCallback(async () => {
+    try {
+      const loaded = await toolsApi<ToolControlData>(path);
+      const stored = Object.fromEntries(loaded.sets.flatMap(s => s.tools.filter(t => t.override).map(t => [t.name, t.override!]))) as Record<string, ToolMode>;
+      setData(loaded); setSavedOverrides(stored); setOverrides(stored);
+      if (own) setTools(loaded.sets.map(s => s.set));
+    } catch (error) { setProblem(adoptionMessage(error)); }
+  }, [path, own]);
+  useEffect(() => { void load(); }, [load]);
+  const tightenOnly = !!data?.tightenOnly;
+  const setsChanged = !own && (tools.length !== current.length || tools.some(t => !current.includes(t)));
+  const changed = setsChanged || !sameOverrides(overrides, savedOverrides);
+  const sets = data?.sets ?? [];
+  const total = totalTokens(sets, tools, overrides);
   async function save() {
     setSaving(true); setProblem('');
     try {
-      await adoptionApi(`/agents/${encodeURIComponent(agent.id)}/tools`, { tools }, 'PUT');
-      toast(`${agent.name}’s tools changed. Open conversations get them on their next message.`);
+      const result = await toolsApi<{ queued?: boolean }>(path, own ? { overrides } : { tools, overrides }, 'PUT');
+      toast(`${agent.name}’s tools changed. ${result.queued ? 'Applies after the current reply; ' : 'Open conversations get them on their next message; '}${own ? 'its approvals follow.' : 'instructions update automatically.'}`);
+      setSavedOverrides(overrides);
       onSaved();
     } catch (error) { setProblem(adoptionMessage(error)); } finally { setSaving(false); }
   }
+  const toggleOpen = (set: string) => setOpen(list => list.includes(set) ? list.filter(s => s !== set) : [...list, set]);
   return <form onSubmit={event => { event.preventDefault(); if (changed) void save(); }}>
-    <fieldset className="adopt-tools">
-      <legend className="automations-heading">Tools it gets here</legend>
-      {available.map(set => <label key={set} className="adopt-tool"><input type="checkbox" checked={tools.includes(set)} disabled={saving} onChange={event => { setTools(list => toggleToolSet(list, set, event.target.checked)); setProblem(''); }}/>{TOOL_LABELS[set] ?? set}</label>)}
-      <p className="adopt-meta">Saving restarts {agent.name}’s sandbox and services.</p>
-    </fieldset>
+    {!data && !problem && <p className="muted"><LoaderCircle size={14} className="spin" aria-hidden="true"/> Loading…</p>}
+    {data && <p className="tool-cost-total" aria-live="polite">Tools use <strong>{tokenLabel(total)}</strong> of {agent.name}’s context.</p>}
+    {data && tightenOnly && <p className="adopt-meta">Defined in code: its tool sets are fixed. Here a tool can only be tightened (Ask or Off); Allow is offered where the code allows it.</p>}
+    {data && <fieldset className="tool-sets">
+      <legend className="automations-heading">{own ? 'Its tools' : 'Tools it gets here'}</legend>
+      {sets.map(set => {
+        const enabled = tools.includes(set.set); const expanded = open.includes(set.set);
+        const tokens = setTokens(set, overrides);
+        const custom = set.tools.some(t => overrides[t.name]);
+        return <div key={set.set} className="tool-set" data-enabled={enabled || undefined}>
+          <div className="tool-set-row">
+            {set.fixed ? <span className="tool-set-name">{TOOL_LABELS[set.set] ?? SET_LABELS[set.set] ?? set.set}</span>
+              : <label className="adopt-tool tool-set-name"><input type="checkbox" checked={enabled} disabled={saving} onChange={event => { setTools(list => toggleToolSet(list, set.set, event.target.checked)); setProblem(''); }}/>{TOOL_LABELS[set.set] ?? set.set}</label>}
+            {custom && <span className="tool-set-custom">customized</span>}
+            <span className="tool-set-cost" title="Estimated context cost: tool descriptions and schemas">{tokenLabel(tokens)}</span>
+            <button type="button" className="icon-btn small tool-set-chevron" aria-expanded={expanded} aria-controls={`tools-${agent.id}-${set.set}`} aria-label={`${expanded ? 'Hide' : 'Show'} ${set.tools.length} tools of ${TOOL_LABELS[set.set] ?? SET_LABELS[set.set] ?? set.set}`} onClick={() => toggleOpen(set.set)}>
+              <ChevronDown size={16} aria-hidden="true" className={expanded ? 'open' : undefined}/></button>
+          </div>
+          {expanded && <div className="tool-list" id={`tools-${agent.id}-${set.set}`}>
+            {set.tools.map(tool => {
+              const mode = toolMode(tool, overrides);
+              return <div key={tool.name} className="tool-row">
+                <div className="tool-info">
+                  <span className="tool-name mono-inline">{tool.name}</span>
+                  {tool.locked && <span className="tool-lock" title={tool.locked.reason} aria-label={`Locked: ${tool.locked.reason}`} tabIndex={0}><Lock size={12} aria-hidden="true"/></span>}
+                  <span className="tool-desc">{shortDescription(tool.description)}</span>
+                </div>
+                <div className="tool-seg" role="radiogroup" aria-label={`${tool.name} permission`}>
+                  {TOOL_MODES.map(m => {
+                    const refused = modeRefusal(tool, m, tightenOnly);
+                    return <button key={m} type="button" role="radio" aria-checked={mode === m} className={`tool-opt${mode === m ? ' selected' : ''}`} data-mode={m}
+                      aria-disabled={!!refused || saving || undefined} title={refused ?? (m === tool.default ? 'Default' : undefined)}
+                      onClick={() => { if (refused) { setProblem(`${tool.name}: ${refused}.`); return; } if (!saving) { setOverrides(o => setToolMode(o, tool, m)); setProblem(''); } }}>
+                      {MODE_LABELS[m]}{m === tool.default && <span className="tool-default-dot" aria-label="(default)"/>}
+                    </button>;
+                  })}
+                </div>
+              </div>;
+            })}
+            {custom && <button type="button" className="link-btn tool-reset" onClick={() => setOverrides(o => resetSet(o, set))}><RotateCcw size={13} aria-hidden="true"/>Reset {TOOL_LABELS[set.set] ?? SET_LABELS[set.set] ?? set.set} to defaults</button>}
+          </div>}
+        </div>;
+      })}
+      <p className="adopt-meta">Applies after the current reply; {own ? 'its approvals follow.' : `instructions update automatically. Saving restarts ${agent.name}’s sandbox and services.`}</p>
+    </fieldset>}
     {problem && <p className="form-error" role="alert">{problem}</p>}
     <div className="modal-actions">
+      {Object.keys(overrides).length > 0 && <button type="button" className="btn ghost" disabled={saving} onClick={() => setOverrides({})}><RotateCcw size={15} aria-hidden="true"/>Reset all to defaults</button>}
       {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
-      <button type="submit" className="btn primary" disabled={saving || !changed}>{saving ? 'Saving…' : 'Save'}</button>
+      <button type="submit" className="btn primary" disabled={saving || !changed || !data}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
   </form>;
 }
+
+const MODE_LABELS: Record<ToolMode, string> = { allow: 'Allow', ask: 'Ask', off: 'Off' };
+/** Sets only code-defined agents have. */
+const SET_LABELS: Record<string, string> = { scheduling: 'Scheduling', atlassian: 'Jira and Confluence', custom: 'Its own tools' };
+/** Tools API: an adopted agent's (`/adoption/...`) or the app's own agent's (`/tools`). */
+const toolsApi = <T,>(path: string, body?: unknown, method?: string) => path.startsWith('/adoption/') ? adoptionApi<T>(path.slice('/adoption'.length), body, method) : adoptionApi<T>(path, body, method, '');
 
 /** Remove an adopted agent from the app: the Letta agent, its memory and conversations stay. */
 export function RemoveAgentDialog({ agent, onClose, onRemoved }: { agent: AgentInfo; onClose(): void; onRemoved(): void }) {

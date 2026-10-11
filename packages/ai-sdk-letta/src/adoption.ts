@@ -19,6 +19,7 @@ import { webDevTools, WEBDEV_TOOL_PERMISSIONS, WEB_DEV_NOTE } from './webdev.js'
 import { mcpAppDevTools, MCP_APP_DEV_TOOL_PERMISSIONS } from './mcp-app-dev.js';
 import { MCP_APP_DEV_NOTE } from './mcp-app-guide.js';
 import { SANDBOX_IMAGE } from './sandbox.js';
+import { applyToolOverrides, toolControl, type ToolControl, type ToolOverride } from './tool-control.js';
 
 /**
  * Adopting existing local Letta agents in place: an agent made elsewhere
@@ -56,6 +57,12 @@ export type AdoptionRecord = {
   effort?: string;
   /** Tool sets it gets in this app. */
   tools: AdoptedToolSet[];
+  /**
+   * Per-tool overrides on top of its sets' defaults: `off` leaves the tool
+   * out, `allow` or `ask` set its permission. Locked tools never loosen (see
+   * `LOCKED_PERMISSIONS`); unknown tools are ignored.
+   */
+  toolOverrides?: Record<string, ToolOverride>;
   adoptedAt: string;
   /**
    * An approved instructions update: the system prompt before it, and after
@@ -389,6 +396,44 @@ export function defaultAdoptedTools(environment: AdoptionEnvironment = {}): Adop
   return ['files', ...(environment.sandbox ? ['sandbox' as const] : []), 'decisions', 'jobs', ...(environment.webSearch ? ['web_search' as const] : []), 'ask_user'];
 }
 
+/** Each tool set's tools and default (fail-closed) permissions, on this host (a set the host lacks has none). */
+export function adoptedSetTools(set: AdoptedToolSet, environment: AdoptionEnvironment = {}): { tools: ToolSet; permissions: Record<string, ToolPermission> } {
+  const webDev = webDevSandbox(environment);
+  switch (set) {
+    case 'files': return { tools: { ...fileTools }, permissions: { ...FILE_TOOL_PERMISSIONS } };
+    case 'sandbox': return environment.sandbox ? { tools: { ...sandboxTools }, permissions: { ...SANDBOX_TOOL_PERMISSIONS } } : { tools: {}, permissions: {} };
+    case 'decisions': return { tools: { ...decisionTools }, permissions: { ...DECISION_TOOL_PERMISSIONS } };
+    case 'jobs': return { tools: { ...jobTools }, permissions: { ...JOB_TOOL_PERMISSIONS } };
+    case 'web_search': return environment.webSearch ? { tools: { ...webSearchTools }, permissions: { ...WEB_SEARCH_TOOL_PERMISSIONS } } : { tools: {}, permissions: {} };
+    case 'ask_user': return { tools: { [ASK_USER_TOOL]: askUserTool }, permissions: { [ASK_USER_TOOL]: 'allow' } };
+    case 'web_dev': return webDev ? { tools: { ...webDevTools }, permissions: { ...WEBDEV_TOOL_PERMISSIONS } } : { tools: {}, permissions: {} };
+    case 'mcp_app_dev': return webDev ? { tools: { ...mcpAppDevTools }, permissions: { ...MCP_APP_DEV_TOOL_PERMISSIONS } } : { tools: {}, permissions: {} };
+  }
+}
+
+/** The tools and default permissions of tool sets, before overrides (web development needs the sandbox; MCP App development needs web development). */
+export function adoptedToolBase(sets: readonly AdoptedToolSet[], environment: AdoptionEnvironment = {}): { tools: ToolSet; permissions: Record<string, ToolPermission> } {
+  const has = new Set(sets);
+  const webDev = has.has('web_dev') && has.has('sandbox') && webDevSandbox(environment);
+  const appDev = webDev && has.has('mcp_app_dev');
+  const tools: ToolSet = {}; const permissions: Record<string, ToolPermission> = {};
+  for (const set of orderedAdoptedTools([...has])) {
+    if ((set === 'web_dev' && !webDev) || (set === 'mcp_app_dev' && !appDev)) continue;
+    const part = adoptedSetTools(set, environment);
+    Object.assign(tools, part.tools); Object.assign(permissions, part.permissions);
+  }
+  return { tools, permissions };
+}
+
+/**
+ * Per-tool control of an adopted agent (`GET .../tools`): every set the host
+ * offers, its tools with their defaults, the record's overrides, locks and
+ * context cost estimates.
+ */
+export function adoptedToolControl(record: Pick<AdoptionRecord, 'tools' | 'toolOverrides'>, available: readonly AdoptedToolSet[], environment: AdoptionEnvironment = {}): ToolControl {
+  return toolControl(available.map(set => ({ set, enabled: record.tools.includes(set), base: adoptedSetTools(set, environment) })), record.toolOverrides ?? {});
+}
+
 /**
  * The definition an adopted agent runs with: the agent itself (by ID, with
  * its name and model), the app's tools for the record's tool sets (each
@@ -405,21 +450,13 @@ export function adoptedDefinition(record: AdoptionRecord, environment: AdoptionE
   const sets = new Set(record.viewOnly ? [] : record.tools);
   // Web development needs the shell tools and a CLI sandbox; MCP App development needs web development (a record that no longer fits the host just loses them).
   const webDev = sets.has('web_dev') && sets.has('sandbox') && webDevSandbox(environment);
-  const appDev = webDev && sets.has('mcp_app_dev');
   // Its own project folder replaces the host's (if any); the sandbox checks it again and mounts its real path.
   // With web development, the default image becomes the web development one (defineAgent picks WEBDEV_IMAGE when no image is named).
-  const base = environment.sandbox ? (webDev && environment.sandbox.image === SANDBOX_IMAGE ? (({ image: _default, ...rest }) => rest)(environment.sandbox) : environment.sandbox) : undefined;
-  const sandbox = base ? { ...base, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
-  const tools: ToolSet = {
-    ...(sets.has('files') ? fileTools : {}), ...(sets.has('sandbox') && environment.sandbox ? sandboxTools : {}),
-    ...(sets.has('decisions') ? decisionTools : {}), ...(sets.has('jobs') ? jobTools : {}), ...(sets.has('web_search') && environment.webSearch ? webSearchTools : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: askUserTool } : {}),
-    ...(webDev ? webDevTools : {}), ...(appDev ? mcpAppDevTools : {}),
-  };
-  const permissions: Record<string, ToolPermission> = {
-    ...(sets.has('files') ? FILE_TOOL_PERMISSIONS : {}), ...(sets.has('sandbox') && environment.sandbox ? SANDBOX_TOOL_PERMISSIONS : {}),
-    ...(sets.has('decisions') ? DECISION_TOOL_PERMISSIONS : {}), ...(sets.has('jobs') ? JOB_TOOL_PERMISSIONS : {}), ...(sets.has('web_search') && environment.webSearch ? WEB_SEARCH_TOOL_PERMISSIONS : {}), ...(sets.has('ask_user') ? { [ASK_USER_TOOL]: 'allow' as const } : {}),
-    ...(webDev ? WEBDEV_TOOL_PERMISSIONS : {}), ...(appDev ? MCP_APP_DEV_TOOL_PERMISSIONS : {}),
-  };
+  const sandboxBase = environment.sandbox ? (webDev && environment.sandbox.image === SANDBOX_IMAGE ? (({ image: _default, ...rest }) => rest)(environment.sandbox) : environment.sandbox) : undefined;
+  const sandbox = sandboxBase ? { ...sandboxBase, ...(record.project ? { project: record.project } : {}), ...(validCommandTimeout(record.commandTimeoutMs) ? { timeoutMs: record.commandTimeoutMs } : {}) } : undefined;
+  const base = adoptedToolBase([...sets], environment);
+  // Per-tool overrides after the sets: off, ask or allow (never loosening a locked tool).
+  const { tools, permissions } = applyToolOverrides(base, record.viewOnly ? undefined : record.toolOverrides);
   return defineAgent({
     id: record.definitionId, name: record.name.slice(0, 120) || record.agentId, model: record.model.includes('/') ? record.model : 'unknown/unknown',
     // Never applied: an adopted agent keeps its own system prompt.

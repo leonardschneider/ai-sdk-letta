@@ -95,10 +95,14 @@ export { lettaSummarizer, sweepWebSummarizers, summarizerSessionOptions, WEB_SUM
 export { parseTitle, titleText, nodesText, safeLinkHref, shortUrl, looksLikeUrl, type TitleNode } from './title.js';
 export { resolveStateDirectory, statePaths, STATE_DIR_ENV } from './state.js';
 export {
-  AdoptionStore, adoptedDefinition, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, checkAdoptedProject, validCommandTimeout, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, conversationDirectory, adoptedInstructionsSection, withoutInstructionsSection, instructionsSectionOf, instructionsUpdate,
+  AdoptionStore, adoptedDefinition, adoptedSetTools, adoptedToolBase, adoptedToolControl, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, checkAdoptedProject, validCommandTimeout, defaultAdoptedTools, adoptionFile, adoptionRefusal, adoptedDefinitionId, hiddenAgent, listAdoptableAgents, lettaCodeActivity, conversationDirectory, adoptedInstructionsSection, withoutInstructionsSection, instructionsSectionOf, instructionsUpdate,
   ADOPTED_TOOL_SETS, ADOPTION_LIMIT, RECENT_ACTIVITY_MS, INSTRUCTIONS_BEGIN, INSTRUCTIONS_END,
   type AdoptionRecord, type AdoptedToolSet, type AdoptionEnvironment, type LocalAgentSummary, type LettaCodeActivity, type ActivityOptions,
 } from './adoption.js';
+export {
+  LOCKED_PERMISSIONS, SET_ANCHORS, TOOL_OVERRIDES, toolLock, lockedPermissionError, overrideRefusal, checkToolOverrides, applyToolOverrides, toolTokens, toolControl, ToolOverrideError,
+  type ToolOverride, type ToolLock, type ToolBase, type OverrideOptions, type ToolControl, type ToolControlSet, type ToolControlTool,
+} from './tool-control.js';
 export {
   McpApps, McpAppRecords, McpAppViewStates, McpAppError, MCP_APP_STATE_MOUNT, ProcessStdioTransport, agentInputSchema, resolveMcpApps, toolVisibility, modelVisible, appVisible, toolResourceUri, agentToolName, grantedCsp, declaredCsp, mcpAppCsp, mcpAppModelOutput,
   mcpAppConnector, isHttpTarget, runtimeTarget, containerLauncher, mcpAppRunArgs, prepareMcpApp, prepareMcpApps, MCP_APP_LIMITS, MCP_APP_HTTP_DEFAULTS, MCP_APP_HTTP_PATH, validHttpPort, MCP_APPS_CONTEXT, MCP_APP_PROXY_PORT, devAppId, isDevAppId, DEV_APP_NAME,
