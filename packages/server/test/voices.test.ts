@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { SDKMessage, SendMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
 import { LettaAgent, ToolInteractions, projectHistory, REFLECTION_PART, type InnerVoice } from 'ai-sdk-letta';
-import { ThreadRuntime, DefinitionVoices, checkVoiceSettings, voiceCounsellor, counselRequest, runReply, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
+import { ThreadRuntime, turnStep, DefinitionVoices, checkVoiceSettings, voiceCounsellor, counselRequest, runReply, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
 import type { RunCounsel } from '../src/runtime.js';
 
 /**
@@ -153,6 +153,10 @@ test('kept: the voices review the draft, the agent answers KEEP in a second step
   assert.equal(run.counsel?.draft, undefined);
   assert.deepEqual(Object.keys(run.counsel!.notes).sort(), ['ambition', 'prudence']);
   assert.deepEqual(run.events.filter(e => e.type === 'reflecting').map(e => e.data.phase), ['review', 'reflect']);
+  // The activity step while reviewing and reflecting reads "Reflecting".
+  const upTo = (type: string) => ({ events: run.events.slice(0, run.events.findIndex(e => e.type === type) + 1) as never });
+  assert.equal(turnStep(upTo('reflecting')), 'reflecting');
+  assert.equal(turnStep({ events: [{ sequence: 1, type: 'text', data: { text: 'x', phase: 'reflection' } }] }), 'reflecting');
   assert.equal(runReply(run as never), 'Got: Plan my chess bot ELO measurement. Plan: play 2 more games.');
   // The hidden prompt: one more message of the same conversation, a reminder only, tagged `<run>:reflect`.
   assert.equal(f.sent.length, 2);
