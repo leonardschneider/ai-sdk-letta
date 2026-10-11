@@ -79,17 +79,31 @@ test('rounds in history: only the last revision shows; each round is in the coll
   assert.ok(!JSON.stringify(messages).includes('KEEP'));
 });
 
-test('the collapsed line: revised 2×, kept, the agent\'s debate or skip with its reason; settings bounds', async () => {
+test('the collapsed line: revised 2×, kept, debate (older records keep the agent\'s reason or skip); settings bounds', async () => {
   const { voicesLine, voicesLabel, validPolicy } = await import('../src/voices.js');
   const notes = { ambition: { points: ['p'], confidence: 'high' as const } };
-  const revised = { at: 'now', notes, outcome: 'revised' as const, revisions: 2, mode: 'debate' as const, choice: { mode: 'debate' as const, reason: 'a factual claim' } };
-  assert.equal(voicesLabel(voicesLine(undefined, revised), revised), 'Revised 2× after Ambition & Prudence · Debate: a factual claim');
+  const revised = { at: 'now', notes, outcome: 'revised' as const, revisions: 2, mode: 'debate' as const };
+  assert.equal(voicesLabel(voicesLine(undefined, revised), revised), 'Revised 2× after Ambition & Prudence · Debate');
   const kept = { at: 'now', notes, outcome: 'kept' as const, mode: 'calibrated' as const };
   assert.equal(voicesLabel(voicesLine(undefined, kept), kept), 'Kept after Ambition & Prudence');
-  const skipped = { at: 'now', notes: {}, outcome: 'skipped' as const, reason: 'agent_skipped' as const, mode: 'skip' as const, choice: { mode: 'skip' as const, reason: 'a greeting' } };
+  // Older records (the removed per-turn choice) still read.
+  const old = { ...revised, choice: { mode: 'debate', reason: 'a factual claim' } };
+  assert.equal(voicesLabel(voicesLine(undefined, old), old), 'Revised 2× after Ambition & Prudence · Debate: a factual claim');
+  const skipped = { at: 'now', notes: {}, outcome: 'skipped' as const, reason: 'agent_skipped' as const, mode: 'skip' as const, choice: { mode: 'skip', reason: 'a greeting' } };
   assert.equal(voicesLine(undefined, skipped), 'skipped');
   assert.equal(voicesLabel('skipped', skipped), 'Skipped review: a greeting');
-  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'skip', minimum: 'calibrated_if_tools', maximum: 'debate', maxRevisions: 2 }), true);
-  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'skip', minimum: 'calibrated', maximum: 'debate', maxRevisions: 1 }), false);
-  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'calibrated', minimum: 'debate', maximum: 'calibrated', maxRevisions: 1 }), false);
+  assert.equal(validPolicy({ minimum: 'calibrated', maximum: 'debate', maxRevisions: 2 }), true);
+  assert.equal(validPolicy({ minimum: 'debate', maximum: 'debate', maxRevisions: 1 }), true);
+  assert.equal(validPolicy({ minimum: 'debate', maximum: 'calibrated', maxRevisions: 1 }), false);
+});
+
+test('a consultation\'s line: asking, then who was asked and the question; one voice; failures; JSON text results', async () => {
+  const { consultLabel, parseConsultResult } = await import('../src/voices.js');
+  const result = { ok: true, mode: 'debate', question: 'Is 4.c3 sound?', notes: { prudence: { points: ['c3 is legal.'], confidence: 'high' } } };
+  assert.equal(consultLabel({ question: 'Is 4.c3 sound?' }, undefined, true), 'Asking Ambition & Prudence…');
+  assert.equal(consultLabel({ question: 'Is 4.c3 sound?', voices: ['prudence'] }, parseConsultResult(JSON.stringify(result)), false), 'Asked Prudence: Is 4.c3 sound? · Debate');
+  assert.equal(consultLabel({ question: 'q' }, parseConsultResult({ ok: false, error: 'limit_reached' }), false), 'Couldn’t ask Ambition & Prudence (limit for this turn)');
+  assert.equal(consultLabel({ question: 'x'.repeat(200) }, parseConsultResult({ ...result, mode: 'calibrated' }), false).length, 'Asked Ambition & Prudence: '.length + 90);
+  assert.equal(parseConsultResult('not json'), undefined);
+  assert.deepEqual(parseConsultResult(result), { ok: true, mode: 'debate', question: 'Is 4.c3 sound?', notes: result.notes });
 });

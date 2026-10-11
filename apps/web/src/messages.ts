@@ -259,7 +259,7 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
       else parts.push({ type: 'reasoning', text: String(d.text) });
     } else if (event.type === 'reflecting' && d.phase === 'reflect') parts.push({ type: REFLECTION, data: {} } as unknown as Part);
     else if (event.type === 'listened') parts.push({ type: LISTENED, data: typeof d.reason === 'string' ? { reason: d.reason } : {} } as unknown as Part);
-    // The agent's inner_voices choice shows in the voices line, never as a tool card.
+    // The removed inner_voices choice (older runs) is never a tool card.
     else if (event.type === 'tool_started' && d.name !== 'inner_voices') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'tool-call' && p.toolCallId === d.toolCallId);
