@@ -92,6 +92,8 @@ export type AgentInfo = { id: string; name: string; approvalTools: string[];
   viewOnly?: boolean;
   /** The app's own agent: its tools can be tightened in the settings (`/api/tools`). */
   toolControl?: boolean;
+  /** The inner voices that are on (`ambition`, `prudence`): replies offer "Ask Ambition & Prudence". */
+  voices?: string[];
   adopted?: { agentId: string; model: string; effort?: string; tools: string[]; overrides?: Record<string, string>; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; commandTimeoutMs?: number; available?: string[] };
   /** The agent develops web apps: the Preview pane shows each conversation's dev server. */
   webDev?: boolean;

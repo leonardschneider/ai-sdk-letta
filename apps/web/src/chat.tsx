@@ -16,6 +16,7 @@ import { CommandJobCard, JobCard, JobsContext, useCommandJob } from './jobs.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 import { EditAction, EditBubble, RewindContext } from './rewind.js';
 import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
+import { ReplyVoices } from './voices.js';
 
 /* ------------------------------------------------------------------ */
 /* Interaction state shared between the inline lines and the dock      */
@@ -147,6 +148,9 @@ function BubbleMessage({ role, time }: { role: string; time?: string | undefined
   const me = useContext(AuthorContext);
   const authorId = useAuiState(s => (s.message.metadata.custom as { author?: Author } | undefined)?.author?.id);
   const mine = role === 'user' && (me === undefined || authorId === me);
+  // The inner voices weigh in on a finished reply (the run of the message before it).
+  const replyRun = useAuiState(s => (s.message.metadata.custom as { replyRun?: string } | undefined)?.replyRun);
+  const finished = useAuiState(s => s.message.status?.type === 'complete' || (s.message.role === 'assistant' && !s.message.status));
   return <MessagePrimitive.Root className="msg" data-role={role} data-editing={editing || undefined}>
     <MessageAuthor role={role}/>
     <div className="msg-body">
@@ -154,6 +158,7 @@ function BubbleMessage({ role, time }: { role: string; time?: string | undefined
         ? editing ? <EditBubble runId={runId} text={text}/> : <UserBubble/>
         : <AssistantParts/>}
     </div>
+    {role === 'assistant' && finished && <ReplyVoices runId={replyRun}/>}
     {!editing && (hasText || time) && <ActionBarPrimitive.Root className="msg-actions" hideWhenRunning autohide="never">
       {hasText && <ActionBarPrimitive.Copy className="icon-btn small copy-btn" aria-label="Copy message" title="Copy">
         <Copy size={14} className="when-idle" aria-hidden="true"/><Check size={14} className="when-copied" aria-hidden="true"/>

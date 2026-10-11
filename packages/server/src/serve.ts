@@ -1,3 +1,4 @@
+import express from 'express';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -14,6 +15,7 @@ import { TeamDirectory, authorOf } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
 import { AdoptionRegistry, adoptedPeek } from './adoption.js';
 import { DefinitionToolOverrides } from './tool-overrides.js';
+import { DefinitionVoices, enabledVoices, voiceCounsellor } from './voices.js';
 import { conductorOrchestrator, n8nOrchestrator, type Orchestrator } from './scheduler.js';
 import { PreviewTokens, previewOrigin, startPreviewServer, type PreviewServer, type PreviewTarget } from './preview.js';
 import { AppGate } from './mcp-apps.js';
@@ -311,6 +313,10 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const toolOverrides = new DefinitionToolOverrides(definition, stateDirectory, effective => { info.approvalTools = Object.keys(effective.permissions).filter(name => effective.permissions[name] === 'ask'); });
     info.approvalTools = Object.keys(toolOverrides.effective().permissions).filter(name => toolOverrides.effective().permissions[name] === 'ask');
     const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    // The inner voices (Ambition and Prudence) of the app's own agent: off until turned on (<state>/server/<id>/voices.json).
+    const voiceSettings = new DefinitionVoices(definition.id, stateDirectory, settings => { const on = enabledVoices(settings); if (on.length) info.voices = on; else delete info.voices; });
+    if (enabledVoices(voiceSettings.get()).length) info.voices = enabledVoices(voiceSettings.get());
+    runtime.voices = voiceCounsellor({ settings: () => voiceSettings.get(), agentModel: () => definition.model, directory: join(directory, 'voices') });
     const { webDev, apps } = dev;
     previewMembers.add(dev.bind(runtime, { owner, directory, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port }));
     const board = decisions.bind(runtime, directory, owner);
@@ -365,7 +371,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
           sandbox: token => { for (const member of previewMembers) { const page = member.sandbox(token); if (page.status !== 404) return page; } return { status: 404 }; } });
         previewRef.port = preview.port;
       }
-      const server = guiApp(runtime, owner, port, assets, Object.assign(info, automation ? { automations: true } : {}), credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui(), toolOverrides.routes()).listen(port, '127.0.0.1');
+      const server = guiApp(runtime, owner, port, assets, Object.assign(info, automation ? { automations: true } : {}), credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui(), express.Router().use(toolOverrides.routes(), voiceSettings.routes())).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       appPort = bound; appPortRef.port = bound;
       const url = `http://127.0.0.1:${bound}`;

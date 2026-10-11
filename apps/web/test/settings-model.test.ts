@@ -30,8 +30,8 @@ test('sections: the main (definition) agent', () => {
 });
 
 test('sections: an adopted agent', () => {
-  assert.deepEqual(settingsSections(agent({ adopted: adopted() })), ['general', 'tools', 'instructions', 'danger']);
-  assert.deepEqual(settingsSections(agent({ adopted: adopted(), apps: true, memory: true })), ['general', 'tools', 'instructions', 'apps', 'memory', 'danger']);
+  assert.deepEqual(settingsSections(agent({ adopted: adopted() })), ['general', 'tools', 'voices', 'instructions', 'danger']);
+  assert.deepEqual(settingsSections(agent({ adopted: adopted(), apps: true, memory: true })), ['general', 'tools', 'voices', 'instructions', 'apps', 'memory', 'danger']);
 });
 
 test('sections: a view-only agent hides what it cannot change here', () => {

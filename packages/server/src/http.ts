@@ -221,6 +221,15 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
     const summary = runtime.updateMetadata(owner, req.params.id, req.body); await runtime.folderRenamed(); res.json(summary);
   });
   app.get('/v1/threads/:id/history', async (req, res) => res.json(await runtime.history(owner, req.params.id)));
+  /**
+   * Ask the inner voices (Ambition and Prudence, those that are on) about a finished turn of the thread: its notes are
+   * stored with the run and go to the agent once, in its next turn. Members and admins may ask, as for sending.
+   */
+  app.post('/v1/threads/:id/runs/:runId/counsel', async (req, res) => {
+    const control = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) control.abort(); });
+    res.json(await runtime.counsel(owner, req.params.id, req.params.runId, control.signal));
+  });
   /* ---------------- web app development: the preview ---------------- */
   /** The conversation's dev server, approved origins and preview URL (`{ enabled: false }` without web development). */
   app.get('/v1/threads/:id/preview', (req, res) => res.json(runtime.webDevStatus(owner, req.params.id)));
@@ -457,6 +466,8 @@ export interface GuiAgentInfo {
   viewOnly?: boolean;
   /** The app's own agent: its tools can be tightened from the settings (`/api/tools`). */
   toolControl?: boolean;
+  /** The inner voices that are on (the app offers "Ask Ambition & Prudence" under replies); absent when none. */
+  voices?: readonly string[];
   adopted?: { agentId: string; model: string; effort?: string; tools: readonly string[]; /** Per-tool overrides (`allow`, `ask`, `off`). */ overrides?: Readonly<Record<string, string>>; instructions: boolean; project?: string; viewOnly?: boolean; sandbox?: boolean; /** The effective sandbox per-command timeout (ms). */ commandTimeoutMs?: number; /** Tool sets the host offers it (for editing its tools). */ available?: readonly string[] };
   /** The agent develops web apps (`webDevTools`): the app shows the Preview pane. */
   webDev?: boolean;
@@ -650,7 +661,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   });
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
-    res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}), ...(agent.toolControl && toolRoutes ? { toolControl: true } : {}) }, versions,
+    res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}), ...(agent.toolControl && toolRoutes ? { toolControl: true } : {}), ...(agent.voices?.length ? { voices: [...agent.voices] } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: !info.viewOnly })), adoption: true } : {}) });
   });

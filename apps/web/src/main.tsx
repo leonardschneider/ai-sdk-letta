@@ -11,7 +11,7 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, observedParts, userContent, withAuthor, withBackground, withDecision, withRun, withSource, withoutListened, withTime, type FileChip, type MessageBackground, type MessageSource } from './messages.js';
+import { historyMessages, markListened, observedParts, userContent, withAuthor, withBackground, withDecision, withRun, withSource, withoutListened, withReplyRuns, withTime, type FileChip, type MessageBackground, type MessageSource } from './messages.js';
 import { ClaimCard, DecisionBell, DecisionsContext, MemoryReviewCard, NoticeCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
 import { decideError, mayReview, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
@@ -27,6 +27,7 @@ import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
 import { AuthorContext, InteractionContext, InteractionDock, Message } from './chat.js';
+import { askCounsel, counselError, VoicesContext, type RunCounsel, type VoicesState } from './voices.js';
 import { RewindContext, RewindDialog, type RewindState } from './rewind.js';
 import { rewindError, type RewindSummary } from './rewind-model.js';
 import { LatexContext } from './markdown.js';
@@ -57,7 +58,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome; background?: MessageBackground }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome; background?: MessageBackground }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean; counsels?: Record<string, RunCounsel> };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -164,6 +165,9 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const [checkNote, setCheckNote] = useState('');
   // A stopped reply (Stop or a turn limit): marked under the reply; the conversation stays usable.
   const [stoppedNote, setStoppedNote] = useState<{ runId: string; text: string }>();
+  // The inner voices' notes on this conversation's replies (by run), and the replies they are weighing in on now.
+  const [counsels, setCounsels] = useState<Record<string, RunCounsel>>({});
+  const [asking, setAsking] = useState<Set<string>>(new Set());
   // A failed reply: why (the harness's error), under "This reply failed"; `usable`: nothing ran, so the conversation stays usable.
   const [failedNote, setFailedNote] = useState<{ runId: string; error?: string; usable: boolean }>();
   const [interaction, setInteraction] = useState<InteractionRequest>();
@@ -408,6 +412,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
 
   /** The conversation's state from its view: read-only (with Check and unlock) after an uncertain turn; a stopped reply marked as such. */
   function showState(view: View) {
+    setCounsels(view.counsels ?? {});
     // The server says whether the conversation takes new turns (a checked turn keeps its status but is usable); older servers: by status.
     const locked = view.usable === undefined ? isLocked(view.status) : !view.usable && !view.live;
     setBlocked(locked ? lockedNotice(view.code) : '');
@@ -443,7 +448,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     if (team) { stream.current?.abort(); liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
     operation.current = true; setLoading(true); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setFailedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     const previous = currentRef.current;
-    setCurrent({ id, draft: false }); setMessages([]); setDrawer(false);
+    setCurrent({ id, draft: false }); setMessages([]); setDrawer(false); setCounsels({});
     try {
       // Reading a view never sends input; retry briefly if another tab holds the single runtime.
       let view: View | undefined;
@@ -743,7 +748,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Sent files download from where they are now in the resources (the server follows moves and renames).
   const fileLink = useCallback((name: string) => current.draft ? undefined : apiPath(`/v1/threads/${encodeURIComponent(current.id)}/files/${encodeURIComponent(name)}`), [current]);
   // The quiet "Listened" lines can be hidden (a per-browser setting); the messages themselves always stay.
-  const shown = useMemo(() => showListened ? messages : withoutListened(messages), [messages, showListened]);
+  const shown = useMemo(() => withReplyRuns(showListened ? messages : withoutListened(messages)), [messages, showListened]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     // Team mode: the composer stays usable during a reply (messages queue), so the runtime is never "running" for assistant-ui.
     messages: shown, convertMessage: m => m, isRunning: team ? false : running, isLoading: loading,
@@ -864,6 +869,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const feedKey = feed.decisions.map(d => d.id).join(',');
   useEffect(() => { if (!current.draft && feed.loaded) void loadDecisions(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [feedKey]);
   const loading_ = useRef(new Set<string>());
+  const voicesState = useMemo<VoicesState>(() => ({
+    enabled: !!agent.voices?.length, counsels, asking,
+    ask: runId => {
+      const threadId = currentRef.current.id;
+      if (currentRef.current.draft) return;
+      setAsking(set => new Set(set).add(runId));
+      void askCounsel(threadId, runId).then(result => { if (currentRef.current.id === threadId) setCounsels(all => ({ ...all, [result.runId]: result.counsel, ...(result.runId !== runId ? { [runId]: result.counsel } : {}) })); },
+        error => toast(counselError(error), { tone: 'error' }))
+        .finally(() => setAsking(set => { const next = new Set(set); next.delete(runId); return next; }));
+    },
+  }), [agent.voices, counsels, asking]);
   const decisionsState = useMemo<DecisionsState>(() => ({
     byId: threadDecisions, team: !!team, admin: !team || isAdmin, ...(team ? { me: team.user.id } : {}),
     ensure: id => {
@@ -979,6 +995,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   <InteractionContext.Provider value={{ request: interaction, outcome: interactionOutcome, sent: sentAnswer, approvalTools, answer, ...(waitingFor ? { waitingFor } : {}) }}>
     <AuthorContext.Provider value={team?.user.id}>
     <DecisionsContext.Provider value={decisionsState}>
+    <VoicesContext.Provider value={voicesState}>
     <FileLinkContext.Provider value={fileLink}>
     <LatexContext.Provider value={latex}>
     <RewindContext.Provider value={rewindState}>
@@ -1128,6 +1145,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     </RewindContext.Provider>
     </LatexContext.Provider>
     </FileLinkContext.Provider>
+    </VoicesContext.Provider>
     </DecisionsContext.Provider>
     </AuthorContext.Provider>
   </InteractionContext.Provider>
