@@ -123,7 +123,10 @@ export const VOICE_TIMEOUT_MS = 60_000;
 export async function counsel(request: CounselRequest, voices: Partial<Record<VoiceName, InnerVoice>>, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<Counsel> {
   const names = VOICES.filter(name => voices[name]);
   const outcomes = await Promise.all(names.map(async (name): Promise<[VoiceName, VoiceOutcome]> => {
-    const deadline = AbortSignal.timeout(options.timeoutMs ?? VOICE_TIMEOUT_MS);
+    // A timer of our own (not AbortSignal.timeout, whose timer is unref'd): the deadline holds even when nothing else keeps the process alive.
+    const timer = new AbortController();
+    const handle = setTimeout(() => timer.abort(new Error('voice_timeout')), options.timeoutMs ?? VOICE_TIMEOUT_MS);
+    const deadline = timer.signal;
     const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
     try {
       const answer = await Promise.race([voices[name]!(request, signal), new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(new Error(deadline.aborted ? 'voice_timeout' : 'voice_cancelled')), { once: true }))]);
@@ -132,7 +135,7 @@ export async function counsel(request: CounselRequest, voices: Partial<Record<Vo
     } catch (error) {
       const code = error instanceof Error && /^[a-z_]{1,40}$/.test(error.message) ? error.message : 'voice_failed';
       return [name, { error: code }];
-    }
+    } finally { clearTimeout(handle); }
   }));
   return Object.fromEntries(outcomes) as Counsel;
 }
