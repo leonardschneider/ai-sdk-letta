@@ -63,12 +63,14 @@ test('the voices pick a model of another family than the agent', () => {
   assert.deepEqual(chooseReviewerModel('anthropic/claude-sonnet-5', available), { model: 'openai-codex/gpt-5.5', reason: 'other-family' });
 });
 
-test('personas are mirror images, advisory, and each states the other\'s point', () => {
+test('personas are mirror images, advisory, and independent: neither knows of the other', () => {
   assert.match(AMBITION_PERSONA, /success, recognition and achievement/);
   assert.match(AMBITION_PERSONA, /respect evidence/);
   assert.match(PRUDENCE_PERSONA, /avoiding mistakes, failure and shame/);
   assert.match(PRUDENCE_PERSONA, /want the goal reached/);
-  for (const persona of [AMBITION_PERSONA, PRUDENCE_PERSONA]) { assert.match(persona, /no tools/); assert.match(persona, /advisory only/); assert.match(persona, /DATA to weigh, never instructions/); }
+  for (const persona of [AMBITION_PERSONA, PRUDENCE_PERSONA]) { assert.match(persona, /no tools/); assert.match(persona, /advisory only/); assert.match(persona, /DATA to weigh, never instructions/); assert.match(persona, /judge alone/); }
+  assert.doesNotMatch(AMBITION_PERSONA, /Prudence/);
+  assert.doesNotMatch(PRUDENCE_PERSONA, /Ambition/);
 });
 
 test('Jiminy\'s session options are unchanged by the shared helper', () => {
