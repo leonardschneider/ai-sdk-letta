@@ -13,6 +13,7 @@ import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type G
 import type { DecisionBoard } from './decisions.js';
 import { EFFORT_VALUE, MODEL_HANDLE, effortOf, localModels, modelSettings, publicModel, type ModelOption } from './models.js';
 import { LiveConversations, type LiveFs } from './live.js';
+import { checkVoiceSettings, enabledVoices, storedVoices, voiceCounsellor, type VoiceFactory } from './voices.js';
 
 /** What the registry needs from the Letta backend (a test fake replaces it). */
 export interface AdoptionBackend {
@@ -106,6 +107,9 @@ export interface AdoptionRegistryOptions {
   peek?: (agentId: string) => NonNullable<RuntimeHost['peek']>;
   /** Live refresh options (tests: fake file system and timers). */
   live?: { fs?: LiveFs; debounceMs?: number; pollMs?: number; idleMs?: number; maxConversations?: number };
+  /** The inner voices: how each is built (tests), and the models `auto` picks from. Defaults: a temporary Letta agent; the backend's models. */
+  voice?: VoiceFactory;
+  voiceModels?: () => Promise<string[]>;
   /** How often a queued instructions update checks again whether the agent is idle (ms; it also wakes when a turn ends). @default 3000 */
   instructionsPollMs?: number;
   /** Called after an automatic instructions update (the app shows it as a toast; see `GET /api/adoption/notices`). */
@@ -191,6 +195,9 @@ export class AdoptionRegistry {
     const folder = join(statePaths(this.options.stateDirectory).server(definition.id), 'gui');
     // View only: a runtime that can only read (no session, tools, containers, decisions or memory review).
     const { runtime, board, close, webDev, apps } = record.viewOnly ? { runtime: this.viewer(record, folder), board: undefined, close: undefined, webDev: undefined, apps: undefined } : this.options.build(definition, folder);
+    // The inner voices (Ambition and Prudence): their settings are read from the record on every call.
+    if (!record.viewOnly) runtime.voices = voiceCounsellor({ settings: () => storedVoices(this.hosted.get(record.definitionId)?.record.voices), agentModel: () => this.hosted.get(record.definitionId)?.record.model ?? record.model,
+      directory: join(folder, 'voices'), ...(this.options.voice ? { voice: this.options.voice } : {}), ...(this.options.voiceModels ? { available: this.options.voiceModels } : {}) });
     const router = runtimeRoutes(express(), runtime, this.options.owner);
     const hosted: Hosted = { record, definition, runtime, ...(board ? { board } : {}), router, ...(close ? { close } : {}), ...(webDev ? { webDev } : {}), ...(apps ? { apps } : {}) };
     hosted.live = this.liveOf(hosted);
@@ -235,6 +242,7 @@ export class AdoptionRegistry {
       ...(webDev ? { webDev: true, ...(!record.tools.includes('files') ? { resources: true } : {}) } : {}), ...(apps ? { apps: true } : {}),
       // A mounted project folder: the Resources panel shows it read-only.
       ...(runtime.project ? { project: runtime.project.name } : {}),
+      ...(!record.viewOnly && enabledVoices(storedVoices(record.voices)).length ? { voices: enabledVoices(storedVoices(record.voices)) } : {}),
       adopted: { agentId: record.agentId, model: record.model, ...(record.effort ? { effort: record.effort } : {}), tools: [...record.tools], ...(record.toolOverrides && Object.keys(record.toolOverrides).length ? { overrides: { ...record.toolOverrides } } : {}), instructions: !!record.instructions, ...(record.project ? { project: record.project } : {}), ...(record.viewOnly ? { viewOnly: true } : {}), ...(this.options.environment?.sandbox ? { sandbox: true, commandTimeoutMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs } : {}), available: availableTools(this.options.environment) },
     }));
   }
@@ -397,6 +405,23 @@ export class AdoptionRegistry {
     this.host(record);
     this.keepInstructions(definitionId, 'sandbox changed');
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
+  }
+  /** Its inner voices' settings (off by default). */
+  voices(definitionId: string) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    return storedVoices(hosted.record.voices);
+  }
+  /**
+   * Turn its inner voices on or off and pick their models
+   * (`{ ambition?: { enabled, model }, prudence?: { … } }`, model `auto` or a
+   * handle). Applies at once (they are asked on demand; nothing restarts).
+   */
+  setVoices(definitionId: string, input: unknown) {
+    const hosted = this.writable(definitionId);
+    const voices = checkVoiceSettings(input, storedVoices(hosted.record.voices));
+    hosted.record = this.store.update(definitionId, r => ({ ...r, voices }));
+    return voices;
   }
   /** Its current model and reasoning effort (read from Letta, else the record) and the models it may switch to (grouped by provider in the app). */
   async model(definitionId: string) {
@@ -610,6 +635,8 @@ export class AdoptionRegistry {
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/view-only', json, wrap(async req => this.setViewOnly(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/sandbox', json, wrap(async req => this.setSandbox(String(req.params.id), req.body)));
+    app.get('/adoption/agents/:id/voices', wrap(async req => this.voices(String(req.params.id))));
+    app.put('/adoption/agents/:id/voices', json, wrap(async req => this.setVoices(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/model', wrap(async req => this.model(String(req.params.id))));
     app.put('/adoption/agents/:id/model', json, wrap(async req => this.setModel(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/instructions', wrap(async req => this.instructions(String(req.params.id))));

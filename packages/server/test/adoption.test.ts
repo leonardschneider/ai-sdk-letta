@@ -299,3 +299,24 @@ test('PUT /api/adoption/agents/<id>/project needs the session and CSRF token, an
     assert.deepEqual(await cleared.json(), { project: null, tools: ['files', 'sandbox', 'decisions', 'jobs', 'ask_user'] });
   } finally { server.closeAllConnections(); server.close(); await registry.close(); await runtime.close(); rmSync(dir, { recursive: true, force: true }); rmSync(projects, { recursive: true, force: true }); }
 });
+
+test('an adopted agent\'s inner voices are off by default, stored in its record, and validated', async () => {
+  const { dir, registry, options } = fixture();
+  try {
+    const record = await registry.adopt({ agentId: BLOG });
+    assert.deepEqual(registry.voices(record.definitionId), { ambition: { enabled: false, model: 'auto' }, prudence: { enabled: false, model: 'auto' } });
+    assert.equal(registry.agents()[0]!.voices, undefined);
+    assert.equal(registry.runtime(record.definitionId)!.voices?.enabled().length, 0);
+    assert.deepEqual(registry.setVoices(record.definitionId, { ambition: { enabled: true, model: 'auto' } }).ambition, { enabled: true, model: 'auto' });
+    assert.throws(() => registry.setVoices(record.definitionId, { ambition: { enabled: 'on' } }), (e: { code?: string }) => e.code === 'invalid_input');
+    assert.throws(() => registry.setVoices(record.definitionId, { prudence: { enabled: true, model: 'not a model' } }), (e: { code?: string }) => e.code === 'invalid_input');
+    assert.deepEqual(registry.agents()[0]!.voices, ['ambition']);
+    assert.deepEqual(registry.runtime(record.definitionId)!.voices?.enabled(), ['ambition'], 'applies without a restart');
+    assert.deepEqual(registry.store.read()[0]!.voices?.ambition, { enabled: true, model: 'auto' });
+    await registry.close();
+    const again = new AdoptionRegistry(options as never);
+    again.start();
+    assert.deepEqual(again.voices(record.definitionId).ambition, { enabled: true, model: 'auto' });
+    await again.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

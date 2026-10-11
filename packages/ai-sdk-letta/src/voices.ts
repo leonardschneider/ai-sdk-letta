@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { sweepTemporaryAgents, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
 import { askTemporaryAdvisor, inert } from './temporary-advisor.js';
 
@@ -182,9 +183,13 @@ export function lettaVoice(options: LettaVoiceOptions): InnerVoice {
   };
 }
 
-/** Delete voice agents a crash left behind (both voices; with their memory repositories and transcripts). */
+/**
+ * Delete voice agents a crash left behind (with their memory repositories and
+ * transcripts). Each voice keeps its records in its own folder,
+ * `<directory>/<voice>` (give that to {@link lettaVoice}).
+ */
 export async function sweepVoices(places: TemporaryAgentPlaces): Promise<number> {
   let removed = 0;
-  for (const name of VOICES) removed += await sweepTemporaryAgents(KINDS[name], places).catch(() => 0);
+  for (const name of VOICES) removed += await sweepTemporaryAgents(KINDS[name], { ...places, directory: join(places.directory, name) }).catch(() => 0);
   return removed;
 }
