@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   counsel, counselPrompt, reflectionPrompt, keepsDraft, projectHistory, assertHistorySettled, REFLECTION_PART, validateVoiceNote, chooseReviewerModel, reviewerSessionOptions, advisorSessionOptions, VERDICT_SCHEMA, VOICE_NOTE_SCHEMA,
-  AMBITION_PERSONA, PRUDENCE_PERSONA, DEBATE_ADDENDA, voicePersona, rebuttalOf, reflectionRound, clampVoiceMode, validVoiceBounds, parseConsultation, consultedVoices, consultVoicesTool, VOICES_NOTE, type InnerVoice,
+  AMBITION_PERSONA, PRUDENCE_PERSONA, DEBATE_ADDENDA, voicePersona, rebuttalOf, reflectionRound, clampVoiceMode, validVoiceBounds, parseConsultation, consultedVoices, consultVoicesTool, VOICES_NOTE, voicesNote, skippable, maySkip, parseSkip, skippedVoices, type InnerVoice,
 } from '../src/index.js';
 import { defineAgent } from '../src/definition.js';
 
@@ -150,11 +150,25 @@ test('history: every round\'s hidden prompt is a marker, never a user message', 
   assert.deepEqual(projected.flatMap(m => m.parts).filter(p => p.type === REFLECTION_PART).map(p => (p as { data: { otid: string } }).data.otid), ['run-1:reflect', 'run-1:reflect2']);
 });
 
-test('consult_voices: input checked (defaults: calibrated, both voices); stance clamped; results recognised; tool names reserved', async () => {
+test('consult_voices and skip_voices: input checked; stance clamped; skipping per the minimum; results recognised; tool names reserved', async () => {
   assert.equal(clampVoiceMode('debate', { minimum: 'calibrated', maximum: 'calibrated' }), 'calibrated');
   assert.equal(clampVoiceMode('calibrated', { minimum: 'debate', maximum: 'debate' }), 'debate');
   assert.equal(validVoiceBounds({ minimum: 'debate', maximum: 'calibrated' }), false);
   assert.equal(validVoiceBounds({ minimum: 'calibrated', maximum: 'debate' }), true);
+  assert.equal(validVoiceBounds({ minimum: 'none', maximum: 'calibrated' }), true);
+  assert.equal(clampVoiceMode('debate', { minimum: 'none', maximum: 'debate' }), 'debate');
+  // Skipping depends on the person's minimum.
+  assert.deepEqual(['none', 'calibrated_if_tools', 'calibrated', 'debate'].map(m => skippable(m as never)), [true, true, false, false]);
+  assert.equal(maySkip('calibrated_if_tools', false), true);
+  assert.equal(maySkip('calibrated_if_tools', true), false);
+  assert.equal(maySkip('none', true), true);
+  assert.deepEqual(parseSkip({ reason: ' small  talk ' }), { reason: 'small talk' });
+  for (const bad of [null, {}, { reason: '' }, { reason: 'x'.repeat(201) }, { reason: 'x', mode: 'skip' }]) assert.equal(parseSkip(bad), undefined);
+  assert.equal(skippedVoices(JSON.stringify({ ok: true, reason: 'hi', note: 'n' })), 'hi');
+  assert.equal(skippedVoices({ ok: false, error: 'not_allowed' }), undefined);
+  assert.match(voicesNote('none'), /you may call skip_voices/);
+  assert.match(voicesNote('calibrated_if_tools'), /uses no other tool/);
+  assert.match(voicesNote('calibrated'), /you cannot skip them/);
   assert.deepEqual(parseConsultation({ question: '  Is c3 sound?  ', context: 'FEN' }), { question: 'Is c3 sound?', context: 'FEN', mode: 'calibrated', voices: ['ambition', 'prudence'] });
   assert.deepEqual(parseConsultation({ question: 'q', voices: ['prudence', 'ambition'], mode: 'debate' })?.voices, ['ambition', 'prudence']);
   assert.deepEqual(parseConsultation({ question: 'q', voices: ['prudence'] })?.voices, ['prudence']);
@@ -163,8 +177,7 @@ test('consult_voices: input checked (defaults: calibrated, both voices); stance 
   assert.equal(consultedVoices(JSON.stringify({ ok: true, notes: { ambition: { points: ['p'], confidence: 'low' } } })), true);
   for (const no of [{ ok: true, notes: { prudence: { error: 'voice_timeout' } } }, { ok: false, error: 'x' }, 'not json', null, { ok: true, notes: {} }]) assert.equal(consultedVoices(no), false);
   assert.match(VOICES_NOTE, /consult_voices/);
-  assert.match(VOICES_NOTE, /If you do not consult them in a turn, they review your final reply/);
-  assert.doesNotMatch(VOICES_NOTE, /skip/);
+  assert.match(VOICES_NOTE, /If you neither consult nor skip them in a turn, they review your final reply/);
   // The tool: asks the consultant with the clamped stance and only the voices that are on.
   const seen: unknown[] = [];
   const tool = consultVoicesTool(() => ({ enabled: ['prudence'], bounds: { minimum: 'calibrated', maximum: 'calibrated' }, ask: async (c) => { seen.push(c); return { prudence: { points: ['c3 is legal here.'], confidence: 'high' } }; } }), () => 'conv-1');
@@ -174,6 +187,7 @@ test('consult_voices: input checked (defaults: calibrated, both voices); stance 
   assert.equal(consultedVoices(output), true);
   assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { consult_voices: {} as never } }), /reserved/);
   assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { inner_voices: {} as never } }), /reserved/);
+  assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { skip_voices: {} as never } }), /reserved/);
 });
 
 test('a consultation prompt carries the agent\'s question and context (inert), not a reply', () => {

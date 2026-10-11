@@ -95,6 +95,8 @@ test('the collapsed line: revised 2×, kept, debate (older records keep the agen
   assert.equal(validPolicy({ minimum: 'calibrated', maximum: 'debate', maxRevisions: 2 }), true);
   assert.equal(validPolicy({ minimum: 'debate', maximum: 'debate', maxRevisions: 1 }), true);
   assert.equal(validPolicy({ minimum: 'debate', maximum: 'calibrated', maxRevisions: 1 }), false);
+  assert.equal(validPolicy({ minimum: 'none', maximum: 'calibrated', maxRevisions: 1 }), true);
+  assert.equal(validPolicy({ minimum: 'calibrated_if_tools', maximum: 'debate', maxRevisions: 1 }), true);
 });
 
 test('a consultation\'s line: asking, then who was asked and the question; one voice; failures; JSON text results', async () => {

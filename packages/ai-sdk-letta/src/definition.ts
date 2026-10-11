@@ -236,7 +236,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   for (const name of names) {
     if ((INTERNAL_MEMORY_TOOLS as readonly string[]).includes(name)) throw new Error(`Tool name "${name}" is reserved for memory operations`);
     if (name === STAY_SILENT_TOOL) throw new Error(`Tool name "${name}" is reserved: team servers provide it so the agent can listen without replying`);
-    if (name === 'consult_voices' || name === 'inner_voices') throw new Error(`Tool name "${name}" is reserved: the app provides it so the agent can consult its inner voices`);
+    if (name === 'consult_voices' || name === 'skip_voices' || name === 'inner_voices') throw new Error(`Tool name "${name}" is reserved: the app provides it so the agent can consult its inner voices`);
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) throw new Error(`Invalid tool name "${name}"`);
   }
   const permissions: Record<string, ToolPermission> = {};

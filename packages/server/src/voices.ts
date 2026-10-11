@@ -2,7 +2,7 @@ import express from 'express';
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { chooseReviewerModel, counsel, lettaVoice, sweepVoices, localBackendDirectory, statePaths, validVoiceBounds, MAX_REVISIONS, VOICES, VOICE_MODES, type Counsel, type CounselRequest, type InnerVoice, type VoiceBounds, type VoiceMode, type VoiceName } from 'ai-sdk-letta';
+import { chooseReviewerModel, counsel, lettaVoice, sweepVoices, localBackendDirectory, statePaths, validVoiceBounds, MAX_REVISIONS, VOICES, VOICE_MODES, VOICE_MINIMUMS, type Counsel, type CounselRequest, type InnerVoice, type VoiceBounds, type VoiceMinimum, type VoiceMode, type VoiceName } from 'ai-sdk-letta';
 import { BODY_LIMIT_BYTES } from './http.js';
 import { MODEL_HANDLE, localModels } from './models.js';
 import { RuntimeFault } from './runtime.js';
@@ -10,11 +10,12 @@ import { RuntimeFault } from './runtime.js';
 /**
  * The inner voices Ambition and Prudence (see `ai-sdk-letta`'s `voices.ts`)
  * as the server offers them: per-agent settings (each voice on or off, and
- * its model: `auto` picks another family than the agent's; the stance bounds
- * and the most revision rounds), and the counsellor a runtime asks. Every
- * turn hears them: the agent consults them mid-turn with `consult_voices`
- * (when, what, the stance and which voice are its call); a turn that never
- * does is reviewed at its end: they review the final reply, then the agent
+ * its model: `auto` picks another family than the agent's; the minimum (which
+ * says whether the agent may skip), the highest stance and the most revision
+ * rounds), and the counsellor a runtime asks. The agent consults them mid-turn
+ * with `consult_voices` (when, what, the stance and which voice are its call),
+ * or skips a turn with `skip_voices` when the minimum allows it; a turn that
+ * does neither is reviewed at its end: they review the final reply, then the agent
  * reflects and keeps or revises it, up to `maxRevisions` rounds (see
  * `ThreadRuntime`). Both voices are off until the person turns them on.
  */
@@ -22,15 +23,16 @@ import { RuntimeFault } from './runtime.js';
 /** One voice's setting. */
 export type VoiceSetting = { enabled: boolean; model: string };
 /**
- * The person's policy: the stance bounds (the agent's requested mode is
- * clamped to them; the end-of-turn review uses the minimum) and how many
+ * The person's policy: the minimum (`none`: the agent may skip any turn;
+ * `calibrated_if_tools`: a turn without other tools; `calibrated`/`debate`:
+ * never, and the stance is at least that), the highest stance, and how many
  * revision rounds an end-of-turn review may take.
  */
 export type ReviewPolicy = VoiceBounds & { maxRevisions: number };
 /** Both voices' settings and the review policy (see {@link ReviewPolicy}; defaults when absent). */
 export type VoiceSettings = Record<VoiceName, VoiceSetting> & Partial<ReviewPolicy>;
-/** Calibrated to debate; one revision. */
-export const DEFAULT_POLICY: Readonly<ReviewPolicy> = Object.freeze({ minimum: 'calibrated', maximum: 'debate', maxRevisions: 1 });
+/** The agent may skip; up to debate; one revision. */
+export const DEFAULT_POLICY: Readonly<ReviewPolicy> = Object.freeze({ minimum: 'none', maximum: 'debate', maxRevisions: 1 });
 /** Off, on the automatic model. */
 export const DEFAULT_VOICES: VoiceSettings = Object.freeze({ ambition: Object.freeze({ enabled: false, model: 'auto' }), prudence: Object.freeze({ enabled: false, model: 'auto' }) }) as VoiceSettings;
 /** The policy of settings (defaults filled in). */
@@ -40,16 +42,14 @@ export const reviewPolicy = (settings: VoiceSettings): ReviewPolicy => ({
 /** Settings of earlier versions: still accepted as input, and migrated (or dropped). */
 const OLD_KEYS = ['decides', 'defaultMode', 'speakAfter'];
 const POLICY_KEYS = ['minimum', 'maximum', 'maxRevisions', ...OLD_KEYS];
-/** An earlier minimum (`none`, `calibrated_if_tools`: every turn is heard now) becomes `calibrated`. */
-const migratedMinimum = (value: unknown): unknown => value === 'none' || value === 'calibrated_if_tools' ? 'calibrated' : value;
 
 /**
  * Validate settings (`{ ambition: { enabled, model }, prudence: { … },
  * minimum?, maximum?, maxRevisions? }`; anything left out keeps
- * `fallback`'s). The minimum must not exceed the maximum. Earlier settings
- * are migrated: `decides`, `defaultMode` and `speakAfter` are accepted and
- * dropped (the agent always consults now), and a minimum `none` or
- * `calibrated_if_tools` becomes `calibrated`.
+ * `fallback`'s). The minimum's stance must not exceed the maximum. Earlier
+ * settings are migrated: `decides` and `defaultMode` are accepted and dropped
+ * (the agent decides within the minimum now); `speakAfter: 'long'` becomes
+ * minimum `calibrated_if_tools` unless the input sets one.
  * @throws `RuntimeFault('invalid_input', 400)`
  */
 export function checkVoiceSettings(input: unknown, fallback: VoiceSettings = DEFAULT_VOICES): VoiceSettings {
@@ -58,11 +58,12 @@ export function checkVoiceSettings(input: unknown, fallback: VoiceSettings = DEF
   const o = input as Record<string, unknown>;
   if (Object.keys(o).some(k => !POLICY_KEYS.includes(k) && !(VOICES as readonly string[]).includes(k))) fail();
   const base = Object.fromEntries(Object.entries(fallback).filter(([key]) => !OLD_KEYS.includes(key))) as VoiceSettings;
-  const result = { ...base, ...(base.minimum !== undefined ? { minimum: migratedMinimum(base.minimum) as VoiceMode } : {}) } as VoiceSettings;
+  const result = { ...base } as VoiceSettings;
   if (o.decides !== undefined && o.decides !== 'agent' && o.decides !== 'fixed') fail();
   if (o.defaultMode !== undefined && !['skip', ...VOICE_MODES].includes(o.defaultMode as string)) fail();
   if (o.speakAfter !== undefined && o.speakAfter !== 'every' && o.speakAfter !== 'long') fail();
-  if (o.minimum !== undefined) { const minimum = migratedMinimum(o.minimum); if (!VOICE_MODES.includes(minimum as VoiceMode)) fail(); result.minimum = minimum as VoiceMode; }
+  if (o.speakAfter === 'long' && o.minimum === undefined) result.minimum = 'calibrated_if_tools';
+  if (o.minimum !== undefined) { if (!VOICE_MINIMUMS.includes(o.minimum as VoiceMinimum)) fail(); result.minimum = o.minimum as VoiceMinimum; }
   if (o.maximum !== undefined) { if (!VOICE_MODES.includes(o.maximum as VoiceMode)) fail(); result.maximum = o.maximum as VoiceMode; }
   if (o.maxRevisions !== undefined) { if (!Number.isInteger(o.maxRevisions) || (o.maxRevisions as number) < 1 || (o.maxRevisions as number) > MAX_REVISIONS) fail(); result.maxRevisions = o.maxRevisions as number; }
   for (const name of VOICES) {

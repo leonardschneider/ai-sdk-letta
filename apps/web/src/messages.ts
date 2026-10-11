@@ -200,7 +200,7 @@ export function historyMessages(messages: UIMessage[]): ThreadMessageLike[] {
     // Restored user images arrive as data: URLs. Anything else (remote URLs) is never loaded.
     if (part.type === 'file' && message.role === 'user') return [/^data:image\/(png|jpeg|gif|webp);base64,/i.test(part.url) ? { type: 'image', image: part.url, ...(part.filename ? { filename: part.filename } : {}) } : { type: 'text', text: IMAGE_PLACEHOLDER }];
     if (part.type === 'dynamic-tool' || part.type.startsWith('tool-')) {
-      if ((part as { toolName?: string }).toolName === 'inner_voices' || part.type === 'tool-inner_voices') return [];
+      if (['inner_voices', 'skip_voices'].includes((part as { toolName?: string }).toolName ?? '') || part.type === 'tool-inner_voices' || part.type === 'tool-skip_voices') return [];
       const tool = part as { type: string; toolName?: string; toolCallId: string; input?: unknown; output?: unknown; state?: string; errorText?: string };
       const taskId = typeof tool.output === 'string' && tool.output.startsWith('External tool ') ? tool.output.match(/Task ID: ([\w-]+)/)?.[1] : undefined;
       const output = taskId ? completions.get(taskId) ?? 'Awaiting a result from the tool.' : tool.output;
@@ -259,8 +259,8 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
       else parts.push({ type: 'reasoning', text: String(d.text) });
     } else if (event.type === 'reflecting' && d.phase === 'reflect') parts.push({ type: REFLECTION, data: {} } as unknown as Part);
     else if (event.type === 'listened') parts.push({ type: LISTENED, data: typeof d.reason === 'string' ? { reason: d.reason } : {} } as unknown as Part);
-    // The removed inner_voices choice (older runs) is never a tool card.
-    else if (event.type === 'tool_started' && d.name !== 'inner_voices') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
+    // A skip of the voices shows in the voices line ("Skipped review"); the removed inner_voices choice (older runs) never shows: no tool cards.
+    else if (event.type === 'tool_started' && d.name !== 'inner_voices' && d.name !== 'skip_voices') parts.push({ type: 'tool-call', toolCallId: String(d.toolCallId), toolName: String(d.name), argsText: JSON.stringify(d.input ?? {}) });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
       const index = parts.findIndex(p => p.type === 'tool-call' && p.toolCallId === d.toolCallId);
       const part = parts[index];

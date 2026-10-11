@@ -5,8 +5,9 @@ import type { Reflection, ReflectionOutcome } from './messages.js';
 import { useToast } from './toasts.js';
 
 /**
- * The inner voices Ambition and Prudence in the app. When they are on, every
- * turn hears them. The agent consults them mid-turn (`consult_voices`): a
+ * The inner voices Ambition and Prudence in the app. When they are on, the
+ * agent consults them mid-turn (`consult_voices`), or skips them for a turn
+ * when the person's minimum allows ("Skipped review: <reason>"): a
  * collapsed "Asked Ambition & Prudence: <question>" line in the turn holds
  * both notes side by side. A turn that did not consult them is reviewed at its
  * end and the agent reflects on their notes: under the draft, a muted
@@ -73,7 +74,7 @@ export function ReplyVoices({ runId, reflection, tools }: { runId: string | unde
     <button type="button" className="voices-line" aria-expanded={open} onClick={() => setOpen(o => !o)}>
       <Sparkles size={13} aria-hidden="true"/><span>{label}</span><ChevronRight size={13} className="voices-chevron" aria-hidden="true"/>
     </button>
-    {open && <div className="voices-open"><p className="voices-foot">Review skipped — {counsel?.choice?.reason ?? 'the agent skipped it'}.</p></div>}
+    {open && <div className="voices-open"><p className="voices-foot">Review skipped — {counsel?.choice?.reason ?? 'the agent skipped it'}. Your minimum allows the agent to skip its voices for a turn.</p></div>}
   </div>;
   const draft = reflection?.draft ?? counsel?.draft;
   const rounds = counsel?.rounds?.length ? counsel.rounds : undefined;
@@ -166,20 +167,23 @@ function VoiceCard({ name, note }: { name: VoiceName; note: VoiceNote }) {
 type Setting = { enabled: boolean; model: string };
 type ModelChoice = { handle: string; label: string; providerLabel: string };
 type Mode = 'calibrated' | 'debate';
-type Policy = { minimum?: Mode; maximum?: Mode; maxRevisions?: number };
+type Minimum = 'none' | 'calibrated_if_tools' | Mode;
+type Policy = { minimum?: Minimum; maximum?: Mode; maxRevisions?: number };
 type Loaded = Record<VoiceName, Setting> & Policy & { models: ModelChoice[] };
 
 const BLURB: Record<VoiceName, string> = {
   ambition: 'Confident and daring: wants success, recognition and achievement. Looks for the upside, bigger goals, finishing and publishing. In debate, it defends the reply.',
   prudence: 'Critical and careful: wants to avoid mistakes and shame. Sees what could go wrong, weak evidence and risks; wants checks and smaller steps. In debate, it prosecutes with checkable objections.',
 };
-const RANK: Record<Mode, number> = { calibrated: 0, debate: 1 };
-/** Mirrors the server's check: minimum ≤ maximum. */
+const RANK: Record<Minimum, number> = { none: 0, calibrated_if_tools: 0, calibrated: 0, debate: 1 };
+/** Mirrors the server's check: the minimum's stance ≤ the maximum. */
 export function validPolicy(p: Required<Policy>): boolean {
   return RANK[p.minimum] <= RANK[p.maximum];
 }
-// Earlier minimums (none, calibrated if tools) read as calibrated: every turn hears the voices now.
-const policyOf = (data: Policy): Required<Policy> => ({ minimum: data.minimum === 'debate' ? 'debate' : 'calibrated', maximum: data.maximum ?? 'debate', maxRevisions: data.maxRevisions ?? 1 });
+const MINIMUMS: Minimum[] = ['none', 'calibrated_if_tools', 'calibrated', 'debate'];
+const policyOf = (data: Policy): Required<Policy> => ({ minimum: MINIMUMS.includes(data.minimum as Minimum) ? data.minimum! : 'none', maximum: data.maximum ?? 'debate', maxRevisions: data.maxRevisions ?? 1 });
+/** What the minimum means, in a word (the toast). */
+const MINIMUM_SAID: Record<Minimum, string> = { none: 'the agent may skip its voices on any turn', calibrated_if_tools: 'the agent may skip its voices on turns without tools', calibrated: 'the agent can’t skip its voices', debate: 'the agent can’t skip its voices; always debate' };
 
 /** The "Inner voices" section: each voice on or off and its model (auto: another family than the agent's), and how turns are reviewed. */
 export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): void }) {
@@ -206,7 +210,7 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
   // A change that would break the bounds moves the other bound along, so the saved policy stays valid.
   const savePolicy = (change: Partial<Required<Policy>>, done: string) => {
     const next = { ...policy, ...change };
-    if (RANK[next.minimum] > RANK[next.maximum]) { if (change.maximum) next.minimum = next.maximum; else next.maximum = next.minimum; }
+    if (RANK[next.minimum] > RANK[next.maximum]) { if (change.maximum) next.minimum = next.maximum; else next.maximum = 'debate'; }
     if (!validPolicy(next)) { setProblem('Those bounds don’t fit together.'); return; }
     void put(next, done);
   };
@@ -229,9 +233,11 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
     </div>)}
     <div className="voice-policy">
       <label className="voice-model-pick"><span>Minimum</span>
-        <select className="member-role" value={policy.minimum} disabled={disabled} onChange={event => savePolicy({ minimum: event.target.value as Mode }, `Minimum: ${event.target.value}.`)}>
-          <option value="calibrated">Calibrated</option>
-          <option value="debate">Debate</option>
+        <select className="member-role" value={policy.minimum} disabled={disabled} onChange={event => savePolicy({ minimum: event.target.value as Minimum }, `Minimum: ${MINIMUM_SAID[event.target.value as Minimum]}.`)}>
+          <option value="none" title="The agent may skip its voices on any turn">None (agent may skip)</option>
+          <option value="calibrated_if_tools" title="The agent may skip only on turns without tools">If tools used</option>
+          <option value="calibrated">Calibrated (never skip)</option>
+          <option value="debate">Debate (never skip)</option>
         </select>
       </label>
       <label className="voice-model-pick"><span>Maximum</span>
@@ -245,7 +251,7 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
           {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
-      <span className="adopt-meta">Every turn hears the voices. The agent consults them when it chooses during the turn (its question, the facts it gives, the stance within these bounds, one voice or both). If it doesn’t, they review its reply at the end of the turn in the minimum stance, and it may revise up to “Max revisions” times. Calibrated: each voice weighs in on its own terms. Debate: Prudence argues against with checkable objections and Ambition defends; neither sees the other.</span>
+      <span className="adopt-meta">The agent consults the voices when it chooses during the turn (its question, the facts it gives, the stance within these bounds, one voice or both). The minimum says whether it may skip them for a turn: None (any turn, e.g. small talk), If tools used (only turns without tools), or never. A turn it neither consults nor skips is reviewed at the end in the minimum stance, and it may revise up to “Max revisions” times. Calibrated: each voice weighs in on its own terms. Debate: Prudence argues against with checkable objections and Ambition defends; neither sees the other.</span>
     </div>
     {problem && <p className="form-error">{problem}</p>}
   </div>;

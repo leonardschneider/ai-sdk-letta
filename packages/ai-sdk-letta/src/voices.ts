@@ -248,17 +248,33 @@ export function reflectionPrompt(notes: Counsel, context: ReflectionContext = {}
 export const CONSULT_VOICES_TOOL = 'consult_voices';
 /** The old per-turn mode tool's name (removed; still reserved, and hidden in old history). */
 export const INNER_VOICES_TOOL = 'inner_voices';
-/** The person's bounds of the voices' stance: the lowest and the highest mode (`calibrated` < `debate`). */
-export type VoiceBounds = { minimum: VoiceMode; maximum: VoiceMode };
+/** Name of the tool the agent calls to skip its inner voices for one turn (offered only when the person's minimum allows it). */
+export const SKIP_VOICES_TOOL = 'skip_voices';
+/**
+ * The lowest the person accepts: `none` (the agent may skip any turn),
+ * `calibrated_if_tools` (it may skip a turn that used no other tool),
+ * `calibrated` or `debate` (it may never skip; the stance is at least that).
+ */
+export const VOICE_MINIMUMS = Object.freeze(['none', 'calibrated_if_tools', 'calibrated', 'debate'] as const);
+export type VoiceMinimum = typeof VOICE_MINIMUMS[number];
+/** The person's bounds: the minimum (see {@link VOICE_MINIMUMS}) and the highest stance. */
+export type VoiceBounds = { minimum: VoiceMinimum; maximum: VoiceMode };
 const RANK: Readonly<Record<VoiceMode, number>> = Object.freeze({ calibrated: 0, debate: 1 });
-/** A mode clamped to the bounds: raised to the minimum, lowered to the maximum. */
+/** The lowest stance a minimum allows (`none` and `calibrated_if_tools`: calibrated). */
+export const floorMode = (minimum: VoiceMinimum): VoiceMode => minimum === 'debate' ? 'debate' : 'calibrated';
+/** A mode clamped to the bounds: raised to the minimum's stance, lowered to the maximum. */
 export function clampVoiceMode(mode: VoiceMode, bounds: VoiceBounds): VoiceMode {
-  return RANK[mode] < RANK[bounds.minimum] ? bounds.minimum : RANK[mode] > RANK[bounds.maximum] ? bounds.maximum : mode;
+  const floor = floorMode(bounds.minimum);
+  return RANK[mode] < RANK[floor] ? floor : RANK[mode] > RANK[bounds.maximum] ? bounds.maximum : mode;
 }
-/** Whether bounds are consistent: minimum ≤ maximum. */
+/** Whether bounds are consistent: a known minimum whose stance is ≤ the maximum. */
 export function validVoiceBounds(bounds: VoiceBounds): boolean {
-  return VOICE_MODES.includes(bounds.minimum) && VOICE_MODES.includes(bounds.maximum) && RANK[bounds.minimum] <= RANK[bounds.maximum];
+  return VOICE_MINIMUMS.includes(bounds.minimum) && VOICE_MODES.includes(bounds.maximum) && RANK[floorMode(bounds.minimum)] <= RANK[bounds.maximum];
 }
+/** Whether a minimum allows skipping at all (`none`, `calibrated_if_tools`). */
+export const skippable = (minimum: VoiceMinimum): boolean => minimum === 'none' || minimum === 'calibrated_if_tools';
+/** Whether the agent may skip this turn: `none`, or `calibrated_if_tools` in a turn that used no other tool. */
+export const maySkip = (minimum: VoiceMinimum, usedTools: boolean): boolean => minimum === 'none' || (minimum === 'calibrated_if_tools' && !usedTools);
 
 /** Bounds of a consultation's input. */
 export const CONSULT_LIMITS = Object.freeze({ question: 2000, context: 8000, perTurn: 8 });
@@ -305,14 +321,67 @@ export function consultedVoices(output: unknown): boolean {
   if (!o || typeof o !== 'object' || o.ok !== true || !o.notes || typeof o.notes !== 'object') return false;
   return Object.values(o.notes as Record<string, unknown>).some(note => !!note && typeof note === 'object' && !('error' in note));
 }
-/** What the agent is told every turn while its voices are on. */
-export const VOICES_NOTE = 'Your inner voices (Ambition and Prudence) weigh in on every turn. Consult them with consult_voices at the moment it helps most, typically before you commit to a decision, plan, claim or move, and give them the facts they need: they see only your question and context. You may ask again (for example one voice, after a correction). If you do not consult them in a turn, they review your final reply before the person sees it.';
+/** What the agent is told every turn while its voices are on (whether and when it may skip depends on the person's minimum). */
+export function voicesNote(minimum: VoiceMinimum): string {
+  const base = 'Your inner voices (Ambition and Prudence) weigh in on your turns. Consult them with consult_voices at the moment it helps most, typically before you commit to a decision, plan, claim or move, and give them the facts they need: they see only your question and context. You may ask again (for example one voice, after a correction). If you neither consult nor skip them in a turn, they review your final reply before the person sees it.';
+  return minimum === 'none' ? `${base} For trivial turns (small talk, a quick acknowledgement) you may call skip_voices with a reason: for this turn only.`
+    : minimum === 'calibrated_if_tools' ? `${base} For a trivial turn that uses no other tool you may call skip_voices with a reason (for this turn only); once you use a tool, it no longer applies.`
+    : `${base} The person requires them on every turn: you cannot skip them.`;
+}
+/** The note with the person's default minimum (`none`). */
+export const VOICES_NOTE = voicesNote('none');
+/** Most characters of a skip's reason. */
+export const SKIP_REASON_MAX = 200;
+/** Validate {@link SKIP_VOICES_TOOL}'s input: `{ reason }` (1 to {@link SKIP_REASON_MAX} characters, whitespace collapsed), else undefined. */
+export function parseSkip(input: unknown): { reason: string } | undefined {
+  const o = input as Record<string, unknown> | null;
+  if (!o || typeof o !== 'object' || Array.isArray(o) || Object.keys(o).some(k => k !== 'reason') || typeof o.reason !== 'string') return undefined;
+  const reason = o.reason.replace(/\s+/g, ' ').trim();
+  return reason && reason.length <= SKIP_REASON_MAX ? { reason } : undefined;
+}
+/** The skip tool's result. */
+export type SkipVoicesOutput = { ok: true; reason: string; note: string } | { ok: false; error: string };
+/**
+ * The {@link SKIP_VOICES_TOOL} tool: the agent skips its inner voices for this
+ * turn, with a reason shown to the person. A voluntary, per-turn act, offered
+ * only while the person's minimum allows skipping (`none`,
+ * `calibrated_if_tools`); with `calibrated_if_tools` it holds only if the turn
+ * uses no other tool (the host checks at the turn's end).
+ */
+export function skipVoicesTool(consultant: () => VoiceConsultant | undefined): Tool<{ reason: string }, SkipVoicesOutput> {
+  return tool({
+    description: 'Skip your inner voices (Ambition and Prudence) for this turn only, for trivial replies such as small talk or a quick acknowledgement. Give a short reason (shown to the person). Only when the person allows it; the result says whether it holds.',
+    inputSchema: jsonSchema<{ reason: string }>({
+      type: 'object', properties: { reason: { type: 'string', minLength: 1, maxLength: SKIP_REASON_MAX, description: 'Why, in a few words (shown to the person).' } },
+      required: ['reason'], additionalProperties: false,
+    }),
+    execute: async (input: { reason: string }): Promise<SkipVoicesOutput> => {
+      const skip = parseSkip(input);
+      if (!skip) return { ok: false, error: 'invalid_input' };
+      const current = consultant();
+      if (!current || !current.enabled.length) return { ok: false, error: 'voices_unavailable' };
+      if (!skippable(current.bounds.minimum)) return { ok: false, error: 'not_allowed' };
+      const note = current.bounds.minimum === 'none' ? 'Your inner voices skip this turn.' : 'Your inner voices skip this turn, as long as you use no other tool in it; if you do, they review your reply.';
+      return { ok: true, reason: skip.reason, note };
+    },
+    toModelOutput: ({ output }: { output: SkipVoicesOutput }) => output.ok ? { type: 'json' as const, value: output }
+      : { type: 'error-text' as const, value: output.error === 'not_allowed' ? 'The person requires your inner voices on every turn: you cannot skip them.' : output.error === 'voices_unavailable' ? 'Your inner voices are off.' : `Invalid input: reason is 1 to ${SKIP_REASON_MAX} characters.` },
+  });
+}
+/** Whether a {@link SKIP_VOICES_TOOL} result (object or JSON text) is a skip that was accepted; its reason, else undefined. */
+export function skippedVoices(output: unknown): string | undefined {
+  let value = output;
+  if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return /^Your inner voices skip this turn/.test(value as string) ? '' : undefined; } }
+  const o = value as { ok?: unknown; reason?: unknown } | null;
+  return o && typeof o === 'object' && o.ok === true && typeof o.reason === 'string' ? o.reason : undefined;
+}
+
 /**
  * The {@link CONSULT_VOICES_TOOL} tool: the agent consults its inner voices
  * mid-turn. It chooses when, the question and context, the stance (clamped
  * to the person's bounds) and which voices (both by default); the notes come
- * back as the result and the turn continues. Consulting is not optional:
- * a turn that never consults them is reviewed at its end (by the host).
+ * back as the result and the turn continues. A turn that neither consults
+ * them nor skips them (when allowed) is reviewed at its end (by the host).
  * `take()` spends one of the turn's consultations (false: none left).
  */
 export function consultVoicesTool(consultant: () => VoiceConsultant | undefined, conversationId: () => string, take: () => boolean = () => true): Tool<ConsultVoicesInput, ConsultVoicesOutput> {

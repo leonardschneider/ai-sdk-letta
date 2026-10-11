@@ -11,7 +11,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel, BACKGROUND_NOTE, type BackgroundCommands,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  reflectionPrompt, keepsDraft, rebuttalOf, reflectionOtidSuffix, reflectionRound, CONSULT_VOICES_TOOL, consultedVoices, VOICES_NOTE, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest, type VoiceConsultant, type VoiceMode,
+  reflectionPrompt, keepsDraft, rebuttalOf, reflectionOtidSuffix, reflectionRound, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, consultedVoices, skippedVoices, floorMode, maySkip, voicesNote, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest, type VoiceConsultant, type VoiceMode,
   appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
@@ -145,11 +145,11 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
  * (or its error) in round 1, and what the agent's reflections did with them:
  * `kept` the reply (round 1 answered KEEP), `revised` it (the last revision is
  * the final reply; `draft` keeps the first one), or `skipped` (no voice
- * answered, or the reflection was stopped: the reply stands; `reason` says
- * which). `rounds`: each round's notes, outcome and the version it reviewed
- * (the reply, then each revision), up to `maxRevisions`. `mode`: the stance
- * (the person's minimum). Older records may carry `choice` (the removed
- * per-turn mode tool) or `reason: 'agent_skipped'`.
+ * answered, the reflection was stopped, or the agent skipped its voices this
+ * turn with `skip_voices`, allowed by the minimum: `reason` says which, and
+ * `choice.reason` is the agent's reason). `rounds`: each round's notes,
+ * outcome and the version it reviewed (the reply, then each revision), up to
+ * `maxRevisions`. `mode`: the stance (the minimum's), or `skip`.
  */
 export type RunCounsel = { at: string; notes: Counsel; outcome: 'kept' | 'revised' | 'skipped'; draft?: string; reason?: 'no_notes' | 'stopped' | 'agent_skipped';
   mode?: VoiceMode | 'skip'; choice?: { mode: string; reason: string }; rounds?: CounselRound[]; revisions?: number };
@@ -1826,9 +1826,10 @@ export class ThreadRuntime {
       const backgroundNote = run.background ? BACKGROUND_NOTE : undefined;
       let context: { reminder?: string; sources?: ContentSource[] } = {};
       try { context = this.turnContext?.(run.threadId) ?? {}; } catch { /* no context */ }
-      // Every turn hears the inner voices (when they are on): the agent consults them, else they review the reply at the end.
-      const voicesNote = this.voiceConsultant() ? VOICES_NOTE : undefined;
-      const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNote].filter((r): r is string => !!r);
+      // The inner voices (when they are on): the agent consults them, may skip if the minimum allows, else they review the reply at the end.
+      const consultant = this.voiceConsultant();
+      const voicesNoteText = consultant ? voicesNote(consultant.bounds.minimum) : undefined;
+      const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNoteText].filter((r): r is string => !!r);
       const decision = { ...(reminders.length ? { reminder: reminders.join('\n\n') } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name, ...(run.unattended?.memoryFloor ? { memoryFloor: run.unattended.memoryFloor } : {}) } } : {};
       // Trust mode: the conversation's override of the agent's setting (undefined: the agent's).
@@ -1869,9 +1870,10 @@ export class ThreadRuntime {
       };
       const letta = await consume(result);
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
-      // A turn that did not consult its inner voices: they review the reply, and the agent reflects on their notes in the same turn (up to `maxRevisions` rounds).
+      // A turn that neither consulted nor (validly) skipped its inner voices: they review the reply, and the agent reflects on their notes in the same turn (up to `maxRevisions` rounds).
       const review = this.reviewOf(run);
-      if (review) await this.reflect(session, run, control, consume, { ...shared, ...unattended, ...trust, ...limits }, review);
+      if (review && 'skipped' in review) { run.counsel = { at: new Date().toISOString(), notes: {}, outcome: 'skipped', reason: 'agent_skipped', mode: 'skip', choice: { mode: 'skip', reason: review.skipped } }; this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) }); }
+      else if (review) await this.reflect(session, run, control, consume, { ...shared, ...unattended, ...trust, ...limits }, review);
       run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
       clearTimeout(timer);
@@ -1963,7 +1965,7 @@ export class ThreadRuntime {
       if (!voices) return undefined;
       const enabled = voices.enabled();
       if (!enabled.length) return undefined;
-      const policy = voices.policy?.() ?? { minimum: 'calibrated' as const, maximum: 'debate' as const, maxRevisions: 1 };
+      const policy = voices.policy?.() ?? { minimum: 'none' as const, maximum: 'debate' as const, maxRevisions: 1 };
       return {
         enabled, bounds: { minimum: policy.minimum, maximum: policy.maximum },
         ask: (consultation, signal) => {
@@ -1976,19 +1978,25 @@ export class ThreadRuntime {
     } catch { return undefined; }
   }
   /**
-   * Whether `run`'s reply gets the end-of-turn review: it ended normally with
-   * a reply (not listened), voices are on, and the agent did not consult them
-   * during the turn (no `consult_voices` call that brought a note). The stance
-   * is the person's minimum. Per turn only: nothing carries over.
+   * What happens at the end of `run` (voices on, a normal reply, not
+   * listened): nothing when the agent consulted them (a `consult_voices` call
+   * brought a note); `{ skipped }` when it called `skip_voices` and the
+   * minimum allows it (`none`, or `calibrated_if_tools` in a turn that used
+   * no other tool); else the end-of-turn review in the minimum's stance.
+   * Per turn only: nothing carries over.
    */
-  private reviewOf(run: Run): { mode: VoiceMode; maxRounds: number } | undefined {
+  private reviewOf(run: Run): { mode: VoiceMode; maxRounds: number } | { skipped: string } | undefined {
     try {
       if (!this.voices || run.listened || run.counsel || !this.voices.enabled().length) return undefined;
       if (!run.events.some(event => event.type === 'text' && event.data.phase !== 'reflection' && String(event.data.text ?? '').trim())) return undefined;
-      const consulted = run.events.some(event => event.type === 'tool_completed' && event.data.name === CONSULT_VOICES_TOOL && consultedVoices(event.data.output));
-      if (consulted) return undefined;
-      const policy = this.voices.policy?.() ?? { minimum: 'calibrated' as const, maximum: 'debate' as const, maxRevisions: 1 };
-      return { mode: policy.minimum, maxRounds: Math.min(3, Math.max(1, policy.maxRevisions)) };
+      const draft = run.events.filter(event => event.data.phase !== 'reflection');
+      if (draft.some(event => event.type === 'tool_completed' && event.data.name === CONSULT_VOICES_TOOL && consultedVoices(event.data.output))) return undefined;
+      const policy = this.voices.policy?.() ?? { minimum: 'none' as const, maximum: 'debate' as const, maxRevisions: 1 };
+      const usedTools = draft.some(event => event.type === 'tool_started' && event.data.name !== SKIP_VOICES_TOOL && event.data.name !== CONSULT_VOICES_TOOL);
+      let skipped: string | undefined;
+      for (const event of draft) if (event.type === 'tool_completed' && event.data.name === SKIP_VOICES_TOOL) { const reason = skippedVoices(event.data.output); if (reason !== undefined) skipped = reason || 'no reason given'; }
+      if (skipped !== undefined && maySkip(policy.minimum, usedTools)) return { skipped };
+      return { mode: floorMode(policy.minimum), maxRounds: Math.min(3, Math.max(1, policy.maxRevisions)) };
     } catch { return undefined; }
   }
   /**
