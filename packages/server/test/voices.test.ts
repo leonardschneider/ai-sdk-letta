@@ -8,6 +8,7 @@ import type { SDKMessage, SendMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
 import { LettaAgent, ToolInteractions, type InnerVoice } from 'ai-sdk-letta';
 import { ThreadRuntime, DefinitionVoices, checkVoiceSettings, voiceCounsellor, counselRequest, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
+import type { RunCounsel } from '../src/runtime.js';
 
 /** A runtime over a scripted agent that replies "Got: <first line>", recording what was sent (with reminders). */
 function fixture(directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-voices-'))) {
@@ -29,6 +30,8 @@ function fixture(directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-voices-'))
           },
           async abort() {}, close() {},
           async *stream() {
+            if (input.startsWith('FAIL')) throw new Error('boom');
+            if (input.startsWith('SILENT')) { yield { type: 'result', success: true, uuid: 'r2', durationMs: 1, conversationId } as SDKMessage; return; }
             const reply = `Got: ${input.split('\n')[0]!.slice(0, 80)}. Plan: play 2 more games.`;
             yield { type: 'assistant', content: reply, uuid: 'r1' } as SDKMessage;
             history.push({ id: randomUUID(), role: 'assistant', parts: [{ type: 'text', text: reply }] });
@@ -129,4 +132,104 @@ test('the counsel request is bounded and includes tool results', () => {
   assert.equal(request.goal.length, 4000);
   assert.equal(request.reply.length, 8000);
   assert.equal(request.toolResults, '- Bash: games: 2 wins: 1\n- Read: failed: missing');
+});
+
+/* ---------------- automatic counsel ---------------- */
+
+/** Voices that count their calls; `delay` (ms) before each answer. */
+function counting(f: ReturnType<typeof fixture>, settings: () => VoiceSettings, delay = () => 0) {
+  const asked: string[] = [];
+  const voice = (name: string): InnerVoice => async request => {
+    asked.push(`${name}:${request.goal}`);
+    await new Promise(resolve => setTimeout(resolve, delay()));
+    return { points: [`${name} on ${request.goal.slice(0, 20)}`], confidence: 'medium' };
+  };
+  f.runtime.voices = voiceCounsellor({ settings, agentModel: () => 'openai-codex/gpt-5.5', directory: f.directory, available: async () => [], voice: name => voice(name) });
+  return asked;
+}
+const counselsOf = (f: ReturnType<typeof fixture>, threadId: string) => f.runtime.threadCounsels('owner', threadId);
+async function settled(f: ReturnType<typeof fixture>, threadId: string) { await until(() => !counselsOf(f, threadId).pending.length, 'counsel settled'); }
+
+test('the voices speak on their own after a completed reply, once, and the next turn hears them', async () => {
+  const f = fixture();
+  const asked = counting(f, () => on);
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Auto');
+  const first = await turn(f, threadId, 'Plan my chess bot ELO measurement');
+  await settled(f, threadId);
+  const stored = counselsOf(f, threadId).counsels[first] as RunCounsel;
+  assert.equal(stored.auto, true);
+  assert.deepEqual(Object.keys(stored.notes).sort(), ['ambition', 'prudence']);
+  assert.equal(asked.length, 2, 'one call per voice');
+  // Never twice for the same run: viewing again, or a later turn, does not re-run it.
+  await f.runtime.view('owner', threadId);
+  const second = await turn(f, threadId, 'go on');
+  assert.match(f.sent.at(-1)!, /Your inner voices weighed in[\s\S]*Ambition \(medium confidence\): ambition on Plan my chess bot/);
+  await settled(f, threadId);
+  assert.equal(asked.filter(a => a.endsWith('Plan my chess bot ELO measurement')).length, 2);
+  assert.ok(counselsOf(f, threadId).counsels[second], 'the second reply was weighed too');
+  // "Ask again" re-runs it on request (and only then).
+  await f.runtime.counsel('owner', threadId, first);
+  assert.equal(asked.filter(a => a.endsWith('Plan my chess bot ELO measurement')).length, 4);
+});
+
+test('no automatic counsel after failed or reply-less (listened) turns, or when the voices are off', async () => {
+  const f = fixture();
+  let settings: VoiceSettings = on;
+  const asked = counting(f, () => settings);
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Skip');
+  await turn(f, threadId, 'SILENT please');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(asked.length, 0, 'no reply: nothing to weigh');
+  settings = DEFAULT_VOICES;
+  await turn(f, threadId, 'hello while off');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(asked.length, 0, 'voices off');
+  settings = on;
+  const failed = await turn(f, threadId, 'FAIL now');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(asked.length, 0, 'a failed turn is not weighed');
+  assert.equal(counselsOf(f, threadId).counsels[failed], undefined);
+});
+
+test('"only long turns": a quick reply without tools is not weighed', async () => {
+  const f = fixture();
+  const asked = counting(f, () => ({ ...on, speakAfter: 'long' }));
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Long');
+  await turn(f, threadId, 'quick question');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(asked.length, 0);
+  assert.equal(checkVoiceSettings({ speakAfter: 'long' }).speakAfter, 'long');
+  assert.throws(() => checkVoiceSettings({ speakAfter: 'sometimes' }), /invalid_input/);
+});
+
+test('the next turn waits briefly for notes still being written, then proceeds; late notes are shown, never injected', async () => {
+  const f = fixture();
+  let delay = 300;
+  const asked = counting(f, () => on, () => delay);
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Wait');
+  await turn(f, threadId, 'first message');
+  assert.equal(counselsOf(f, threadId).pending.length, 1, 'thinking');
+  // Sent at once: waits (300 ms < 10 s) and hears them.
+  await turn(f, threadId, 'second message');
+  assert.match(f.sent.at(-1)!, /ambition on first message/);
+  await settled(f, threadId);
+  // Too slow: the turn proceeds after the wait (here 100 ms) without them.
+  f.runtime.counselWaitMs = 100;
+  delay = 600;
+  const fifth = await turn(f, threadId, 'fifth message');
+  const started = Date.now();
+  await turn(f, threadId, 'sixth message');
+  assert.ok(Date.now() - started < 550, 'proceeded before the notes were ready');
+  assert.doesNotMatch(f.sent.at(-1)!, /ambition on fifth message/, 'not waited for longer than the limit');
+  await settled(f, threadId);
+  const late = counselsOf(f, threadId).counsels[fifth]!;
+  assert.equal(late.late, true);
+  assert.equal(late.delivered, undefined);
+  await turn(f, threadId, 'seventh message');
+  assert.doesNotMatch(f.sent.at(-1)!, /ambition on fifth message/, 'late notes are never injected');
+  assert.ok(asked.length >= 6);
 });
