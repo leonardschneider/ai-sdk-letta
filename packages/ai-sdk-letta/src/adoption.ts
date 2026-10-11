@@ -87,8 +87,8 @@ export type AdoptionRecord = {
    * Code may be adopted this way; turning it off checks that again.
    */
   viewOnly?: true;
-  /** The inner voices Ambition and Prudence: each on or off, and its model (`auto`: another family than the agent's). Off when absent. */
-  voices?: Record<'ambition' | 'prudence', { enabled: boolean; model: string }>;
+  /** The inner voices Ambition and Prudence: each on or off, and its model (`auto`: another family than the agent's). Off when absent. `speakAfter`: after every reply (default) or only long turns. */
+  voices?: Record<'ambition' | 'prudence', { enabled: boolean; model: string }> & { speakAfter?: 'every' | 'long' };
 };
 type AdoptionFile = { version: 1; agents: AdoptionRecord[] };
 

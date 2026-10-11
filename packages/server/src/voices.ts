@@ -11,24 +11,34 @@ import { RuntimeFault } from './runtime.js';
  * The inner voices Ambition and Prudence (see `ai-sdk-letta`'s `voices.ts`)
  * as the server offers them: per-agent settings (each voice on or off, and
  * its model: `auto` picks another family than the agent's), and the
- * counsellor a runtime asks on demand (`POST /v1/threads/:id/runs/:runId/counsel`).
+ * counsellor a runtime asks after every finished reply (on its own, in the
+ * background) or on demand (`POST /v1/threads/:id/runs/:runId/counsel`, "Ask again").
  * Both voices are off until the person turns them on.
  */
 
 /** One voice's setting. */
 export type VoiceSetting = { enabled: boolean; model: string };
-/** Both voices' settings. */
-export type VoiceSettings = Record<VoiceName, VoiceSetting>;
+/** When the voices speak on their own: after every reply, or only after long turns (at least one tool call, or at least {@link LONG_TURN_MS}). */
+export type SpeakAfter = 'every' | 'long';
+export const SPEAK_AFTER: readonly SpeakAfter[] = Object.freeze(['every', 'long'] as const);
+/** A turn this long (or with a tool call) is "long" for `speakAfter: 'long'`. */
+export const LONG_TURN_MS = 30_000;
+/** Both voices' settings, and when they speak (`every` when absent). */
+export type VoiceSettings = Record<VoiceName, VoiceSetting> & { speakAfter?: SpeakAfter };
 /** Off, on the automatic model. */
 export const DEFAULT_VOICES: VoiceSettings = Object.freeze({ ambition: Object.freeze({ enabled: false, model: 'auto' }), prudence: Object.freeze({ enabled: false, model: 'auto' }) }) as VoiceSettings;
 
-/** Validate settings (`{ ambition: { enabled, model }, prudence: { … } }`; a voice left out keeps `fallback`'s). @throws `RuntimeFault('invalid_input', 400)` */
+/** Validate settings (`{ ambition: { enabled, model }, prudence: { … }, speakAfter?: 'every' | 'long' }`; anything left out keeps `fallback`'s). @throws `RuntimeFault('invalid_input', 400)` */
 export function checkVoiceSettings(input: unknown, fallback: VoiceSettings = DEFAULT_VOICES): VoiceSettings {
   const fail = (): never => { throw new RuntimeFault('invalid_input', 400); };
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail();
   const o = input as Record<string, unknown>;
-  if (Object.keys(o).some(k => !(VOICES as readonly string[]).includes(k))) fail();
+  if (Object.keys(o).some(k => k !== 'speakAfter' && !(VOICES as readonly string[]).includes(k))) fail();
   const result = { ...fallback } as VoiceSettings;
+  if (o.speakAfter !== undefined) {
+    if (!SPEAK_AFTER.includes(o.speakAfter as SpeakAfter)) fail();
+    result.speakAfter = o.speakAfter as SpeakAfter;
+  }
   for (const name of VOICES) {
     const value = o[name];
     if (value === undefined) continue;
@@ -49,9 +59,11 @@ export function storedVoices(value: unknown): VoiceSettings {
 /** Which voices are on (for the app: show "Ask Ambition & Prudence"). */
 export const enabledVoices = (settings: VoiceSettings): VoiceName[] => VOICES.filter(name => settings[name].enabled);
 
-/** What a runtime asks: the voices that are on, and a counsel from them. */
+/** What a runtime asks: the voices that are on, when they speak on their own, and a counsel from them. */
 export interface RuntimeVoices {
   enabled(): VoiceName[];
+  /** When they speak after a turn on their own (default `every`). */
+  speakAfter?(): SpeakAfter;
   ask(request: CounselRequest, signal?: AbortSignal): Promise<Counsel>;
 }
 /** Builds one voice on a model (tests replace it; the default is a temporary hidden Letta agent per call). */
@@ -71,6 +83,7 @@ export function voiceCounsellor(options: { settings(): VoiceSettings; agentModel
   const sweep = () => options.voice ? Promise.resolve() : swept ??= sweepVoices({ directory: options.directory, backendDirectory: localBackendDirectory() }).catch(() => 0);
   return {
     enabled: () => enabledVoices(options.settings()),
+    speakAfter: () => options.settings().speakAfter ?? 'every',
     async ask(request, signal) {
       const settings = options.settings();
       const names = enabledVoices(settings);

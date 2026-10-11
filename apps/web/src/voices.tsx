@@ -1,21 +1,22 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { ChevronRight, LoaderCircle, Sparkles } from 'lucide-react';
+import { ChevronRight, LoaderCircle, RotateCw, Sparkles } from 'lucide-react';
 import { api, ApiError, serverApi, type AgentInfo } from './api.js';
 import { useToast } from './toasts.js';
 
 /**
- * The inner voices Ambition and Prudence in the app: "Ask Ambition & Prudence"
- * under a finished reply (when they are on), the collapsed "weighed in" line
- * with both notes side by side, and the settings' "Inner voices" section.
+ * The inner voices Ambition and Prudence in the app: they weigh in on their own
+ * after a finished reply (when they are on). Under it: a muted "thinking" line
+ * while they write, then the collapsed "weighed in" line with both notes side
+ * by side and "Ask again"; and the settings' "Inner voices" section.
  */
 
 export type VoiceName = 'ambition' | 'prudence';
 export type VoiceNote = { points: string[]; confidence: 'low' | 'medium' | 'high'; suggestion?: string; model?: string; costUsd?: number } | { error: string };
-export type RunCounsel = { at: string; notes: Partial<Record<VoiceName, VoiceNote>>; delivered?: string };
+export type RunCounsel = { at: string; notes: Partial<Record<VoiceName, VoiceNote>>; delivered?: string; auto?: boolean; late?: boolean };
 
-/** The conversation's voices: which are on, the stored counsels by run, and asking for one. */
-export type VoicesState = { enabled: boolean; counsels: Record<string, RunCounsel>; asking: Set<string>; ask(runId: string): void };
-export const VoicesContext = createContext<VoicesState>({ enabled: false, counsels: {}, asking: new Set(), ask() {} });
+/** The conversation's voices: which are on, the stored counsels by run, the runs they are weighing on their own (`thinking`) or on request (`asking`), and asking again. */
+export type VoicesState = { enabled: boolean; counsels: Record<string, RunCounsel>; asking: Set<string>; thinking?: Set<string>; ask(runId: string): void };
+export const VoicesContext = createContext<VoicesState>({ enabled: false, counsels: {}, asking: new Set(), thinking: new Set(), ask() {} });
 
 const LABEL: Record<VoiceName, string> = { ambition: 'Ambition', prudence: 'Prudence' };
 const FAILED: Record<string, string> = { voice_timeout: 'took too long', voice_invalid: 'answered in a form the app could not read', voice_unsafe: 'was stopped (unexpected tool use)' };
@@ -24,6 +25,16 @@ const FAILED: Record<string, string> = { voice_timeout: 'took too long', voice_i
 export async function askCounsel(threadId: string, runId: string) {
   return api<{ runId: string; counsel: RunCounsel }>(`/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/counsel`, {});
 }
+/** The thread's notes and the runs being weighed now (`GET /v1/threads/:id/counsels`). */
+export async function fetchCounsels(threadId: string) {
+  return api<{ counsels: Record<string, RunCounsel>; pending: string[] }>(`/v1/threads/${encodeURIComponent(threadId)}/counsels`);
+}
+/** What the line under a reply shows: the notes, "thinking", or nothing (no notes and none coming). */
+export function voicesLine(state: Pick<VoicesState, 'counsels' | 'asking' | 'thinking'>, runId: string | undefined): 'notes' | 'thinking' | 'none' {
+  if (!runId) return 'none';
+  if (state.asking.has(runId) || state.thinking?.has(runId)) return 'thinking';
+  return state.counsels[runId] ? 'notes' : 'none';
+}
 export function counselError(error: unknown): string {
   const code = error instanceof ApiError ? error.code : '';
   return code === 'voices_off' ? 'Ambition and Prudence are off for this agent (Settings → Inner voices).'
@@ -31,28 +42,23 @@ export function counselError(error: unknown): string {
       : code === 'counsel_running' ? 'They are already weighing in on this reply.' : 'Couldn’t ask Ambition & Prudence. Nothing was changed.';
 }
 
-/** Under a finished assistant reply: the action, or the collapsed notes. */
+/** Under a finished assistant reply: "thinking" while the voices write, then the collapsed notes with "Ask again". */
 export function ReplyVoices({ runId }: { runId: string | undefined }) {
-  const { enabled, counsels, asking, ask } = useContext(VoicesContext);
+  const state = useContext(VoicesContext);
   const [open, setOpen] = useState(false);
-  if (!runId) return null;
-  const counsel = counsels[runId];
-  if (counsel) return <div className="voices" data-open={open || undefined}>
+  const shown = voicesLine(state, runId);
+  if (shown === 'thinking') return <div className="voices"><span className="voices-thinking"><LoaderCircle size={13} className="spin" aria-hidden="true"/>Ambition &amp; Prudence are thinking…</span></div>;
+  if (shown === 'none') return null;
+  const counsel = state.counsels[runId!]!;
+  return <div className="voices" data-open={open || undefined}>
     <button type="button" className="voices-line" aria-expanded={open} onClick={() => setOpen(o => !o)}>
       <Sparkles size={13} aria-hidden="true"/><span>Ambition &amp; Prudence weighed in</span><ChevronRight size={13} className="voices-chevron" aria-hidden="true"/>
     </button>
     {open && <div className="voices-notes">
       {(['ambition', 'prudence'] as const).filter(name => counsel.notes[name]).map(name => <VoiceCard key={name} name={name} note={counsel.notes[name]!}/>)}
-      <p className="voices-foot">Advisory notes{counsel.delivered ? '; the agent saw them in its next turn' : '; the agent sees them with your next message'}.</p>
+      <p className="voices-foot">Advisory notes{counsel.delivered ? '; the agent saw them in its next turn' : counsel.late ? '; they came after the next turn had started, so the agent did not see them' : '; the agent sees them with your next message'}.
+        {state.enabled && <button type="button" className="voices-ask" onClick={() => state.ask(runId!)}><RotateCw size={12} aria-hidden="true"/><span>Ask again</span></button>}</p>
     </div>}
-  </div>;
-  if (!enabled) return null;
-  const busy = asking.has(runId);
-  return <div className="voices">
-    <button type="button" className="voices-ask" disabled={busy} onClick={() => ask(runId)}>
-      {busy ? <LoaderCircle size={13} className="spin" aria-hidden="true"/> : <Sparkles size={13} aria-hidden="true"/>}
-      <span>{busy ? 'Ambition & Prudence are weighing in…' : 'Ask Ambition & Prudence'}</span>
-    </button>
   </div>;
 }
 
@@ -73,7 +79,8 @@ function VoiceCard({ name, note }: { name: VoiceName; note: VoiceNote }) {
 
 type Setting = { enabled: boolean; model: string };
 type ModelChoice = { handle: string; label: string; providerLabel: string };
-type Loaded = Record<VoiceName, Setting> & { models: ModelChoice[] };
+type SpeakAfter = 'every' | 'long';
+type Loaded = Record<VoiceName, Setting> & { speakAfter?: SpeakAfter; models: ModelChoice[] };
 
 const BLURB: Record<VoiceName, string> = {
   ambition: 'Confident and daring: wants success, recognition and achievement. Looks for the upside, bigger goals, finishing and publishing.',
@@ -88,17 +95,18 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
   const [problem, setProblem] = useState('');
   const [saving, setSaving] = useState(false);
   useEffect(() => { void serverApi<Loaded>(path).then(setData, () => setProblem('Couldn’t load the inner voices.')); }, [path]);
-  const save = async (name: VoiceName, setting: Setting) => {
+  const put = async (body: Record<string, unknown>, done: string) => {
     if (!data) return;
     setSaving(true); setProblem('');
     try {
-      const saved = await serverApi<Record<VoiceName, Setting>>(path, { [name]: setting }, 'PUT');
+      const saved = await serverApi<Record<VoiceName, Setting> & { speakAfter?: SpeakAfter }>(path, body, 'PUT');
       setData({ ...data, ...saved });
-      toast(`${LABEL[name]} ${setting.enabled ? 'on' : 'off'}${setting.enabled ? `, model ${setting.model === 'auto' ? 'automatic' : setting.model}` : ''}.`);
+      toast(done);
       onSaved();
     } catch { setProblem('Couldn’t save. Nothing was changed.'); }
     finally { setSaving(false); }
   };
+  const save = (name: VoiceName, setting: Setting) => put({ [name]: setting }, `${LABEL[name]} ${setting.enabled ? 'on' : 'off'}${setting.enabled ? `, model ${setting.model === 'auto' ? 'automatic' : setting.model}` : ''}.`);
   if (!data) return problem ? <p className="form-error">{problem}</p> : <p className="adopt-meta">Loading…</p>;
   const groups = new Map<string, ModelChoice[]>();
   for (const model of data.models) groups.set(model.providerLabel, [...(groups.get(model.providerLabel) ?? []), model]);
@@ -116,6 +124,13 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
         </select>
       </label>
     </div>)}
+    <label className="voice-speak-after"><span>Speak after</span>
+      <select className="member-role" value={data.speakAfter ?? 'every'} disabled={saving || !!agent.viewOnly} onChange={event => void put({ speakAfter: event.target.value }, event.target.value === 'long' ? 'They speak only after long turns.' : 'They speak after every reply.')}>
+        <option value="every">Every reply</option>
+        <option value="long">Only long turns (a tool call, or 30 s or more)</option>
+      </select>
+      <span className="adopt-meta">Each voice that is on runs once per reply it weighs in on, on its own model: it costs tokens every time. “Only long turns” skips quick chat replies.</span>
+    </label>
     {problem && <p className="form-error">{problem}</p>}
   </div>;
 }

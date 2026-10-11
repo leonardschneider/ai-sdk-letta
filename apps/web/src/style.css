@@ -1449,6 +1449,10 @@ button.job-last:hover { color: var(--text); }
 .voices-ask, .voices-line { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 6px; color: var(--text-3); font: inherit; cursor: pointer; }
 .voices-ask:hover:not(:disabled), .voices-line:hover { background: var(--hover); color: var(--text-2); }
 .voices-ask:disabled { cursor: default; }
+.voices-thinking { display: inline-flex; align-items: center; gap: 6px; padding: 3px 0; color: var(--text-3); }
+.voices-foot .voices-ask { margin-left: 8px; padding: 1px 6px; }
+.voice-speak-after { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-speak-after .adopt-meta { flex-basis: 100%; }
 .voices-line svg:first-child { color: var(--ambition); }
 .voices-chevron { transition: transform .12s; }
 .voices[data-open] .voices-chevron { transform: rotate(90deg); }

@@ -225,6 +225,8 @@ export function runtimeRoutes(app: express.Express, runtime: ThreadRuntime, owne
    * Ask the inner voices (Ambition and Prudence, those that are on) about a finished turn of the thread: its notes are
    * stored with the run and go to the agent once, in its next turn. Members and admins may ask, as for sending.
    */
+  /** The thread's inner-voice notes, and the turns they are weighing now (the app polls this after a reply). */
+  app.get('/v1/threads/:id/counsels', (req, res) => res.json(runtime.threadCounsels(owner, req.params.id)));
   app.post('/v1/threads/:id/runs/:runId/counsel', async (req, res) => {
     const control = new AbortController();
     res.on('close', () => { if (!res.writableEnded) control.abort(); });
