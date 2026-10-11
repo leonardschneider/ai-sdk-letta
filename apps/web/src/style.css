@@ -1406,6 +1406,7 @@ button.job-last:hover { color: var(--text); }
 .tool-set-cost { font-size: 12px; color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .tool-set-custom { font-size: 11px; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
 .tool-set-chevron svg { transition: transform .15s; }
+@media (prefers-reduced-motion: reduce) { .tool-set-chevron svg { transition: none; } }
 .tool-set-chevron svg.open { transform: rotate(180deg); }
 .tool-list { border-top: 1px solid var(--border); padding: 4px 12px 10px; display: flex; flex-direction: column; }
 .tool-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
@@ -1429,5 +1430,6 @@ button.job-last:hover { color: var(--text); }
 @media (max-width: 480px) {
   .tool-row { flex-direction: column; align-items: stretch; gap: 6px; }
   .tool-seg { align-self: flex-start; }
-  .tool-set-row { padding-left: 10px; }
+  .tool-set-row { padding-left: 10px; flex-wrap: wrap; }
+  .tool-set-custom { display: none; }
 }

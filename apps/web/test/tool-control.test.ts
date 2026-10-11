@@ -26,6 +26,7 @@ test('overrides: the default removes one, reset clears a set, costs follow', () 
   assert.equal(tokenLabel(12_400), '≈ 12k tokens');
   assert.equal(tokenLabel(820), '≈ 820 tokens');
   assert.equal(shortDescription('Does a thing. More text.'), 'Does a thing.');
+  assert.equal(shortDescription('Like run_command, but online, e.g. pip install. Asks.'), 'Like run_command, but online, e.g. pip install.');
 });
 
 test('the app’s own agent gets a Tools section when it offers tool control', () => {

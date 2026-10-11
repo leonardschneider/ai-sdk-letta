@@ -45,7 +45,8 @@ export const totalTokens = (sets: readonly ControlSet[], enabled: readonly strin
 export const tokenLabel = (tokens: number) => `≈ ${tokens >= 10_000 ? `${Math.round(tokens / 1000)}k` : tokens >= 1000 ? `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k` : tokens} tokens`;
 /** The first sentence of a tool's description, at most `max` characters. */
 export function shortDescription(text: string, max = 140): string {
-  const first = text.trim().split(/(?<=[.!?])\s/)[0] ?? '';
+  // A sentence ends before a capital letter (so "e.g. pip" stays whole).
+  const first = text.trim().split(/(?<=[.!?])\s+(?=[A-Z])/)[0] ?? '';
   return first.length > max ? `${first.slice(0, max - 1).trimEnd()}…` : first;
 }
 /** The overrides of `overrides` that changed from `saved`. */

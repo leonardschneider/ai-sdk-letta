@@ -108,3 +108,22 @@ test('a code-defined agent: tighten only, stored per definition, applied to the 
     assert.equal(new DefinitionToolOverrides(definition, dir).effective().permissions.read_file, 'ask');
   } finally { await http.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('during a reply, a tools change is stored and applies when the reply ends', async () => {
+  const f = fixture();
+  try {
+    await f.registry.adopt({ agentId: AGENT, tools: ['files', 'sandbox'] });
+    const runtime = f.registry.runtime(ID)!;
+    const turn = { busy: true };
+    Object.defineProperty(runtime, 'busy', { get: () => turn.busy });
+    const builds = f.built.length;
+    const result = await f.registry.setTools(ID, { tools: ['files', 'sandbox'], overrides: { run_command_online: 'off' } }) as { queued?: boolean };
+    assert.equal(result.queued, true);
+    assert.equal(f.built.length, builds, 'not restarted mid-reply');
+    assert.equal(f.registry.toolControl(ID).sets.find(s => s.set === 'sandbox')!.tools.find(t => t.name === 'run_command_online')!.override, 'off');
+    turn.busy = false; (runtime as unknown as { changed(): void }).changed();
+    for (let i = 0; i < 50 && f.built.length === builds; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(f.built.length, builds + 1);
+    assert.equal(Object.hasOwn(f.built.at(-1)!.tools, 'run_command_online'), false);
+  } finally { await f.registry.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});

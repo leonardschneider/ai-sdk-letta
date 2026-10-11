@@ -163,6 +163,8 @@ export class AdoptionRegistry {
   private closing = false;
   /** Queued instructions updates (one per agent: the newest reason wins) and the loops applying them. */
   private readonly pending = new Map<string, { reason: string; manual: boolean }>();
+  /** Runtimes waiting for their reply to end before restarting with a changed record (tools). */
+  private readonly rehosting = new Map<string, Promise<void>>();
   private readonly draining = new Map<string, Promise<void>>();
   private readonly wakers = new Set<() => void>();
   private readonly notices: AdoptionNotice[] = [];
@@ -317,22 +319,40 @@ export class AdoptionRegistry {
     const body = (input ?? {}) as { tools?: unknown; overrides?: unknown };
     const sets = this.validTools(body.tools);
     const overrides = body.overrides === undefined ? undefined : checkToolOverrides(body.overrides, adoptedToolBase(availableTools(this.options.environment), this.options.environment));
-    if (hosted.runtime.busy) throw new RuntimeFault('runtime_busy');
     const record = this.store.update(definitionId, r => {
       if (overrides === undefined) return { ...r, tools: sets };
       const { toolOverrides: _old, ...rest } = r;
       return { ...rest, tools: sets, ...(Object.keys(overrides).length ? { toolOverrides: overrides } : {}) };
     });
+    // During a reply, the change applies once it ends (the runtime restarts then); otherwise now.
+    if (hosted.runtime.busy) { this.rehostWhenIdle(hosted, 'tools changed'); return { ...record, queued: true }; }
     await this.unhost(hosted);
     this.host(record);
     this.keepInstructions(definitionId, 'tools changed');
     return record;
   }
+  /** Restart an agent's runtime with its stored record once its current reply ends (at most one wait per agent; the latest record wins). */
+  private rehostWhenIdle(hosted: Hosted, reason: string) {
+    const id = hosted.record.definitionId;
+    if (this.rehosting.has(id)) return;
+    const wait = (async () => {
+      while (!this.closing && this.hosted.get(id) === hosted && hosted.runtime.busy) await this.idle(hosted);
+      if (this.closing || this.hosted.get(id) !== hosted) return;
+      const record = this.store.read().find(r => r.definitionId === id);
+      if (!record) return;
+      await this.unhost(hosted);
+      this.host(record);
+      this.keepInstructions(id, reason);
+    })().catch(error => this.options.log?.(`Agent ${id} not restarted: ${error instanceof Error ? error.message : String(error)}`)).finally(() => this.rehosting.delete(id));
+    this.rehosting.set(id, wait);
+  }
   /** Per-tool control of an adopted agent: each set the host offers, its tools, defaults, overrides, locks and costs (see `adoptedToolControl`). */
   toolControl(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
-    return adoptedToolControl(hosted.record, availableTools(this.options.environment), this.options.environment);
+    // The stored record: a change waiting for the current reply to end shows already.
+    const record = this.store.read().find(r => r.definitionId === definitionId) ?? hosted.record;
+    return adoptedToolControl(record, availableTools(this.options.environment), this.options.environment);
   }
   /**
    * Set or clear an adopted agent's project folder (`{ path }` or `{ path: null }`).
@@ -631,6 +651,7 @@ export class AdoptionRegistry {
     this.pending.clear(); this.wake();
     for (const wake of [...this.noticeWaiters]) wake();
     await this.instructionsSettled();
+    await Promise.allSettled([...this.rehosting.values()]);
     for (const hosted of this.hosted.values()) hosted.live?.close();
     await Promise.allSettled([...this.hosted.values()].map(hosted => this.unhost(hosted)));
   }

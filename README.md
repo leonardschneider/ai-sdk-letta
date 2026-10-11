@@ -1564,6 +1564,29 @@ conversations get them on their next message).
   "web_dev", "mcp_app_dev"] }` (refusals: `sandbox_unavailable`,
   `web_dev_needs_sandbox`, `mcp_app_dev_needs_web_dev`).
 
+- **Per-tool control.** In **Settings → Tools**, each set shows its context
+  cost ("≈ 4.1k tokens", the characters of its tools' descriptions and JSON
+  schemas divided by 4) and expands to its tools, each with **Allow / Ask /
+  Off** (the default is marked with a dot). Off leaves the tool out (and out of
+  the instructions section); Ask needs approval for each call. A few rules
+  never loosen, here or in `defineAgent` (`LOCKED_PERMISSIONS`):
+  `run_command_online`, `allow_web_origin` and `web_search` are Ask or Off,
+  never Allow; `request_decision` and `ask_user` never Ask. A set's anchor
+  (`read_file`, `run_command`, `dev_server_start`, `app_dev_start`,
+  `job_start`) cannot be turned off alone: turn the set off. A change applies
+  after the current reply; the instructions update automatically. From code:
+  `GET /api/adoption/agents/<id>/tools` (per set: its tools, default, override,
+  lock and reason, cost) and `PUT` with `{ "tools": [...], "overrides": {
+  "run_command_online": "off", "browser_click": "ask" } }` (unknown tools are
+  dropped; refusals: `tool_locked`, `invalid_input`).
+- **The app's own agent (defined in code): tighten only.** Its Settings show
+  its tools the same way; a tool can be switched to Ask or Off, and back to
+  Allow only where the definition allows it. Overrides are kept in
+  `<state>/server/<definition id>/tool-overrides.json` and applied when the
+  runtime opens its next session (`GET`/`PUT /api/tools` with `{ "overrides":
+  {...} }`; refusals: `tighten_only`, `tool_locked`). Loosening is done in code.
+  Installed MCP Apps' tools are not listed yet.
+
 - **Conversations.** All its conversations show in the sidebar, including
   `default`, titled by their summary or first message; new ones made in
   Letta Code appear next time the list loads. Opening one only reads its
