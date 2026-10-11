@@ -53,7 +53,7 @@ export function voicesLabel(shown: ReturnType<typeof voicesLine>, counsel: RunCo
   const head = shown === 'revised' ? `Revised${revisions > 1 ? ` ${revisions}×` : ''} after Ambition & Prudence` : shown === 'kept' ? 'Kept after Ambition & Prudence' : 'Ambition & Prudence weighed in';
   const choice = counsel?.choice;
   if (choice?.mode === 'debate' && counsel?.mode === 'debate') return `${head} · Debate: ${choice.reason}`;
-  if (choice?.mode === 'skip') return `${head} · Skipped review (raised by your minimum): ${choice.reason}`;
+  if (choice?.mode === 'skip') return `${head} · Skip raised by your minimum (${choice.reason})`;
   if (choice) return `${head} · ${choice.mode === counsel?.mode ? 'Calibrated' : 'Chose ' + choice.mode}: ${choice.reason}`;
   return counsel?.mode === 'debate' ? `${head} · Debate` : head;
 }

@@ -1660,6 +1660,20 @@ the app shows, such as `blog-2cc740f1`; same state directory). From code:
 `startGuiServer(definition, assets, { adoption: { sandbox } })` (on by
 default; `adoption: false` turns it off).
 
+### Inner voices (Ambition & Prudence)
+
+Each agent can have two optional, advisory inner voices (Settings → Inner voices; off by default): **Ambition** (confident, wants the result to succeed and ship) and **Prudence** (careful, wants to avoid mistakes). Each is a fresh, hidden, tool-less, memory-less temporary agent per call, on another model family than the agent's by default. They never see or name each other.
+
+When they are on, they review a reply's draft within the turn: both read the draft independently, then the agent reflects on their notes in a hidden step (OTID `<run>:reflect`) and answers `KEEP` or writes a revised reply. A revision is reviewed again (the voices read the new version) and the agent reflects again (`<run>:reflect2`, `<run>:reflect3`), up to **Max revisions** (1–3, default 1). It stops at the first `KEEP`, the limit, no voice answering, or Stop; the latest version stands. Only the final answer is shown, with a collapsed line ("Revised 2× after Ambition & Prudence ›", "Kept after…") holding each round: the version reviewed, both notes and the outcome. After a reload, history hides every round's prompt the same way.
+
+**Modes.** `calibrated`: each voice reviews on its own terms. `debate`: a paired stance. Prudence prosecutes: it tries to show the reply is wrong, and every objection must be specific and checkable (a counterexample, a failing check, a missing case; vague doubt is not allowed). Ambition defends: it steelmans the reply, says which objections would be weak or irrelevant and how to strengthen it. In debate the agent may keep its draft with `KEEP — <one-line rebuttal>` (kept in the collapsed section).
+
+**Who decides.** With **Agent decides (within bounds)** (the default), the agent gets the always-allowed tool `inner_voices({ mode: 'skip' | 'calibrated' | 'debate', reason })` and a one-line note in its turn. Its last call in a turn sets that turn's mode, for that turn only; without a call, the **Default mode** applies. The mode is clamped to your bounds: **Minimum** `none`, `calibrated_if_tools` (the turn used any tool other than `inner_voices`), `calibrated` or `debate` (a `skip` below it is raised), and **Maximum** `calibrated` or `debate`. The collapsed line shows the choice ("Debate: <reason>", "Skipped review: <reason>"). With **Fixed**, the tool is not offered and every turn uses the default mode. The tool is never offered while the voices are off.
+
+Settings are validated (minimum ≤ maximum; the default between them). The old "Review: only long turns" setting migrates to minimum `calibrated_if_tools` with default `skip`; "every reply" to default `calibrated`. **Cost:** each round costs two voice calls plus an agent step.
+
+API: `GET`/`PUT /api/voices` (the app's own agent) and `GET`/`PUT /api/adoption/agents/:id/voices`, with `{ ambition, prudence, decides, defaultMode, minimum, maximum, maxRevisions }`. Each run's review is stored as `run.counsel` (`{ at, notes, outcome, draft?, mode?, choice?, rounds: [{ notes, outcome, text, rebuttal? }], revisions? }`) and returned in the thread's view (`counsels`).
+
 ### View-only agents
 
 An agent that works in Letta Code (one that needs your shell, or runs long
