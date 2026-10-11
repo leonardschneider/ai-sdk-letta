@@ -742,7 +742,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const store = resources;
         agent = new LettaAgent<TOOLS>({
           // memory_provenance is the harness's, like the memory tools: never an application tool card.
-          id: definition.id, tools: agentTools, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
+          id: definition.id, tools: (voicesOffered ? { ...agentTools, [INNER_VOICES_TOOL]: withVoices[INNER_VOICES_TOOL] } : agentTools) as TOOLS, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
             turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
             return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), confirmStopped: () => confirmStopped(live), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };

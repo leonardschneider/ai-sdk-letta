@@ -184,7 +184,7 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
     <div className="voice-policy">
       <label className="voice-model-pick"><span>Who decides</span>
         <select className="member-role" value={policy.decides} disabled={disabled} onChange={event => savePolicy({ decides: event.target.value as 'agent' | 'fixed' }, event.target.value === 'agent' ? 'The agent chooses the review per turn, within your bounds.' : 'Every turn uses the default mode.')}>
-          <option value="agent">Agent decides (within bounds)</option>
+          <option value="agent" title="Agent decides (within bounds)">Agent decides</option>
           <option value="fixed">Fixed</option>
         </select>
       </label>
@@ -198,7 +198,7 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
       <label className="voice-model-pick"><span>Minimum</span>
         <select className="member-role" value={policy.minimum} disabled={disabled} onChange={event => savePolicy({ minimum: event.target.value as Minimum }, `Minimum: ${event.target.value.replace(/_/g, ' ')}.`)}>
           <option value="none">None</option>
-          <option value="calibrated_if_tools">Calibrated if the turn used tools</option>
+          <option value="calibrated_if_tools" title="Calibrated if the turn used tools">If tools used</option>
           <option value="calibrated">Calibrated</option>
           <option value="debate">Debate</option>
         </select>
@@ -214,7 +214,7 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
           {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
-      <span className="adopt-meta">Calibrated: each voice reviews the draft on its own terms. Debate: Prudence argues against it with checkable objections and Ambition defends it; neither sees the other. With “Agent decides”, the agent picks skip, calibrated or debate per turn (it may only skip for that turn); the minimum raises its choice and the maximum caps it. Cost: each round costs two voice calls plus an agent step; a revision is reviewed again, up to “Max revisions”.</span>
+      <span className="adopt-meta">Calibrated: each voice reviews the draft on its own terms. Debate: Prudence argues against it with checkable objections and Ambition defends it; neither sees the other. With “Agent decides” (within these bounds), the agent picks skip, calibrated or debate per turn (it may only skip for that turn); the minimum raises its choice (“If tools used”: calibrated when the turn used a tool) and the maximum caps it. Cost: each round costs two voice calls plus an agent step; a revision is reviewed again, up to “Max revisions”.</span>
     </div>
     {problem && <p className="form-error">{problem}</p>}
   </div>;

@@ -416,3 +416,11 @@ test('a default skip asks no voice and takes no reflection step; the VOICES note
   assert.match(f.sent[0]!, /Use inner_voices to choose how your inner voices review this turn/);
   assert.equal(f.sent.length, 1);
 });
+
+test('the session accepts inner_voices calls: the agent knows the tool while it is offered, and reopens when that changes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../ai-sdk-letta/src/runtime.ts', import.meta.url), 'utf8');
+  // The LettaAgent refuses calls to tools it does not know ("Unexpected tool call"): inner_voices must be among them.
+  assert.match(source, /tools: \(voicesOffered \? \{ \.\.\.agentTools, \[INNER_VOICES_TOOL\]/);
+  assert.match(source, /voicesOffered !== !!options\.innerVoices\?\.\(\)/);
+});
