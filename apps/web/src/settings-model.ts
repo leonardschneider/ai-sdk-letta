@@ -24,9 +24,9 @@ export function settingsPlan(currentId: string, hash: string): { kind: 'open' } 
   return id === currentId ? { kind: 'open' } : { kind: 'switch', agentId: id };
 }
 
-export type SettingsSection = 'general' | 'tools' | 'instructions' | 'apps' | 'memory' | 'automations' | 'members' | 'danger';
+export type SettingsSection = 'general' | 'tools' | 'voices' | 'instructions' | 'apps' | 'memory' | 'automations' | 'members' | 'danger';
 export const SECTION_LABELS: Record<SettingsSection, string> = {
-  general: 'General', tools: 'Tools', instructions: 'Instructions', apps: 'Apps', memory: 'Memory', automations: 'Automations', members: 'Members', danger: 'Danger zone',
+  general: 'General', tools: 'Tools', voices: 'Inner voices', instructions: 'Instructions', apps: 'Apps', memory: 'Memory', automations: 'Automations', members: 'Members', danger: 'Danger zone',
 };
 
 /**
@@ -43,6 +43,8 @@ export function settingsSections(agent: AgentInfo, options: { team?: boolean } =
   const sections: SettingsSection[] = ['general'];
   if (adopted && !viewOnly) sections.push('tools', 'instructions');
   else if (agent.toolControl && !options.team && !viewOnly) sections.push('tools');
+  // Inner voices (Ambition and Prudence): the single-user app's agents, not view only.
+  if (!options.team && !viewOnly && (adopted || agent.toolControl)) sections.splice(sections.indexOf('tools') + 1 || sections.length, 0, 'voices');
   if (agent.apps && admin && !viewOnly) sections.push('apps');
   if (agent.memory) sections.push('memory');
   if (agent.automations && admin && !viewOnly) sections.push('automations');

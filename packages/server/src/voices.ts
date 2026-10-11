@@ -103,7 +103,8 @@ export class DefinitionVoices {
   }
   routes(): express.Router {
     const router = express.Router();
-    router.get('/voices', (_req, res) => { res.json(this.get()); });
+    // With the models a voice may use (the settings' pick list).
+    router.get('/voices', async (_req, res) => { const models = await localModels().catch(() => []); res.json({ ...this.get(), models: models.map(m => ({ handle: m.handle, label: m.label, providerLabel: m.providerLabel })) }); });
     router.put('/voices', express.json({ limit: BODY_LIMIT_BYTES }), (req, res) => {
       try { res.json(this.set(req.body)); }
       catch (error) { if (error instanceof RuntimeFault) return void res.status(error.status).json({ error: error.code }); res.status(500).json({ error: 'voices_unavailable' }); }

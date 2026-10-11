@@ -30,6 +30,6 @@ test('overrides: the default removes one, reset clears a set, costs follow', () 
 });
 
 test('the app’s own agent gets a Tools section when it offers tool control', () => {
-  assert.deepEqual(settingsSections({ id: 'a', name: 'A', approvalTools: [], toolControl: true }), ['general', 'tools']);
+  assert.deepEqual(settingsSections({ id: 'a', name: 'A', approvalTools: [], toolControl: true }), ['general', 'tools', 'voices']);
   assert.deepEqual(settingsSections({ id: 'a', name: 'A', approvalTools: [], toolControl: true }, { team: true }), ['general']);
 });

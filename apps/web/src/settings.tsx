@@ -6,6 +6,7 @@ import { AppsPanel } from './apps.js';
 import { MemoryIntro, MemoryPanel } from './memory.js';
 import { AutomationsPanel } from './automations.js';
 import { MembersPanel } from './team.js';
+import { VoicesPanel } from './voices.js';
 import type { ViewPolicy } from './apps-model.js';
 import { SECTION_LABELS, settingsSections, type SettingsSection } from './settings-model.js';
 
@@ -86,6 +87,8 @@ export function SettingsPage(props: SettingsProps) {
             <ToolsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent} onSaved={props.onSaved}/>
             {agent.adopted && <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>}
           </>)}
+          {section('voices', <p className="modal-text">Two optional inner voices that weigh in on a reply when you ask (“Ask Ambition &amp; Prudence” under it). They are mirror images: Ambition pushes for the upside, Prudence for checks. Their notes are advisory: {agent.name} sees them in its next turn and decides. Each use costs tokens on their models.</p>,
+            <VoicesPanel agent={agent} onSaved={props.onSaved}/>)}
           {section('instructions', <p className="modal-text">A short section appended to {agent.name}’s system prompt: the tools it has in this app, and how its memory is protected here. Nothing else changes, and you can undo it.</p>,
             <InstructionsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent}/>)}
           {section('apps', <p className="modal-text">MCP Apps installed for this agent. Each runs in its own container without network access; its views run in a sandbox on their own origin.</p>,

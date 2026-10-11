@@ -304,7 +304,7 @@ test('an adopted agent\'s inner voices are off by default, stored in its record,
   const { dir, registry, options } = fixture();
   try {
     const record = await registry.adopt({ agentId: BLOG });
-    assert.deepEqual(registry.voices(record.definitionId), { ambition: { enabled: false, model: 'auto' }, prudence: { enabled: false, model: 'auto' } });
+    assert.deepEqual(await registry.voices(record.definitionId), { ambition: { enabled: false, model: 'auto' }, prudence: { enabled: false, model: 'auto' }, models: [] });
     assert.equal(registry.agents()[0]!.voices, undefined);
     assert.equal(registry.runtime(record.definitionId)!.voices?.enabled().length, 0);
     assert.deepEqual(registry.setVoices(record.definitionId, { ambition: { enabled: true, model: 'auto' } }).ambition, { enabled: true, model: 'auto' });
@@ -316,7 +316,7 @@ test('an adopted agent\'s inner voices are off by default, stored in its record,
     await registry.close();
     const again = new AdoptionRegistry(options as never);
     again.start();
-    assert.deepEqual(again.voices(record.definitionId).ambition, { enabled: true, model: 'auto' });
+    assert.deepEqual((await again.voices(record.definitionId)).ambition, { enabled: true, model: 'auto' });
     await again.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

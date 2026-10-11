@@ -407,10 +407,11 @@ export class AdoptionRegistry {
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
   }
   /** Its inner voices' settings (off by default). */
-  voices(definitionId: string) {
+  async voices(definitionId: string) {
     const hosted = this.hosted.get(definitionId);
     if (!hosted) throw new RuntimeFault('not_found', 404);
-    return storedVoices(hosted.record.voices);
+    const models = await this.backend.models().catch(() => [] as ModelOption[]);
+    return { ...storedVoices(hosted.record.voices), models: models.map(m => ({ handle: m.handle, label: m.label, providerLabel: m.providerLabel })) };
   }
   /**
    * Turn its inner voices on or off and pick their models

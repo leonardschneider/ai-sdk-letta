@@ -218,3 +218,12 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
   return parts.map(part => (failure || stopped) && part.type === 'tool-call' && part.result === undefined
     ? { ...part, isError: true, result: stopped ? 'Turn stopped; the tool was interrupted.' : `Turn ended: ${String(failure!.data.code)}; execution not confirmed.` } : part);
 }
+
+/** Each assistant reply carries the run of the user message before it (`custom.replyRun`): the inner voices are asked about that run. */
+export function withReplyRuns(messages: readonly ThreadMessageLike[]): ThreadMessageLike[] {
+  let run: string | undefined;
+  return messages.map(message => {
+    if (message.role === 'user') { run = (message.metadata?.custom as { runId?: string } | undefined)?.runId; return message; }
+    return message.role === 'assistant' && run ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, replyRun: run } } } : message;
+  });
+}
