@@ -27,7 +27,7 @@ import type { Versions } from './versions.js';
 import { TitleView } from './title.js';
 import { titleText } from 'ai-sdk-letta/title';
 import { AuthorContext, InteractionContext, InteractionDock, Message } from './chat.js';
-import { askCounsel, counselError, VoicesContext, type RunCounsel, type VoicesState } from './voices.js';
+import { askCounsel, counselError, fetchCounsels, VoicesContext, type RunCounsel, type VoicesState } from './voices.js';
 import { RewindContext, RewindDialog, type RewindState } from './rewind.js';
 import { rewindError, type RewindSummary } from './rewind-model.js';
 import { LatexContext } from './markdown.js';
@@ -58,7 +58,7 @@ type LiveFile = { name: string; label: string; bytes: number; kind: FileInfo['ki
 type Author = Person & { id: string };
 /** Other messages delivered with a live turn (queued messages sent together), in order. */
 type BatchMember = { id: string; input: string; author?: Author };
-type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome; background?: MessageBackground }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean; counsels?: Record<string, RunCounsel> };
+type View = { messages: UIMessage[]; lastRunId: string | null; live: null | { id: string; input: string; images?: number; files?: LiveFile[]; author?: Author; source?: MessageSource; startedAt?: string; batch?: BatchMember[]; decision?: DecisionOutcome; background?: MessageBackground }; status: string | null; queue?: QueuedTurn[]; stopped?: { runId: string; code: string }; failed?: { runId: string; code: string; error?: string }; code?: string; error?: string; usable?: boolean; counsels?: Record<string, RunCounsel>; counselsPending?: string[] };
 /** Whether the quiet "Listened" lines are shown (kept per browser). */
 const SHOW_LISTENED = 'ai-sdk-letta-show-listened';
 /** How often the browser repeats "I am typing" while you type (the server forgets it after about 5 seconds). */
@@ -168,6 +168,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // The inner voices' notes on this conversation's replies (by run), and the replies they are weighing in on now.
   const [counsels, setCounsels] = useState<Record<string, RunCounsel>>({});
   const [asking, setAsking] = useState<Set<string>>(new Set());
+  // Replies the voices are weighing on their own now (after every finished reply, when they are on).
+  const [thinking, setThinking] = useState<Set<string>>(new Set());
   // A failed reply: why (the harness's error), under "This reply failed"; `usable`: nothing ran, so the conversation stays usable.
   const [failedNote, setFailedNote] = useState<{ runId: string; error?: string; usable: boolean }>();
   const [interaction, setInteraction] = useState<InteractionRequest>();
@@ -412,7 +414,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
 
   /** The conversation's state from its view: read-only (with Check and unlock) after an uncertain turn; a stopped reply marked as such. */
   function showState(view: View) {
-    setCounsels(view.counsels ?? {});
+    setCounsels(view.counsels ?? {}); setThinking(new Set(view.counselsPending ?? []));
     // The server says whether the conversation takes new turns (a checked turn keeps its status but is usable); older servers: by status.
     const locked = view.usable === undefined ? isLocked(view.status) : !view.usable && !view.live;
     setBlocked(locked ? lockedNotice(view.code) : '');
@@ -448,7 +450,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     if (team) { stream.current?.abort(); liveRun.current = undefined; setRunning(false); setLiveThread(undefined); setLiveAuthor(undefined); setQueue([]); }
     operation.current = true; setLoading(true); setBlocked(''); setCheckable(false); setCheckNote(''); setStoppedNote(undefined); setFailedNote(undefined); setInteraction(undefined); setInteractionOutcome('');
     const previous = currentRef.current;
-    setCurrent({ id, draft: false }); setMessages([]); setDrawer(false); setCounsels({});
+    setCurrent({ id, draft: false }); setMessages([]); setDrawer(false); setCounsels({}); setThinking(new Set());
     try {
       // Reading a view never sends input; retry briefly if another tab holds the single runtime.
       let view: View | undefined;
@@ -869,8 +871,27 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   const feedKey = feed.decisions.map(d => d.id).join(',');
   useEffect(() => { if (!current.draft && feed.loaded) void loadDecisions(current.id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [feedKey]);
   const loading_ = useRef(new Set<string>());
+  // After a reply (and on opening a conversation), follow the voices' notes until none is being written (bounded).
+  useEffect(() => {
+    if (!agent.voices?.length || current.draft) return;
+    const threadId = current.id;
+    let stopped = false;
+    void (async () => {
+      for (let attempt = 0; attempt < 120 && !stopped; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 400 : 1500));
+        if (stopped || currentRef.current.id !== threadId) return;
+        try {
+          const result = await fetchCounsels(threadId);
+          if (stopped || currentRef.current.id !== threadId) return;
+          setCounsels(result.counsels); setThinking(new Set(result.pending));
+          if (!result.pending.length && attempt > 0) return;
+        } catch { return; }
+      }
+    })();
+    return () => { stopped = true; };
+  }, [turns, current.id, current.draft, agent.voices]);
   const voicesState = useMemo<VoicesState>(() => ({
-    enabled: !!agent.voices?.length, counsels, asking,
+    enabled: !!agent.voices?.length, counsels, asking, thinking,
     ask: runId => {
       const threadId = currentRef.current.id;
       if (currentRef.current.draft) return;
@@ -879,7 +900,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         error => toast(counselError(error), { tone: 'error' }))
         .finally(() => setAsking(set => { const next = new Set(set); next.delete(runId); return next; }));
     },
-  }), [agent.voices, counsels, asking]);
+  }), [agent.voices, counsels, asking, thinking]);
   const decisionsState = useMemo<DecisionsState>(() => ({
     byId: threadDecisions, team: !!team, admin: !team || isAdmin, ...(team ? { me: team.user.id } : {}),
     ensure: id => {

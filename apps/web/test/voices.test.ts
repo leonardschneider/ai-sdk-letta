@@ -12,3 +12,13 @@ test('each assistant reply carries the run of the message before it (what the in
   assert.equal((messages[1]!.metadata?.custom as { replyRun?: string }).replyRun, 'r1');
   assert.equal((messages[3]!.metadata?.custom as { replyRun?: string } | undefined)?.replyRun, undefined);
 });
+
+test('under a reply: "thinking" while the voices write (on their own or asked again), then the notes, else nothing', async () => {
+  const { voicesLine } = await import('../src/voices.js');
+  const counsel = { at: 'now', notes: { ambition: { points: ['p'], confidence: 'high' as const } }, auto: true };
+  assert.equal(voicesLine({ counsels: {}, asking: new Set(), thinking: new Set(['r1']) }, 'r1'), 'thinking');
+  assert.equal(voicesLine({ counsels: { r1: counsel }, asking: new Set(['r1']), thinking: new Set() }, 'r1'), 'thinking', 'Ask again shows thinking');
+  assert.equal(voicesLine({ counsels: { r1: counsel }, asking: new Set(), thinking: new Set() }, 'r1'), 'notes');
+  assert.equal(voicesLine({ counsels: {}, asking: new Set(), thinking: new Set() }, 'r1'), 'none', 'no button before notes exist');
+  assert.equal(voicesLine({ counsels: {}, asking: new Set(), thinking: new Set() }, undefined), 'none');
+});

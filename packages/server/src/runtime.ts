@@ -137,12 +137,16 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   /** Why a failed turn failed (bounded, single line: the harness's error, HTTP status and provider message when given). */
   error?: string;
   /**
-   * The inner voices' notes on this turn (asked on demand, see {@link ThreadRuntime.counsel}).
+   * The inner voices' notes on this turn (on their own after the reply, or asked again: see {@link ThreadRuntime.counsel}).
    * `delivered`: the run whose turn brought them to the agent (once).
    */
   counsel?: RunCounsel };
-/** The inner voices' notes on a turn: when they were asked, each voice's note (or its error), and the turn that brought them to the agent. */
-export type RunCounsel = { at: string; notes: Counsel; delivered?: string };
+/**
+ * The inner voices' notes on a turn: when they were asked, each voice's note (or its error), and the turn that brought
+ * them to the agent. `auto`: they spoke on their own after the reply. `late`: they came after the next turn had started
+ * (shown in the app, never brought to the agent).
+ */
+export type RunCounsel = { at: string; notes: Counsel; delivered?: string; auto?: boolean; late?: boolean };
 /**
  * A run's state. `stopped`: someone pressed Stop, or a turn limit was
  * reached (see `TurnLimits`), and the backend confirmed the run ended: the
@@ -1775,7 +1779,9 @@ export class ThreadRuntime {
       const backgroundNote = run.background ? BACKGROUND_NOTE : undefined;
       let context: { reminder?: string; sources?: ContentSource[] } = {};
       try { context = this.turnContext?.(run.threadId) ?? {}; } catch { /* no context */ }
-      // The inner voices' notes on an earlier turn, not yet shown to the agent: once, in this turn.
+      // The inner voices' notes on an earlier turn, not yet shown to the agent: once, in this turn. Notes still
+      // being written wait a little (never long); later ones are shown in the app but no longer brought to the agent.
+      await this.awaitCounsel(run);
       const voicesNote = this.takeCounsel(run);
       const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNote].filter((r): r is string => !!r);
       const decision = { ...(reminders.length ? { reminder: reminders.join('\n\n') } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
@@ -1854,6 +1860,8 @@ export class ThreadRuntime {
       // closing a running SDK session or replaying any transcript into the agent.
       session.history = [...session.history, ...this.displayTurn(run, turn.others)];
       lane.pending = undefined; disconnect(); clearTimeout(timer); lane.active = undefined; lane.usedAt = Date.now();
+      // The inner voices weigh in on a finished reply on their own, in the background (never delaying the next turn).
+      this.autoCounsel(run);
       this.changed();
       // The next queued turn of this conversation (or another waiting for a free slot).
       if (this.queueing) {
@@ -1890,8 +1898,69 @@ export class ThreadRuntime {
     const listeners = this.listeners.get(id) ?? new Set(); listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
   }
-  /** Turns being weighed by the inner voices now (one counsel per turn at a time). */
-  private readonly counselling = new Set<string>();
+  /** Turns being weighed by the inner voices now (one counsel per turn at a time), with when that ends. */
+  private readonly counselling = new Map<string, Promise<unknown>>();
+  /** Turns the voices weighed (or are weighing) on their own: never twice for the same run. */
+  private readonly autoCounselled = new Set<string>();
+  /** Turns whose notes came too late for the next turn: shown, never brought to the agent. */
+  private readonly lateCounsel = new Set<string>();
+  /** How long a turn waits for the notes on the turn before it (ms). */
+  counselWaitMs = 10_000;
+  /**
+   * Whether the voices speak on their own after `run`: it completed with a
+   * reply (not failed, stopped or listened), voices are on, it was never
+   * weighed before, and (`speakAfter: 'long'`) it called a tool or took at
+   * least 30 seconds.
+   */
+  private wantsCounsel(run: Run): boolean {
+    if (!this.voices || run.status !== 'completed' || run.listened || run.rewound || run.counsel || this.autoCounselled.has(run.id) || this.counselling.has(run.id)) return false;
+    if (!this.voices.enabled().length) return false;
+    if (!run.events.some(event => event.type === 'text' && String(event.data.text ?? '').trim())) return false;
+    if ((this.voices.speakAfter?.() ?? 'every') === 'long') {
+      const tools = run.events.some(event => event.type === 'tool_started');
+      const took = run.startedAt && run.endedAt ? Date.parse(run.endedAt) - Date.parse(run.startedAt) : 0;
+      if (!tools && !(took >= 30_000)) return false;
+    }
+    return true;
+  }
+  /**
+   * The voices weigh a finished turn on their own, in the background (same
+   * input as {@link counsel}). A voice that fails or times out stays silent
+   * (its note is left out; nothing is stored when none answered).
+   */
+  private autoCounsel(run: Run): void {
+    try { if (!this.wantsCounsel(run)) return; } catch { return; }
+    this.autoCounselled.add(run.id);
+    const voices = this.voices!;
+    const work = (async () => {
+      try {
+        const notes = await voices.ask(counselRequest(run, this.state.runs));
+        const answered = Object.fromEntries(Object.entries(notes).filter(([, note]) => note && !('error' in note))) as Counsel;
+        if (!Object.keys(answered).length || run.rewound || run.counsel) return;
+        run.counsel = { at: new Date().toISOString(), notes: answered, auto: true, ...(this.lateCounsel.has(run.id) ? { late: true } : {}) };
+        this.save();
+      } catch { /* silent: the voices are advisory */ }
+    })().finally(() => { this.counselling.delete(run.id); this.lateCounsel.delete(run.id); this.changed(); });
+    this.counselling.set(run.id, work);
+  }
+  /** Before a turn: wait (at most {@link counselWaitMs}) for notes still being written on earlier turns of its thread; any later are late. */
+  private async awaitCounsel(run: Run) {
+    const pending = [...this.counselling].filter(([id]) => id !== run.id && this.state.runs.find(r => r.id === id)?.threadId === run.threadId);
+    if (!pending.length) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([Promise.allSettled(pending.map(([, work]) => work)), new Promise(resolve => { timer = setTimeout(resolve, this.counselWaitMs); })]);
+    clearTimeout(timer);
+    for (const [id] of pending) if (this.counselling.has(id)) this.lateCounsel.add(id);
+  }
+  /** Runs of a thread the voices are weighing now (the app shows "Ambition & Prudence are thinking…"). */
+  counselsPending(threadId: string): string[] {
+    return [...this.counselling.keys()].filter(id => this.state.runs.find(r => r.id === id)?.threadId === threadId);
+  }
+  /** A thread's stored counsels and those being written (`GET /v1/threads/:id/counsels`). */
+  threadCounsels(owner: string, threadId: string): { counsels: Record<string, RunCounsel>; pending: string[] } {
+    this.thread(owner, threadId);
+    return { counsels: this.counsels(threadId), pending: this.counselsPending(threadId) };
+  }
   /**
    * Ask the inner voices (Ambition and Prudence, those that are on) about a
    * finished turn: the person's message, the agent's reply, and a bounded
@@ -1907,23 +1976,30 @@ export class ThreadRuntime {
     if (!this.voices || !this.voices.enabled().length) throw new RuntimeFault('voices_off');
     if (run.status !== 'completed' || run.rewound) throw new RuntimeFault('run_not_finished');
     if (this.counselling.has(run.id)) throw new RuntimeFault('counsel_running');
-    this.counselling.add(run.id);
+    // Asked again (or for the first time): the automatic counsel never runs for this turn after this.
+    this.autoCounselled.add(run.id);
+    const work = this.voices.ask(counselRequest(run, this.state.runs), signal);
+    this.counselling.set(run.id, work.catch(() => undefined));
+    this.changed();
     try {
-      const notes = await this.voices.ask(counselRequest(run, this.state.runs), signal);
+      const notes = await work;
       run.counsel = { at: new Date().toISOString(), notes };
-      this.save(); this.changed();
+      this.save();
       return { runId: run.id, counsel: structuredClone(run.counsel) };
-    } finally { this.counselling.delete(run.id); }
+    } finally { this.counselling.delete(run.id); this.lateCounsel.delete(run.id); this.changed(); }
   }
   /** `counsels` for a thread's view (only when there are any). */
-  private counselField(threadId: string) { const counsels = this.counsels(threadId); return Object.keys(counsels).length ? { counsels } : {}; }
+  private counselField(threadId: string) {
+    const counsels = this.counsels(threadId); const pending = this.counselsPending(threadId);
+    return { ...(Object.keys(counsels).length ? { counsels } : {}), ...(pending.length ? { counselsPending: pending } : {}) };
+  }
   /** The thread's stored counsels by run ID (for the app: the notes under each reply). */
   counsels(threadId: string): Record<string, RunCounsel> {
     return Object.fromEntries(this.state.runs.filter(r => r.threadId === threadId && r.counsel && !r.rewound).map(r => [r.id, structuredClone(r.counsel!)]));
   }
   /** The newest undelivered counsel of the run's thread, as a reminder; every undelivered one is marked as brought by `run` (once). */
   private takeCounsel(run: Run): string | undefined {
-    const waiting = this.state.runs.filter(r => r.threadId === run.threadId && r.id !== run.id && r.counsel && !r.counsel.delivered && !r.rewound);
+    const waiting = this.state.runs.filter(r => r.threadId === run.threadId && r.id !== run.id && r.counsel && !r.counsel.delivered && !r.counsel.late && !r.rewound);
     if (!waiting.length) return undefined;
     for (const r of waiting) r.counsel!.delivered = run.id;
     this.save();

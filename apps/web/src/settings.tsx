@@ -87,7 +87,7 @@ export function SettingsPage(props: SettingsProps) {
             <ToolsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent} onSaved={props.onSaved}/>
             {agent.adopted && <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>}
           </>)}
-          {section('voices', <p className="modal-text">Two optional inner voices that weigh in on a reply when you ask (“Ask Ambition &amp; Prudence” under it). They are mirror images: Ambition pushes for the upside, Prudence for checks. Their notes are advisory: {agent.name} sees them in its next turn and decides. Each use costs tokens on their models.</p>,
+          {section('voices', <p className="modal-text">Two optional inner voices that weigh in on their own after each reply (in the background; the reply is never delayed). They are mirror images: Ambition pushes for the upside, Prudence for checks. Their notes are advisory: {agent.name} sees them in its next turn and decides. Each reply they weigh in on costs tokens on their models.</p>,
             <VoicesPanel agent={agent} onSaved={props.onSaved}/>)}
           {section('instructions', <p className="modal-text">A short section appended to {agent.name}’s system prompt: the tools it has in this app, and how its memory is protected here. Nothing else changes, and you can undo it.</p>,
             <InstructionsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent}/>)}
