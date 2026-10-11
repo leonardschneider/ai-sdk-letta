@@ -28,6 +28,11 @@ export {
   lettaReviewer, sweepReviewers, reviewerSessionOptions, reviewPrompt, validateVerdict, stricter, chooseReviewerModel, modelFamily, VERDICTS, VERDICT_SCHEMA, JIMINY_INSTRUCTIONS, JIMINY_NAME, REVIEWER_PREFERENCES,
   type Verdict, type JiminyVerdict, type JiminyDrop, type JiminyClaim, type ReviewRequest, type MemoryReviewer, type LettaReviewerOptions,
 } from './jiminy.js';
+export {
+  counsel, counselPrompt, counselReminder, lettaVoice, sweepVoices, validateVoiceNote, AMBITION_PERSONA, PRUDENCE_PERSONA, VOICE_PERSONAS, VOICES, VOICE_CONFIDENCE, VOICE_LIMITS, VOICE_NOTE_SCHEMA, VOICE_KINDS, VOICE_TIMEOUT_MS, COUNSEL_LIMITS,
+  type VoiceName, type VoiceConfidence, type VoiceNote, type VoiceAnswer, type InnerVoice, type VoiceOutcome, type Counsel, type CounselRequest, type LettaVoiceOptions,
+} from './voices.js';
+export { askTemporaryAdvisor, advisorSessionOptions, type AdvisorCall, type AdvisorAnswer } from './temporary-advisor.js';
 export { dreamHookSupported, dreamHookCommand, parseDreamRequest, reviewDreamRequest, DREAM_HOOK_CAPABILITY, type DreamRequest, type DreamResponse } from './dream-review.js';
 export { sweepTemporaryAgents, removeTemporaryAgent, removeAgentFolders, hiddenAgentsOf, transcriptsDirectory, type TemporaryAgentKind, type TemporaryAgentPlaces } from './temporary-agents.js';
 export { planRevert, changedBy, commitsWithTrailer, commitsSince, withTrailers, gitSupportsRevert, TURN_TRAILER, CONVERSATION_TRAILER, REWIND_TRAILER, SHARED_TRAILER, type GitRunner, type RevertPlan, type FilePlan, type FileChange, type CommitInfo } from './revert.js';
