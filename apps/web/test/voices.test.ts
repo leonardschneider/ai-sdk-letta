@@ -64,3 +64,32 @@ test('history: only the final answer shows; the hidden prompt is never a user me
   assert.equal(reflectionOf(kept[1]!)?.outcome, 'kept', 'inferred from KEEP without a record');
   assert.ok(!JSON.stringify(kept).includes('inner voices'));
 });
+
+test('rounds in history: only the last revision shows; each round is in the collapsed section; KEEP with a rebuttal keeps the latest', () => {
+  const run = '00000000-0000-4000-8000-000000000002';
+  const user = { id: 'u', role: 'user' as const, parts: [{ type: 'text' as const, text: 'Exact ELO?' }], metadata: { otid: run } };
+  const marker = (suffix: string, outcome?: string) => ({ id: `m${suffix}`, role: 'assistant' as const, parts: [{ type: 'data-reflection' as const, data: { otid: `${run}${suffix}`, ...(outcome ? { outcome } : {}) } }] });
+  const text = (id: string, value: string) => ({ id, role: 'assistant' as const, parts: [{ type: 'text' as const, text: value }] });
+  const messages = historyMessages([user, text('a', 'Your ELO is 1600.'), marker(':reflect', 'revised'), text('b', 'About 1600 ± 400.'), marker(':reflect2'), text('c', 'About 1600 ± 400 from 2 games.'), marker(':reflect3'), text('d', 'KEEP — two games are all we have.')]);
+  assert.deepEqual(messages.map(m => m.role), ['user', 'assistant']);
+  assert.deepEqual(messages[1]!.content, [{ type: 'text', text: 'About 1600 ± 400 from 2 games.' }]);
+  assert.equal(reflectionOf(messages[1]!)?.outcome, 'revised');
+  assert.equal(reflectionOf(messages[1]!)?.revisions, 2);
+  assert.equal(reflectionOf(messages[1]!)?.draft, 'Your ELO is 1600.');
+  assert.ok(!JSON.stringify(messages).includes('KEEP'));
+});
+
+test('the collapsed line: revised 2×, kept, the agent\'s debate or skip with its reason; settings bounds', async () => {
+  const { voicesLine, voicesLabel, validPolicy } = await import('../src/voices.js');
+  const notes = { ambition: { points: ['p'], confidence: 'high' as const } };
+  const revised = { at: 'now', notes, outcome: 'revised' as const, revisions: 2, mode: 'debate' as const, choice: { mode: 'debate' as const, reason: 'a factual claim' } };
+  assert.equal(voicesLabel(voicesLine(undefined, revised), revised), 'Revised 2× after Ambition & Prudence · Debate: a factual claim');
+  const kept = { at: 'now', notes, outcome: 'kept' as const, mode: 'calibrated' as const };
+  assert.equal(voicesLabel(voicesLine(undefined, kept), kept), 'Kept after Ambition & Prudence');
+  const skipped = { at: 'now', notes: {}, outcome: 'skipped' as const, reason: 'agent_skipped' as const, mode: 'skip' as const, choice: { mode: 'skip' as const, reason: 'a greeting' } };
+  assert.equal(voicesLine(undefined, skipped), 'skipped');
+  assert.equal(voicesLabel('skipped', skipped), 'Skipped review: a greeting');
+  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'skip', minimum: 'calibrated_if_tools', maximum: 'debate', maxRevisions: 2 }), true);
+  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'skip', minimum: 'calibrated', maximum: 'debate', maxRevisions: 1 }), false);
+  assert.equal(validPolicy({ decides: 'agent', defaultMode: 'calibrated', minimum: 'debate', maximum: 'calibrated', maxRevisions: 1 }), false);
+});

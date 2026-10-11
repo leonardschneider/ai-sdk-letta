@@ -11,7 +11,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel, BACKGROUND_NOTE, type BackgroundCommands,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  reflectionPrompt, keepsDraft, REFLECTION_OTID_SUFFIX, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest,
+  reflectionPrompt, keepsDraft, rebuttalOf, reflectionOtidSuffix, reflectionRound, clampVoiceChoice, parseInnerVoices, INNER_VOICES_TOOL, VOICES_NOTE, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest, type VoiceBounds, type VoiceChoice, type VoiceMode,
   appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
@@ -141,23 +141,36 @@ export type Run = { id: string; threadId: string; input: string; images?: RunIma
   counsel?: RunCounsel };
 /**
  * The inner voices' review of a turn's draft reply, within the turn: when they
- * were asked, each voice's note (or its error), and what the agent's
- * reflection did with them: `kept` the draft (it answered KEEP), `revised` it
- * (the reflection's text is the final reply; `draft` keeps the first one), or
- * `skipped` (no voice answered, or the reflection was stopped: the draft stands;
- * `reason` says which).
+ * were asked, each voice's note (or its error) in round 1, and what the
+ * agent's reflections did with them: `kept` the draft (round 1 answered KEEP),
+ * `revised` it (the last revision is the final reply; `draft` keeps the first
+ * one), or `skipped` (no voice answered, the reflection was stopped, or the
+ * agent skipped the review this turn: the draft stands; `reason` says which).
+ * `rounds`: each round's notes, outcome and the version it reviewed (the draft,
+ * then each revision), up to the agent's `maxRevisions`. `mode`: the
+ * effective mode of the turn; `choice`: what the agent asked with
+ * `inner_voices` (and why), when it did.
  */
-export type RunCounsel = { at: string; notes: Counsel; outcome: 'kept' | 'revised' | 'skipped'; draft?: string; reason?: 'no_notes' | 'stopped' };
-/** The OTID of a run's hidden reflection prompt. */
-export const reflectionOtid = (runId: string) => `${runId}${REFLECTION_OTID_SUFFIX}`;
+export type RunCounsel = { at: string; notes: Counsel; outcome: 'kept' | 'revised' | 'skipped'; draft?: string; reason?: 'no_notes' | 'stopped' | 'agent_skipped';
+  mode?: VoiceChoice; choice?: { mode: VoiceChoice; reason: string }; rounds?: CounselRound[]; revisions?: number };
+/** One review round: the voices' notes on `text` (the draft, or the previous round's revision), and what the reflection did (`rebuttal`: a debate KEEP's one line). */
+export type CounselRound = { notes: Counsel; outcome: 'kept' | 'revised' | 'skipped'; text: string; rebuttal?: string; reason?: 'no_notes' | 'stopped' };
+/** The OTID of a run's hidden reflection prompt (round 1: `<run>:reflect`; then `<run>:reflect2`, `<run>:reflect3`). */
+export const reflectionOtid = (runId: string, round = 1) => `${runId}${reflectionOtidSuffix(round)}`;
+/** A reflection event's round (events without one are round 1). */
+const roundOf = (data: Record<string, unknown>) => typeof data.round === 'number' ? data.round : 1;
+/** The text a reflection round wrote. */
+const roundText = (run: Pick<Run, 'events'>, round: number) => run.events.filter(event => event.type === 'text' && event.data.phase === 'reflection' && roundOf(event.data) === round).map(event => String(event.data.text ?? '')).join('');
 /**
- * A run's final reply text: the reflection's revision when the agent revised
- * its draft, else the draft (text events before the reflection).
+ * A run's final reply text: the last revision when the agent revised its
+ * draft, else the draft (text events before the reflection).
  */
 export function runReply(run: Pick<Run, 'events' | 'counsel'>): string {
   const draft = run.events.filter(event => event.type === 'text' && event.data.phase !== 'reflection').map(event => String(event.data.text ?? '')).join('');
   if (run.counsel?.outcome !== 'revised') return draft;
-  return run.events.filter(event => event.type === 'text' && event.data.phase === 'reflection').map(event => String(event.data.text ?? '')).join('');
+  const rounds = run.counsel.rounds;
+  const last = rounds ? rounds.map((round, index) => round.outcome === 'revised' ? index + 1 : 0).reduce((a, b) => Math.max(a, b), 0) : 1;
+  return last ? roundText(run, last) : draft;
 }
 /**
  * A run's state. `stopped`: someone pressed Stop, or a turn limit was
@@ -400,7 +413,11 @@ export function displayRun(run: Run): UIMessage[] {
       const last = parts.at(-1);
       if (last?.type === 'reasoning') last.text += String(data.text);
       else parts.push({ type: 'reasoning', text: String(data.text) });
-    } else if (event.type === 'reflecting' && data.phase === 'reflect') parts.push({ type: REFLECTION_PART as `data-${string}`, data: { otid: reflectionOtid(run.id), ...(run.counsel ? { outcome: run.counsel.outcome } : {}) } });
+    } else if (event.type === 'reflecting' && data.phase === 'reflect') {
+      const round = roundOf(data);
+      const outcome = run.counsel?.rounds?.[round - 1]?.outcome ?? (round === 1 && !run.counsel?.rounds ? run.counsel?.outcome : undefined);
+      parts.push({ type: REFLECTION_PART as `data-${string}`, data: { otid: reflectionOtid(run.id, round), ...(outcome ? { outcome } : {}) } });
+    }
     else if (event.type === 'listened') parts.push({ type: LISTENED_PART as `data-${string}`, data: typeof data.reason === 'string' ? { reason: data.reason } : {} });
     else if (event.type === 'tool_started') parts.push({ type: 'dynamic-tool', toolName: String(data.name), toolCallId: String(data.toolCallId), state: 'input-available', input: data.input });
     else if (event.type === 'tool_completed' || event.type === 'tool_failed') {
@@ -1234,13 +1251,17 @@ export class ThreadRuntime {
   }
   /** Reflection markers (see `REFLECTION_PART`) carry what the reflection did (`outcome`), from the run's record. */
   private markReflections(threadId: string, messages: UIMessage[]): UIMessage[] {
-    const runs = new Map(this.state.runs.filter(r => r.threadId === threadId && r.counsel).map(r => [reflectionOtid(r.id), r]));
+    const runs = new Map(this.state.runs.filter(r => r.threadId === threadId && r.counsel).map(r => [r.id, r]));
     if (!runs.size) return messages;
     return messages.map(message => message.role !== 'assistant' || !message.parts.some(part => part.type === REFLECTION_PART) ? message : { ...message, parts: message.parts.map(part => {
       if (part.type !== REFLECTION_PART) return part;
       const otid = (part as { data?: { otid?: unknown } }).data?.otid;
-      const run = typeof otid === 'string' ? runs.get(otid) : undefined;
-      return run ? { type: REFLECTION_PART as `data-${string}`, data: { otid, outcome: run.counsel!.outcome } } : part;
+      const round = reflectionRound(otid);
+      if (typeof otid !== 'string' || !round) return part;
+      const run = runs.get(otid.slice(0, otid.length - reflectionOtidSuffix(round).length));
+      // Each round's marker carries that round's outcome (older records: the review's outcome for round 1).
+      const outcome = run?.counsel?.rounds?.[round - 1]?.outcome ?? (round === 1 && !run?.counsel?.rounds ? run?.counsel?.outcome : undefined);
+      return outcome ? { type: REFLECTION_PART as `data-${string}`, data: { otid, outcome } } : part;
     }) });
   }
   /**
@@ -1805,7 +1826,9 @@ export class ThreadRuntime {
       const backgroundNote = run.background ? BACKGROUND_NOTE : undefined;
       let context: { reminder?: string; sources?: ContentSource[] } = {};
       try { context = this.turnContext?.(run.threadId) ?? {}; } catch { /* no context */ }
-      const reminders = [reminder, appNote, backgroundNote, context.reminder].filter((r): r is string => !!r);
+      // The agent chooses how its inner voices review this turn (when they are on and it decides).
+      const voicesNote = this.innerVoicesBounds() ? VOICES_NOTE : undefined;
+      const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNote].filter((r): r is string => !!r);
       const decision = { ...(reminders.length ? { reminder: reminders.join('\n\n') } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name, ...(run.unattended?.memoryFloor ? { memoryFloor: run.unattended.memoryFloor } : {}) } } : {};
       // Trust mode: the conversation's override of the agent's setting (undefined: the agent's).
@@ -1822,8 +1845,8 @@ export class ThreadRuntime {
         : { messages: [...session.agent.transcript, { role: 'user', content }], abortSignal: control.signal, ...tag, ...shared, ...unattended, ...decision, ...sources, ...trust, ...limits });
       streamed = true;
       // One step of the turn: the draft, then (with the inner voices) the reflection, whose events say so (`phase`).
-      const consume = async (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection') => {
-      const marked = phase ? { phase } : {};
+      const consume = async (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection', round?: number) => {
+      const marked = phase ? { phase, ...(round && round > 1 ? { round } : {}) } : {};
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') this.emit(run, 'text', { text: part.text, ...marked });
         else if (part.type === 'reasoning-delta') { if (part.text) this.emit(run, 'reasoning', { text: part.text, ...marked }); }
@@ -1846,8 +1869,10 @@ export class ThreadRuntime {
       };
       const letta = await consume(result);
       if (letta?.listened === true) { run.listened = true; this.emit(run, 'listened', typeof letta.reason === 'string' ? { reason: letta.reason.slice(0, 500) } : {}); }
-      // The inner voices review the draft, and the agent reflects on their notes in the same turn (at most once).
-      if (this.wantsReflection(run)) await this.reflect(session, run, control, consume, { ...shared, ...unattended, ...trust, ...limits });
+      // The inner voices review the draft, and the agent reflects on their notes in the same turn (up to `maxRevisions` rounds).
+      const review = this.reviewOf(run);
+      if (review?.mode === 'skip') { if (review.choice) { run.counsel = { at: new Date().toISOString(), notes: {}, outcome: 'skipped', reason: 'agent_skipped', mode: 'skip', choice: review.choice }; this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) }); } }
+      else if (review) await this.reflect(session, run, control, consume, { ...shared, ...unattended, ...trust, ...limits }, review);
       run.status = 'completed'; run.endedAt = new Date().toISOString(); this.compact(run); this.emit(run, 'completed', {});
     } catch (error) {
       clearTimeout(timer);
@@ -1909,7 +1934,7 @@ export class ThreadRuntime {
     const events: RuntimeEvent[] = [];
     for (const event of run.events) {
       const last = events.at(-1);
-      if ((event.type === 'text' || event.type === 'reasoning') && last?.type === event.type && last.data.phase === event.data.phase) events[events.length - 1] = { sequence: event.sequence, type: event.type, data: { text: String(last.data.text) + String(event.data.text), ...(event.data.phase ? { phase: event.data.phase } : {}) } };
+      if ((event.type === 'text' || event.type === 'reasoning') && last?.type === event.type && last.data.phase === event.data.phase && last.data.round === event.data.round) events[events.length - 1] = { sequence: event.sequence, type: event.type, data: { text: String(last.data.text) + String(event.data.text), ...(event.data.phase ? { phase: event.data.phase } : {}), ...(event.data.round !== undefined ? { round: event.data.round } : {}) } };
       else events.push(event);
     }
     run.events = events;
@@ -1928,71 +1953,119 @@ export class ThreadRuntime {
   /** How long the inner voices may take to review a draft (ms; each voice). */
   counselTimeoutMs = 60_000;
   /**
-   * Whether the inner voices review `run`'s draft: it ended normally with a
-   * reply (not listened), voices are on, and (`speakAfter: 'long'`) it called
-   * a tool or took at least 30 seconds.
+   * The bounds the agent's `inner_voices` tool works within: when voices are
+   * on and the agent decides (else undefined: the tool is not offered).
    */
-  private wantsReflection(run: Run): boolean {
+  innerVoicesBounds(): VoiceBounds | undefined {
     try {
-      if (!this.voices || run.listened || run.counsel || !this.voices.enabled().length) return false;
-      if (!run.events.some(event => event.type === 'text' && String(event.data.text ?? '').trim())) return false;
-      if ((this.voices.speakAfter?.() ?? 'every') === 'long') {
-        const tools = run.events.some(event => event.type === 'tool_started');
-        const took = run.startedAt ? Date.now() - Date.parse(run.startedAt) : 0;
-        if (!tools && !(took >= 30_000)) return false;
-      }
-      return true;
-    } catch { return false; }
+      if (!this.voices || !this.voices.enabled().length) return undefined;
+      const policy = this.voices.policy?.();
+      if (!policy || policy.decides !== 'agent') return undefined;
+      return { minimum: policy.minimum, maximum: policy.maximum, defaultMode: policy.defaultMode };
+    } catch { return undefined; }
   }
   /**
-   * The draft is done: the voices review it (in parallel, each on its own; a
-   * voice that fails is left out), then, when at least one answered, the agent
-   * reflects in a second step of the same turn and conversation, prompted by a
-   * hidden reminder (OTID `<run id>:reflect`, never shown as a message). It
-   * answers KEEP or writes the revised reply. Stop during the review or the
-   * reflection keeps the draft (the turn completes). The voices never review
-   * the revision. Anything else that fails the reflection fails the turn.
+   * How the inner voices review `run`'s draft, or undefined (not at all): it
+   * ended normally with a reply (not listened) and voices are on. The mode:
+   * the agent's last valid `inner_voices` call in this turn (when it
+   * decides), else the default mode, clamped to the minimum (raised; with
+   * `calibrated_if_tools`, when the turn used a tool other than
+   * `inner_voices`) and the maximum. Per turn only: nothing carries over.
    */
-  private async reflect(session: RuntimeSession, run: Run, control: AbortController, consume: (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection') => Promise<unknown>, options: Record<string, unknown>) {
+  private reviewOf(run: Run): { mode: VoiceChoice; choice?: { mode: VoiceChoice; reason: string }; maxRounds: number } | undefined {
+    try {
+      if (!this.voices || run.listened || run.counsel || !this.voices.enabled().length) return undefined;
+      if (!run.events.some(event => event.type === 'text' && event.data.phase !== 'reflection' && String(event.data.text ?? '').trim())) return undefined;
+      const policy = this.voices.policy?.() ?? { decides: 'agent', defaultMode: 'calibrated', minimum: 'none', maximum: 'debate', maxRevisions: 1 };
+      const draft = run.events.filter(event => event.data.phase !== 'reflection');
+      const usedTools = draft.some(event => event.type === 'tool_started' && event.data.name !== INNER_VOICES_TOOL);
+      let choice: { mode: VoiceChoice; reason: string } | undefined;
+      if (policy.decides === 'agent') for (const event of draft) {
+        if (event.type !== 'tool_started' || event.data.name !== INNER_VOICES_TOOL) continue;
+        const parsed = parseInnerVoices(event.data.input);
+        if (parsed) choice = parsed;
+      }
+      const mode = clampVoiceChoice(choice?.mode ?? policy.defaultMode, policy, usedTools);
+      return { mode, ...(choice ? { choice } : {}), maxRounds: Math.min(3, Math.max(1, policy.maxRevisions)) };
+    } catch { return undefined; }
+  }
+  /**
+   * The draft is done: the voices review it (in parallel, each on its own and
+   * in the turn's mode; a voice that fails is left out), then, when at least
+   * one answered, the agent reflects in another step of the same turn and
+   * conversation, prompted by a hidden reminder (OTID `<run id>:reflect`,
+   * never shown as a message). It answers KEEP (in debate, with a one-line
+   * rebuttal) or writes the revised reply. A revision is reviewed again (the
+   * voices read the new version, still independently) and the agent reflects
+   * again (`<run id>:reflect2`, `:reflect3`), up to `maxRounds`. It stops at
+   * the first KEEP, the limit, no voice answering, or Stop: the latest version
+   * stands and the turn completes. Anything else that fails a reflection fails the turn.
+   */
+  private async reflect(session: RuntimeSession, run: Run, control: AbortController, consume: (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection', round?: number) => Promise<unknown>, options: Record<string, unknown>, review: { mode: VoiceChoice; choice?: { mode: VoiceChoice; reason: string }; maxRounds: number }) {
     const at = new Date().toISOString();
-    this.emit(run, 'reflecting', { phase: 'review' });
-    const draft = counselRequest(run, this.state.runs).reply;
-    let notes: Counsel = {};
-    try { notes = await this.voices!.ask(counselRequest(run, this.state.runs), control.signal); } catch { /* advisory: skipped */ }
-    const answered = Object.fromEntries(Object.entries(notes).filter(([, note]) => note && !('error' in note))) as Counsel;
-    const skip = (reason: 'no_notes' | 'stopped') => { run.counsel = { at, notes, outcome: 'skipped', reason }; this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) }); };
-    const prompt = reflectionPrompt(answered);
-    if (control.signal.aborted) return skip('stopped');
-    if (!prompt) return skip('no_notes');
-    this.emit(run, 'reflecting', { phase: 'reflect' });
-    // The draft's step must have ended in the agent (its stream's last callback) before the next step starts.
+    const mode = review.mode as VoiceMode;
+    const base = counselRequest(run, this.state.runs);
+    const draft = base.reply;
+    const rounds: CounselRound[] = [];
+    let current = draft;
+    const finish = (reason?: 'no_notes' | 'stopped') => {
+      const revisions = rounds.filter(r => r.outcome === 'revised').length;
+      const first = rounds[0]!;
+      const outcome = revisions ? 'revised' : first.outcome;
+      run.counsel = { at, notes: first.notes, outcome, ...(revisions ? { draft: draft.slice(0, 8000), revisions } : {}), ...(!revisions && reason ? { reason } : {}),
+        mode, ...(review.choice ? { choice: review.choice } : {}), rounds };
+      this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) });
+    };
+    for (let round = 1; round <= review.maxRounds; round++) {
+      this.emit(run, 'reflecting', { phase: 'review', ...(round > 1 ? { round } : {}), mode });
+      let notes: Counsel = {};
+      try { notes = await this.voices!.ask({ ...base, reply: current.slice(-8000), mode }, control.signal); } catch { /* advisory: skipped */ }
+      const answered = Object.fromEntries(Object.entries(notes).filter(([, note]) => note && !('error' in note))) as Counsel;
+      const prompt = reflectionPrompt(answered, { mode, round, maxRounds: review.maxRounds });
+      const stop = (reason: 'no_notes' | 'stopped') => { rounds.push({ notes, outcome: 'skipped', text: current.slice(0, 8000), reason }); return finish(reason); };
+      if (control.signal.aborted) return stop('stopped');
+      if (!prompt) return stop('no_notes');
+      this.emit(run, 'reflecting', { phase: 'reflect', ...(round > 1 ? { round } : {}), mode });
+      const ended = await this.reflectionStep(session, run, control, consume, options, prompt, round);
+      if (ended === 'stopped') return stop('stopped');
+      const revision = roundText(run, round);
+      if (keepsDraft(revision)) {
+        const rebuttal = rebuttalOf(revision);
+        rounds.push({ notes, outcome: 'kept', text: current.slice(0, 8000), ...(rebuttal ? { rebuttal } : {}) });
+        return finish();
+      }
+      rounds.push({ notes, outcome: 'revised', text: current.slice(0, 8000) });
+      current = revision;
+    }
+    return finish();
+  }
+  /** One reflection step (round `round`): sent once the previous step ended in the agent; `stopped` when Stop ended it (Letta confirmed). */
+  private async reflectionStep(session: RuntimeSession, run: Run, control: AbortController, consume: (result: Awaited<ReturnType<RuntimeSession['agent']['stream']>>, phase?: 'reflection', round?: number) => Promise<unknown>, options: Record<string, unknown>, prompt: string, round: number): Promise<'done' | 'stopped'> {
+    // The previous step must have ended in the agent (its stream's last callback) before the next step starts.
     for (let i = 0; i < 50 && control.signal.aborted === false; i++) {
       try {
-        // Turn limits apply across both steps: the reflection gets what is left of the hard cap.
+        // Turn limits apply across all steps: the reflection gets what is left of the hard cap.
         const elapsed = run.startedAt ? Date.now() - Date.parse(run.startedAt) : 0;
         const maxMs = Math.max(1000, ((options.limits as { maxMs?: number } | undefined)?.maxMs ?? DEFAULT_TURN_MAX_MS) - elapsed);
         const limits = { limits: { ...(options.limits as object | undefined), maxMs } };
         // The turn's own options (who acts, an automation's policy, trust mode), without its speaker notes or reply mode.
         const { otid: _otid, speaker: _speaker, speakers: _speakers, replyMode: _replyMode, addressed: _addressed, ...kept } = options;
-        const result = await session.agent.stream({ ...kept, prompt, abortSignal: control.signal, otid: reflectionOtid(run.id), ...limits });
-        try { await consume(result, 'reflection'); }
+        const result = await session.agent.stream({ ...kept, prompt, abortSignal: control.signal, otid: reflectionOtid(run.id, round), ...limits });
+        try { await consume(result, 'reflection', round); }
         catch (error) {
           if (!control.signal.aborted) throw error;
-          // Stopped while reflecting: once Letta confirms the step ended, the draft stands and the turn completes.
+          // Stopped while reflecting: once Letta confirms the step ended, the latest version stands and the turn completes.
           const outcome = session.agent.lastTurn ? await settledWithin(session.agent.lastTurn(), ThreadRuntime.STOP_SETTLE_MS) : undefined;
           if (outcome?.end !== 'stopped') throw error;
-          return skip('stopped');
+          return 'stopped';
         }
-        const revision = run.events.filter(event => event.type === 'text' && event.data.phase === 'reflection').map(event => String(event.data.text ?? '')).join('');
-        run.counsel = keepsDraft(revision) ? { at, notes, outcome: 'kept' } : { at, notes, outcome: 'revised', draft: draft.slice(0, 8000) };
-        this.emit(run, 'reflected', { counsel: structuredClone(run.counsel) });
-        return;
+        return 'done';
       } catch (error) {
         if (error instanceof Error && error.message === 'A turn is already running') { await new Promise(resolve => setTimeout(resolve, 20)); continue; }
         throw error;
       }
     }
-    if (control.signal.aborted) return skip('stopped');
+    if (control.signal.aborted) return 'stopped';
     throw new RuntimeFault('runtime_failed');
   }
   /** A thread's stored reviews by run (`GET /v1/threads/:id/counsels`). */

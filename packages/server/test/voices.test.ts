@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SDKMessage, SendMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
-import { LettaAgent, ToolInteractions, projectHistory, REFLECTION_PART, type InnerVoice } from 'ai-sdk-letta';
-import { ThreadRuntime, turnStep, DefinitionVoices, checkVoiceSettings, voiceCounsellor, counselRequest, runReply, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
+import { LettaAgent, ToolInteractions, projectHistory, innerVoicesTool, REFLECTION_PART, type InnerVoice } from 'ai-sdk-letta';
+import { ThreadRuntime, turnStep, DefinitionVoices, checkVoiceSettings, storedVoices, reviewPolicy, voiceCounsellor, counselRequest, runReply, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
 import type { RunCounsel } from '../src/runtime.js';
 
 /**
@@ -33,7 +33,7 @@ function fixture(directory = mkdtempSync(join(tmpdir(), 'ai-sdk-letta-voices-'))
         open: () => ({
           async send(message: SendMessage, options?: { otid?: string }) {
             const full = typeof message === 'string' ? message : message.map(item => item.type === 'text' ? item.text : '').join('');
-            reflecting = !!options?.otid?.endsWith(':reflect');
+            reflecting = /:reflect\d?$/.test(options?.otid ?? '');
             input = reflecting ? full : full.replace(/^(<system-reminder>[\s\S]*?<\/system-reminder>\n)+/, '');
             sent.push(full);
             add({ message_type: 'user_message', content: full, ...(options?.otid ? { otid: options.otid } : {}) });
@@ -172,7 +172,7 @@ test('kept: the voices review the draft, the agent answers KEEP in a second step
   }
   // The next turn is a normal turn: no reminder of the notes, and its own review.
   await turn(f, threadId, 'go on');
-  assert.doesNotMatch(f.sent[2]!, /inner voices/);
+  assert.doesNotMatch(f.sent[2]!, /inner voices (reviewed|debated)/);
   assert.equal(asked.length, 4);
 });
 
@@ -221,19 +221,18 @@ test('skipped: no voice answered; failed and listened drafts are not reviewed', 
   assert.equal(runOf(f, failed).counsel, undefined);
 });
 
-test('voices off, and "only long turns": a quick reply without tools is not reviewed', async () => {
+test('voices off, and minimum "calibrated if tools" with default skip: a quick reply without tools is not reviewed', async () => {
   const f = fixture();
   let settings: VoiceSettings = DEFAULT_VOICES;
   const asked = counting(f, () => settings);
   const threadId = randomUUID();
   await f.runtime.create('owner', threadId, 'Long');
   await turn(f, threadId, 'while off');
-  settings = { ...on, speakAfter: 'long' };
+  settings = checkVoiceSettings({ ...on, speakAfter: 'long' });
   const quick = await turn(f, threadId, 'quick question');
   assert.equal(asked.length, 0);
   assert.equal(runOf(f, quick).counsel, undefined);
   assert.equal(f.sent.length, 2);
-  assert.equal(checkVoiceSettings({ speakAfter: 'long' }).speakAfter, 'long');
   assert.throws(() => checkVoiceSettings({ speakAfter: 'sometimes' }), /invalid_input/);
 });
 
@@ -269,4 +268,159 @@ test('Stop while the voices review or while the agent reflects keeps the draft a
   await f.runtime.start('owner', { id: next, threadId, text: 'third', parentRunId: id });
   await until(() => !f.runtime.busy, 'turn ended');
   assert.equal(runOf(f, next).status, 'completed');
+});
+
+/* ---------------- revision rounds, modes, the agent's choice ---------------- */
+
+test('settings: bounds are validated (min ≤ max, default between) and the old speakAfter migrates', () => {
+  const ok = checkVoiceSettings({ ...on, decides: 'fixed', defaultMode: 'debate', minimum: 'calibrated', maximum: 'debate', maxRevisions: 3 });
+  assert.deepEqual(reviewPolicy(ok), { decides: 'fixed', defaultMode: 'debate', minimum: 'calibrated', maximum: 'debate', maxRevisions: 3 });
+  assert.deepEqual(reviewPolicy(DEFAULT_VOICES), { decides: 'agent', defaultMode: 'calibrated', minimum: 'none', maximum: 'debate', maxRevisions: 1 });
+  for (const bad of [{ minimum: 'debate', maximum: 'calibrated' }, { defaultMode: 'debate', maximum: 'calibrated' }, { defaultMode: 'skip', minimum: 'calibrated' }, { maxRevisions: 0 }, { maxRevisions: 4 }, { maxRevisions: 1.5 },
+    { decides: 'nobody' }, { defaultMode: 'loud' }, { minimum: 'some' }, { maximum: 'skip' }]) {
+    assert.throws(() => checkVoiceSettings(bad), /invalid_input/, JSON.stringify(bad));
+  }
+  // calibrated_if_tools allows a skip default (the minimum applies only to turns with tools).
+  assert.equal(checkVoiceSettings({ minimum: 'calibrated_if_tools', defaultMode: 'skip' }).defaultMode, 'skip');
+  // Old settings: "long" → minimum calibrated_if_tools + default skip; "every" → default calibrated; speakAfter is not kept.
+  const long = storedVoices({ ...on, speakAfter: 'long' });
+  assert.equal(long.minimum, 'calibrated_if_tools'); assert.equal(long.defaultMode, 'skip'); assert.equal('speakAfter' in long, false);
+  assert.equal(storedVoices({ ...on, speakAfter: 'every' }).defaultMode, 'calibrated');
+  assert.equal(checkVoiceSettings({ speakAfter: 'long', defaultMode: 'calibrated' }).defaultMode, 'calibrated', 'explicit fields win');
+});
+
+test('rounds: a revision is reviewed again (the new version) until KEEP; each round has its own hidden OTID, and rebuilt history hides them all', async () => {
+  const f = fixture();
+  const asked = counting(f, () => ({ ...on, maxRevisions: 3 }));
+  let round = 0;
+  f.state.reflection = () => (++round === 1 ? 'Revision one.' : round === 2 ? 'Revision two.' : 'KEEP');
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Rounds');
+  const id = await turn(f, threadId, 'Estimate my ELO');
+  const run = runOf(f, id);
+  assert.equal(run.counsel?.outcome, 'revised');
+  assert.equal(run.counsel?.revisions, 2);
+  assert.deepEqual(run.counsel?.rounds?.map(r => [r.outcome, r.text]), [['revised', 'Got: Estimate my ELO. Plan: play 2 more games.'], ['revised', 'Revision one.'], ['kept', 'Revision two.']]);
+  assert.equal(runReply(run as never), 'Revision two.');
+  assert.equal(asked.length, 6, 'two voices per round');
+  assert.deepEqual(asked.filter(a => a.startsWith('prudence')).map(a => a.split(':').slice(2).join(':')), ['Got: Estimate my ELO. Plan: play 2 more games.', 'Revision one.', 'Revision two.'], 'each round reads the new version');
+  const records = [...f.rows.values()][0]!;
+  assert.deepEqual(records.filter(r => String(r.otid ?? '').includes(':reflect')).map(r => r.otid), [`${id}:reflect`, `${id}:reflect2`, `${id}:reflect3`]);
+  assert.match(String(records.find(r => r.otid === `${id}:reflect2`)!.content), /reviewed your revised reply/);
+  // Rebuilt from the backend's records (as after a reload): no hidden prompt is a user message; each round's marker carries its outcome.
+  const rebuilt = projectHistory(structuredClone(records) as never, []);
+  assert.deepEqual(rebuilt.filter(m => m.role === 'user').map(m => m.parts.map(p => (p as { text?: string }).text).join('')), ['Estimate my ELO']);
+  const view = await viewOf(f, threadId);
+  assert.deepEqual(userTexts(view.messages), ['Estimate my ELO']);
+  assert.deepEqual(view.messages.flatMap(m => m.parts).filter(p => p.type === REFLECTION_PART).map(p => [p.data?.otid, p.data?.outcome]), [[`${id}:reflect`, 'revised'], [`${id}:reflect2`, 'revised'], [`${id}:reflect3`, 'kept']]);
+});
+
+test('rounds stop at the limit: the latest revision stands', async () => {
+  const f = fixture();
+  const asked = counting(f, () => ({ ...on, maxRevisions: 2 }));
+  let round = 0;
+  f.state.reflection = () => `Revision ${++round}.`;
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Limit');
+  const id = await turn(f, threadId, 'Estimate my ELO');
+  const run = runOf(f, id);
+  assert.equal(run.counsel?.rounds?.length, 2);
+  assert.equal(run.counsel?.revisions, 2);
+  assert.equal(runReply(run as never), 'Revision 2.');
+  assert.equal(asked.length, 4);
+  assert.equal(f.sent.length, 3, 'the draft and two reflections');
+  assert.doesNotMatch(f.sent[2]!, /A revision is reviewed again/, 'the last round says nothing more follows');
+  assert.match(f.sent[1]!, /A revision is reviewed again/);
+});
+
+test('debate: the voices get the debate stance; KEEP with a rebuttal keeps the draft and records the rebuttal', async () => {
+  const f = fixture();
+  const modes: string[] = [];
+  f.runtime.voices = voiceCounsellor({ settings: () => ({ ...on, decides: 'fixed', defaultMode: 'debate' }), agentModel: () => 'openai-codex/gpt-5.5', directory: f.directory, available: async () => [],
+    voice: name => async request => { modes.push(`${name}:${request.mode}`); return { points: [`${name} point`], confidence: 'medium' }; } });
+  f.state.reflection = () => 'KEEP — the counterexample assumes a rated pool the person ruled out.';
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Debate');
+  const id = await turn(f, threadId, 'Is 1600 right?');
+  const run = runOf(f, id);
+  assert.deepEqual(modes.sort(), ['ambition:debate', 'prudence:debate']);
+  assert.equal(run.counsel?.mode, 'debate');
+  assert.equal(run.counsel?.outcome, 'kept');
+  assert.equal(run.counsel?.rounds?.[0]?.rebuttal, 'the counterexample assumes a rated pool the person ruled out.');
+  assert.equal(runReply(run as never), 'Got: Is 1600 right?. Plan: play 2 more games.');
+  assert.match(f.sent[1]!, /debated your draft reply[\s\S]*KEEP followed by a one-line rebuttal/);
+});
+
+/** A synthetic finished draft: its text and tool calls (name, input). */
+function draftRun(tools: [string, unknown][] = []) {
+  let sequence = 0;
+  return { id: randomUUID(), threadId: 't', input: 'q', parentRunId: null, status: 'running', events: [
+    ...tools.map(([name, input]) => ({ sequence: ++sequence, type: 'tool_started', data: { toolCallId: `c${sequence}`, name, input } })),
+    { sequence: ++sequence, type: 'text', data: { text: 'An answer.' } },
+  ] };
+}
+const reviewOf = (f: ReturnType<typeof fixture>, run: ReturnType<typeof draftRun>) => f.runtime['reviewOf'](run as never) as { mode: string; choice?: { mode: string; reason: string }; maxRounds: number } | undefined;
+
+test('the agent chooses per turn within the bounds: clamped to min/max, last call counts, skip does not persist, calibrated_if_tools', () => {
+  const f = fixture();
+  let settings: VoiceSettings = { ...on, minimum: 'none', maximum: 'calibrated', defaultMode: 'calibrated' };
+  counting(f, () => settings);
+  const choose = (mode: string, reason = 'why') => ['inner_voices', { mode, reason }] as [string, unknown];
+  assert.equal(reviewOf(f, draftRun([choose('debate')]))?.mode, 'calibrated', 'lowered to the maximum');
+  assert.equal(reviewOf(f, draftRun([choose('debate'), choose('skip', 'small talk')]))?.mode, 'skip', 'the last call counts');
+  assert.deepEqual(reviewOf(f, draftRun([choose('skip', 'small talk')]))?.choice, { mode: 'skip', reason: 'small talk' });
+  assert.equal(reviewOf(f, draftRun([choose('skip', '')]))?.mode, 'calibrated', 'an invalid call (empty reason) is ignored');
+  // The next turn starts from the default.
+  assert.equal(reviewOf(f, draftRun())?.mode, 'calibrated');
+  settings = { ...on, minimum: 'calibrated', maximum: 'debate', defaultMode: 'calibrated' };
+  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.mode, 'calibrated', 'a skip below the minimum is raised');
+  settings = { ...on, minimum: 'calibrated_if_tools', maximum: 'debate', defaultMode: 'skip', maxRevisions: 2 };
+  assert.equal(reviewOf(f, draftRun())?.mode, 'skip');
+  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.mode, 'skip', 'inner_voices itself is not a tool use');
+  assert.equal(reviewOf(f, draftRun([choose('skip'), ['Bash', { command: 'ls' }]]))?.mode, 'calibrated', 'a turn with tools gets at least calibrated');
+  assert.equal(reviewOf(f, draftRun([['Bash', {}], choose('debate')]))?.mode, 'debate');
+  assert.equal(reviewOf(f, draftRun())?.maxRounds, 2);
+  // Fixed: the tool's calls are ignored; the default applies (clamped).
+  settings = { ...on, decides: 'fixed', defaultMode: 'calibrated' };
+  assert.equal(reviewOf(f, draftRun([choose('debate'), choose('skip')]))?.mode, 'calibrated');
+  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.choice, undefined);
+});
+
+test('the inner_voices tool is offered only with voices on and the agent deciding; the tool result names the effective mode', async () => {
+  const f = fixture();
+  let settings: VoiceSettings = DEFAULT_VOICES;
+  counting(f, () => settings);
+  assert.equal(f.runtime.innerVoicesBounds(), undefined, 'voices off');
+  settings = { ...on, decides: 'fixed' };
+  assert.equal(f.runtime.innerVoicesBounds(), undefined, 'fixed');
+  settings = { ...on, minimum: 'calibrated', maximum: 'calibrated', defaultMode: 'calibrated' };
+  const bounds = f.runtime.innerVoicesBounds();
+  assert.deepEqual(bounds, { minimum: 'calibrated', maximum: 'calibrated', defaultMode: 'calibrated' });
+  assert.equal(new ThreadRuntime({ open: async () => { throw new Error('x'); }, close: async () => {} }, join(f.directory, 'other.json'), 'owner').innerVoicesBounds(), undefined, 'no voices at all');
+  const tool = innerVoicesTool(() => f.runtime.innerVoicesBounds());
+  const result = await tool.execute!({ mode: 'skip', reason: 'hi' }, { toolCallId: 'c', messages: [], context: {} } as never) as { ok: boolean; mode: string; note: string };
+  assert.equal(result.mode, 'calibrated');
+  assert.match(result.note, /bounds change "skip" to "calibrated"/);
+  settings = DEFAULT_VOICES;
+  assert.deepEqual(await tool.execute!({ mode: 'skip', reason: 'hi' }, { toolCallId: 'c', messages: [], context: {} } as never), { ok: false, error: 'voices_unavailable' });
+});
+
+test('a default skip asks no voice and takes no reflection step; the VOICES note reaches the agent', async () => {
+  const f = fixture();
+  const asked = counting(f, () => ({ ...on, defaultMode: 'skip' }));
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Skip');
+  const id = await turn(f, threadId, 'say hi');
+  assert.equal(asked.length, 0);
+  assert.equal(runOf(f, id).counsel, undefined, 'a default skip leaves no record');
+  assert.match(f.sent[0]!, /Use inner_voices to choose how your inner voices review this turn/);
+  assert.equal(f.sent.length, 1);
+});
+
+test('the session accepts inner_voices calls: the agent knows the tool while it is offered, and reopens when that changes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../ai-sdk-letta/src/runtime.ts', import.meta.url), 'utf8');
+  // The LettaAgent refuses calls to tools it does not know ("Unexpected tool call"): inner_voices must be among them.
+  assert.match(source, /tools: \(voicesOffered \? \{ \.\.\.agentTools, \[INNER_VOICES_TOOL\]/);
+  assert.match(source, /voicesOffered !== !!options\.innerVoices\?\.\(\)/);
 });

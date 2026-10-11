@@ -1449,8 +1449,11 @@ button.job-last:hover { color: var(--text); }
 .voices-line { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 6px; color: var(--text-3); font: inherit; cursor: pointer; }
 .voices-line:hover { background: var(--hover); color: var(--text-2); }
 .voices-thinking { display: inline-flex; align-items: center; gap: 6px; padding: 3px 0; color: var(--text-3); }
-.voice-speak-after { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.voice-speak-after .adopt-meta { flex-basis: 100%; }
+.voice-policy { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+.voice-policy .adopt-meta { grid-column: 1 / -1; }
+.voices-round + .voices-round { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.voices-outcome { margin: 6px 0 0; color: var(--text-2); font-size: 12.5px; }
+.voices-skipped .voices-line svg:first-child { color: var(--text-3); }
 .voices-line svg:first-child { color: var(--ambition); }
 .voices-chevron { transition: transform .12s; }
 .voices[data-open] .voices-chevron { transform: rotate(90deg); }

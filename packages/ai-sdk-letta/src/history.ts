@@ -2,6 +2,7 @@ import type { LettaCodeSession, ListMessagesOptions, ListMessagesResult, LettaCo
 import type { UIMessage } from 'ai';
 import { decodeImagePart } from './images.js';
 import { STAY_SILENT_TOOL } from './listening.js';
+import { reflectionRound } from './voices.js';
 
 /** Maximum backend records loaded when restoring a conversation's display history. */
 export const HISTORY_LIMIT = 10_000;
@@ -116,12 +117,14 @@ function timestamp(row: Row, user = false): { metadata?: { createdAt?: string; o
 
 /**
  * Data part that marks where a turn's reflection step starts (see
- * `reflectionPrompt`): the hidden prompt (sent with the OTID `<run id>:reflect`)
+ * `reflectionPrompt`): the hidden prompt (sent with the OTID `<run id>:reflect`,
+ * then `<run id>:reflect2`, `<run id>:reflect3` for later revision rounds)
  * is never shown as a message; this assistant part (`{ otid }`) stands in its
- * place, so an app can tell the draft reply (before it) from the reflection (after).
+ * place, so an app can tell the draft reply (before the first) from each
+ * round's reflection (after each).
  */
 export const REFLECTION_PART = 'data-reflection';
-const isReflectionOtid = (otid: unknown): otid is string => typeof otid === 'string' && otid.endsWith(':reflect') && /^[A-Za-z0-9._:-]{1,100}$/.test(otid);
+const isReflectionOtid = (otid: unknown): otid is string => reflectionRound(otid) !== undefined;
 /** Data part that marks a turn the agent listened to without replying (see {@link projectHistory}'s `listening`). */
 export const LISTENED_PART = 'data-listened';
 /** Options of {@link projectHistory}. */

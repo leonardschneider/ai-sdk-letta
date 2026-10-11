@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   counsel, counselPrompt, reflectionPrompt, keepsDraft, projectHistory, assertHistorySettled, REFLECTION_PART, validateVoiceNote, chooseReviewerModel, reviewerSessionOptions, advisorSessionOptions, VERDICT_SCHEMA, VOICE_NOTE_SCHEMA,
-  AMBITION_PERSONA, PRUDENCE_PERSONA, type InnerVoice,
+  AMBITION_PERSONA, PRUDENCE_PERSONA, DEBATE_ADDENDA, voicePersona, rebuttalOf, reflectionRound, clampVoiceChoice, validVoiceBounds, parseInnerVoices, VOICES_NOTE, type InnerVoice,
 } from '../src/index.js';
+import { defineAgent } from '../src/definition.js';
 
 test('a voice note is validated against its schema', () => {
   assert.deepEqual(validateVoiceNote({ points: [' Ship it '], confidence: 'high' }), { points: ['Ship it'], confidence: 'high' });
@@ -100,4 +101,62 @@ test('Jiminy\'s session options are unchanged by the shared helper', () => {
   assert.equal(options.permissionMode, 'strict');
   assert.deepEqual(options.toolset, { base: 'none' });
   assert.deepEqual((advisorSessionOptions('/tmp/x', VOICE_NOTE_SCHEMA) as unknown as Record<string, unknown>).outputFormat, { type: 'json_schema', schema: VOICE_NOTE_SCHEMA, maxRetries: 2 });
+});
+
+test('debate personas: Prudence prosecutes with checkable objections only, Ambition defends; neither names the other', () => {
+  const prudence = voicePersona('prudence', 'debate');
+  const ambition = voicePersona('ambition', 'debate');
+  assert.ok(prudence.startsWith(PRUDENCE_PERSONA) && prudence.endsWith(DEBATE_ADDENDA.prudence));
+  assert.ok(ambition.startsWith(AMBITION_PERSONA) && ambition.endsWith(DEBATE_ADDENDA.ambition));
+  assert.match(DEBATE_ADDENDA.prudence, /you prosecute/);
+  assert.match(DEBATE_ADDENDA.prudence, /specific and checkable: a concrete counterexample, a check or test that would fail, a missing case/);
+  assert.match(DEBATE_ADDENDA.prudence, /Vague doubt .* is not allowed/);
+  assert.match(DEBATE_ADDENDA.ambition, /you defend\. Steelman the reply/);
+  assert.match(DEBATE_ADDENDA.ambition, /objections .* weak or irrelevant/);
+  assert.match(DEBATE_ADDENDA.ambition, /strengthen the reply/);
+  assert.doesNotMatch(prudence, /Ambition/);
+  assert.doesNotMatch(ambition, /Prudence/);
+  assert.equal(voicePersona('prudence'), PRUDENCE_PERSONA, 'calibrated: the persona as is');
+});
+
+test('debate KEEP: a one-line rebuttal keeps the draft; reflection rounds have their own OTIDs', () => {
+  assert.equal(rebuttalOf('KEEP — the counterexample assumes unrated play.'), 'the counterexample assumes unrated play.');
+  assert.equal(rebuttalOf('keep: fine'), 'fine');
+  assert.equal(rebuttalOf('Keep the bot simple and ship it.'), undefined, 'not a rebuttal: a reply that starts with "Keep"');
+  assert.equal(keepsDraft('KEEP - two games already ruled out'), true);
+  assert.equal(keepsDraft('KEEP — a\nsecond line'), false);
+  assert.deepEqual(['r:reflect', 'r:reflect2', 'r:reflect3', 'r:reflect4', 'r:reflectx', 'r', 'r:reflect 2'].map(reflectionRound), [1, 2, 3, undefined, undefined, undefined, undefined]);
+  const prompt = reflectionPrompt({ prudence: { points: ['2 games give ±400.'], confidence: 'high' } }, { mode: 'debate', round: 2, maxRounds: 3 })!;
+  assert.match(prompt, /debated your revised reply/);
+  assert.match(prompt, /answer KEEP followed by a one-line rebuttal/);
+  assert.match(prompt, /A revision is reviewed again/);
+});
+
+test('history: every round\'s hidden prompt is a marker, never a user message', () => {
+  const rows = [
+    { id: 'm1', message_type: 'user_message', content: 'Exact ELO?', otid: 'run-1' },
+    { id: 'm2', message_type: 'assistant_message', content: 'Your ELO is 1600.' },
+    { id: 'm3', message_type: 'user_message', content: reflectionPrompt({ prudence: { points: ['Too few games.'], confidence: 'high' } })!, otid: 'run-1:reflect' },
+    { id: 'm4', message_type: 'assistant_message', content: 'About 1600 ± 400.' },
+    { id: 'm5', message_type: 'user_message', content: reflectionPrompt({ prudence: { points: ['Say how many games.'], confidence: 'high' } }, { round: 2 })!, otid: 'run-1:reflect2' },
+    { id: 'm6', message_type: 'assistant_message', content: 'About 1600 ± 400 from 2 games.' },
+  ].map(row => ({ ...row, date: '2026-01-01T00:00:00Z' }));
+  const projected = projectHistory(rows as never, []);
+  assert.deepEqual(projected.filter(m => m.role === 'user').map(m => (m.parts[0] as { text: string }).text), ['Exact ELO?']);
+  assert.deepEqual(projected.flatMap(m => m.parts).filter(p => p.type === REFLECTION_PART).map(p => (p as { data: { otid: string } }).data.otid), ['run-1:reflect', 'run-1:reflect2']);
+});
+
+test('the agent\'s choice: clamped to the bounds; bounds validated; input checked; the tool name is reserved', () => {
+  assert.equal(clampVoiceChoice('skip', { minimum: 'calibrated', maximum: 'debate' }, false), 'calibrated');
+  assert.equal(clampVoiceChoice('debate', { minimum: 'none', maximum: 'calibrated' }, false), 'calibrated');
+  assert.equal(clampVoiceChoice('skip', { minimum: 'calibrated_if_tools', maximum: 'debate' }, false), 'skip');
+  assert.equal(clampVoiceChoice('skip', { minimum: 'calibrated_if_tools', maximum: 'debate' }, true), 'calibrated');
+  assert.equal(clampVoiceChoice('calibrated', { minimum: 'debate', maximum: 'debate' }, false), 'debate');
+  assert.equal(validVoiceBounds({ minimum: 'debate', maximum: 'calibrated', defaultMode: 'calibrated' }), false);
+  assert.equal(validVoiceBounds({ minimum: 'calibrated_if_tools', maximum: 'calibrated', defaultMode: 'skip' }), true);
+  assert.equal(validVoiceBounds({ minimum: 'calibrated', maximum: 'debate', defaultMode: 'skip' }), false);
+  assert.deepEqual(parseInnerVoices({ mode: 'debate', reason: '  a claim  ' }), { mode: 'debate', reason: 'a claim' });
+  for (const bad of [null, { mode: 'loud', reason: 'x' }, { mode: 'skip' }, { mode: 'skip', reason: '' }, { mode: 'skip', reason: 'x'.repeat(201) }]) assert.equal(parseInnerVoices(bad), undefined);
+  assert.match(VOICES_NOTE, /^Use inner_voices to choose how your inner voices review this turn: skip trivial replies, debate claims, plans and results; you may only skip for this turn\.$/);
+  assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { inner_voices: {} as never } }), /reserved/);
 });

@@ -307,12 +307,12 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   async function refreshThreads() { setThreads(await api<ThreadSummary[]>('/v1/threads')); }
 
   /** What a live turn's events say about its review: the voices are reviewing, and (once known) the reflection's outcome. */
-  function reflectionLive(events: readonly RuntimeEvent[]): { reviewing?: boolean; outcome?: 'kept' | 'revised' | 'skipped' } | undefined {
+  function reflectionLive(events: readonly RuntimeEvent[]): { reviewing?: boolean; outcome?: 'kept' | 'revised' | 'skipped'; rounds?: ('kept' | 'revised' | 'skipped')[] } | undefined {
     if (!events.some(event => event.type === 'reflecting')) return undefined;
     const done = events.find(event => event.type === 'reflected')?.data.counsel as RunCounsel | undefined;
     // A turn that ended without a recorded outcome (failed or stopped while reflecting): the draft stands.
     const ended = events.some(event => event.type === 'completed' || event.type === 'failed' || event.type === 'stopped');
-    return { reviewing: true, ...(done ? { outcome: done.outcome } : ended ? { outcome: 'skipped' as const } : {}) };
+    return { reviewing: true, ...(done ? { outcome: done.outcome, ...(done.rounds ? { rounds: done.rounds.map(round => round.outcome) } : {}) } : ended ? { outcome: 'skipped' as const } : {}) };
   }
   async function watch(id: string, input: string, base: ThreadMessageLike[], startedAt?: string, images: readonly string[] = [], files: readonly FileChip[] = [], author?: Author, batch: readonly BatchMember[] = [], source?: MessageSource, decision?: DecisionOutcome, background?: MessageBackground) {
     stream.current?.abort(); const control = new AbortController(); stream.current = control;
