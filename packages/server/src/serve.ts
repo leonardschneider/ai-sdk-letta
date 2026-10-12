@@ -312,9 +312,9 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
     const info: GuiAgentInfo = { ...agentInfo(definition), toolControl: true };
     const toolOverrides = new DefinitionToolOverrides(definition, stateDirectory, effective => { info.approvalTools = Object.keys(effective.permissions).filter(name => effective.permissions[name] === 'ask'); });
     info.approvalTools = Object.keys(toolOverrides.effective().permissions).filter(name => toolOverrides.effective().permissions[name] === 'ask');
-    // The inner_voices tool is offered while the voices are on and the agent decides (read from the runtime set below).
+    // The consult_voices tool is offered while the voices are on (read from the runtime set below).
     let voicesOf: ThreadRuntime | undefined;
-    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides, () => voicesOf?.innerVoicesBounds()), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+    const runtime = new ThreadRuntime(host(definition, stateDirectory, scheduling.schedulerFor(definition.id), decisions.desk, options.webSearch, memory, dev.webDev, dev.apps, jobs.desk, toolOverrides, () => voicesOf?.voiceConsultant()), join(directory, 'state.json'), owner, { logLabel: definition.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
     // The inner voices (Ambition and Prudence) of the app's own agent: off until turned on (<state>/server/<id>/voices.json).
     const voiceSettings = new DefinitionVoices(definition.id, stateDirectory, settings => { const on = enabledVoices(settings); if (on.length) info.voices = on; else delete info.voices; });
     if (enabledVoices(voiceSettings.get()).length) info.voices = enabledVoices(voiceSettings.get());
@@ -349,7 +349,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
         // Its own web development services and MCP App servers (web_dev, mcp_app_dev), on the shared preview listener.
         const services = devServices(adopted, stateDirectory, log);
         let voicesOf: ThreadRuntime | undefined;
-        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps, adoptedJobs.desk, undefined, () => voicesOf?.innerVoicesBounds()), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
+        const hosted = new ThreadRuntime(host(adopted, stateDirectory, undefined, desk.desk, options.webSearch, wiring, services.webDev, services.apps, adoptedJobs.desk, undefined, () => voicesOf?.voiceConsultant()), join(folder, 'state.json'), owner, { logLabel: adopted.id, ...(options.rewindInternalTools ? { rewindInternalTools: options.rewindInternalTools } : {}) });
         voicesOf = hosted;
         const member = services.bind(hosted, { owner, directory: folder, appOrigin: () => `http://127.0.0.1:${appPortRef.port}`, previewPort: () => previewRef.port });
         previewMembers.add(member);

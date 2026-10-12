@@ -13,6 +13,7 @@ import { appMessageSummary, isAppToolName } from './apps-model.js';
 import { sourceLabel } from './automations-model.js';
 import { DecisionLine, OutcomeMessage } from './decisions.js';
 import { CommandJobCard, JobCard, JobsContext, useCommandJob } from './jobs.js';
+import { ConsultCard } from './voices.js';
 import { isWebResearch, ReplySources, WebResearchCard, WebResearchLine, WebResearchWaiting } from './web-research.js';
 import { EditAction, EditBubble, RewindContext } from './rewind.js';
 import { CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
@@ -285,6 +286,8 @@ function ToolPart(props: ToolPartProps) {
   if (props.toolName === 'ask_user') return <QuestionLine {...props}/>;
   if (props.toolName === 'request_decision') return <DecisionLine {...props}/>;
   if (props.toolName === 'web_search') return <WebSearchPart {...props}/>;
+  // The agent consulted its inner voices: their notes in a collapsed line.
+  if (props.toolName === 'consult_voices') return <ConsultCard argsText={props.argsText} result={props.result}/>;
   // Jobs: one live card where the job started; its updates and end show only in the card.
   if (props.toolName === 'job_start') return <JobCard toolCallId={props.toolCallId} result={props.result}/>;
   if (props.toolName === 'job_update' || props.toolName === 'job_end') return null;

@@ -1458,6 +1458,10 @@ button.job-last:hover { color: var(--text); }
 .voices-chevron { transition: transform .12s; }
 .voices[data-open] .voices-chevron { transform: rotate(90deg); }
 .voices-notes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; animation: fade .12s; }
+.voices-consult { margin: 4px 0; }
+.voices-context { margin-top: 6px; color: var(--text-2); }
+.voices-context summary { cursor: pointer; color: var(--text-3); font-size: 12px; }
+.voices-context p { margin: 4px 0 0; white-space: pre-wrap; max-height: 16em; overflow: auto; }
 .voices-foot { grid-column: 1 / -1; margin: 6px 0 0; color: var(--text-3); font-size: 12px; }
 .voices-open { animation: fade .12s; }
 .voices-draft { margin-top: 6px; padding: 8px 12px; border-left: 3px solid var(--border); border-radius: 0 8px 8px 0; background: var(--hover); color: var(--text-3); }

@@ -20,7 +20,7 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { backgroundCommandsAt, type BackgroundCommands } from './background.js';
 import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDevToolTimeouts, type WebDevServices, type WebDevServicesOptions } from './webdev.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
-import { INNER_VOICES_TOOL, innerVoicesTool, type VoiceBounds } from './voices.js';
+import { CONSULT_LIMITS, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, VOICE_TIMEOUT_MS, consultVoicesTool, skipVoicesTool, skippable, type VoiceConsultant } from './voices.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 import { adoptionRefusal, lettaCodeActivity } from './adoption.js';
@@ -140,12 +140,12 @@ export interface OpenAgentOptions {
    */
   mcpApps?: { apps?: McpApps } & Pick<McpAppsOptions, 'launcher' | 'connector'>;
   /**
-   * The inner voices' review bounds when the agent chooses the review mode
-   * per turn (voices on, "Agent decides"); undefined otherwise. While it
-   * returns bounds, sessions offer the always-allowed `inner_voices` tool;
-   * when that changes, `toolsStale()` asks the host to reopen the session.
+   * The inner voices as turns may consult them (voices on); undefined
+   * otherwise. While it returns one, sessions offer the always-allowed
+   * `consult_voices` tool (at most {@link CONSULT_LIMITS}.perTurn calls a
+   * turn); when that changes, `toolsStale()` asks the host to reopen the session.
    */
-  innerVoices?: () => VoiceBounds | undefined;
+  innerVoices?: () => VoiceConsultant | undefined;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -586,6 +586,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         let turnUnattended: UnattendedPolicy | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
+        // consult_voices calls in this turn (bounded per turn).
+        let turnConsults = 0;
         // The running turn requested a decision: the rest of its tool calls are refused (the work is paused).
         let turnPaused = false;
         // Resources: every file of the agent in one git-backed folder, one folder
@@ -645,10 +647,13 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const ownTools = sandbox?.hasProject && definition.sandbox?.project ? withProjectDescriptions(definition.tools as ToolSet, definition.sandbox.project.path) : definition.tools;
         const agentTools = { ...ownTools, ...(appTools?.tools ?? {}) } as TOOLS;
         const withProvenance = { ...agentTools, [MEMORY_PROVENANCE_TOOL]: memoryProvenanceTool(() => guard) } as ToolSet;
-        // The inner voices: the agent chooses how they review each turn (only while they are on and it decides).
+        // The inner voices: the agent consults them mid-turn (only while they are on).
         const voicesOffered = !!options.innerVoices?.();
         const innerVoices = options.innerVoices;
-        const withVoices = voicesOffered && innerVoices ? { ...withProvenance, [INNER_VOICES_TOOL]: innerVoicesTool(() => innerVoices()) } : withProvenance;
+        // skip_voices only while the person's minimum allows skipping (none, calibrated if tools).
+        const skipOffered = voicesOffered && skippable(options.innerVoices!()!.bounds.minimum);
+        const voiceTools = voicesOffered && innerVoices ? { [CONSULT_VOICES_TOOL]: consultVoicesTool(() => innerVoices(), () => conversationId, () => turnConsults++ < CONSULT_LIMITS.perTurn), ...(skipOffered ? { [SKIP_VOICES_TOOL]: skipVoicesTool(() => innerVoices()) } : {}) } : {};
+        const withVoices = { ...withProvenance, ...voiceTools } as ToolSet;
         const exposed = listening ? { ...withVoices, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : withVoices;
         // Without a sandbox (or without web development), those tools are never exposed.
         const hidden = new Set<string>([...(sandbox ? [] : SANDBOX_TOOL_NAMES), ...(webDev ? [] : WEBDEV_TOOL_NAMES), ...(webDev && apps ? [] : MCP_APP_DEV_TOOL_NAMES)]);
@@ -657,7 +662,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const shell = sandbox;
         // Background harness work must never open a prompt over an idle chat input.
         const bridge = createToolBridge({
-          tools: exposed, permissions: { ...definition.permissions, ...(appTools?.permissions ?? {}), [MEMORY_PROVENANCE_TOOL]: 'allow', ...(voicesOffered ? { [INNER_VOICES_TOOL]: 'allow' } : {}), ...(listening ? { [STAY_SILENT_TOOL]: 'allow' } : {}) }, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
+          tools: exposed, permissions: { ...definition.permissions, ...(appTools?.permissions ?? {}), [MEMORY_PROVENANCE_TOOL]: 'allow', ...Object.fromEntries(Object.keys(voiceTools).map(name => [name, 'allow' as const])), ...(listening ? { [STAY_SILENT_TOOL]: 'allow' } : {}) }, timeoutMs: definition.toolTimeoutMs, persist, allowedTools,
           // Results of tools that bring others' content (web, Atlassian, attachments, application tools) make the turn untrusted for memory.
           onTool: event => {
             if (turnMemoryId && (event.status === 'completion' || event.status === 'error')) {
@@ -667,10 +672,12 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
               if (source) journalRef?.noteSource(turnMemoryId, source.kind === 'browser' && webDev ? { ...source, label: event.tool.startsWith('browser_') ? webDev.pageUrl : `dev server (${event.tool})` } : source);
             }
           },
-          ...(listening || voicesOffered ? { uncounted: [...(listening ? [STAY_SILENT_TOOL] : []), ...(voicesOffered ? [INNER_VOICES_TOOL] : [])] } : {}),
+          ...(listening || voicesOffered ? { uncounted: [...(listening ? [STAY_SILENT_TOOL] : []), ...Object.keys(voiceTools)] } : {}),
           toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(webDev ? webDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(webDev && appDev ? mcpAppDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
             // A search (searching, reading, summarizing) has its own deadline; leave it room to report it.
             ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}),
+            // A consultation waits for the voices (each up to VOICE_TIMEOUT_MS, in parallel); leave room to report a voice's timeout.
+            ...(voicesOffered ? { [CONSULT_VOICES_TOOL]: Math.max(definition.toolTimeoutMs, VOICE_TIMEOUT_MS + 15_000) } : {}),
             ...(appTools ? Object.fromEntries(Object.keys(appTools.tools).map(name => [name, Math.max(definition.toolTimeoutMs, MCP_APP_LIMITS.callTimeoutMs + 5000)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           unattended: () => turnUnattended,
@@ -742,9 +749,9 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const store = resources;
         agent = new LettaAgent<TOOLS>({
           // memory_provenance is the harness's, like the memory tools: never an application tool card.
-          id: definition.id, tools: (voicesOffered ? { ...agentTools, [INNER_VOICES_TOOL]: withVoices[INNER_VOICES_TOOL] } : agentTools) as TOOLS, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
+          id: definition.id, tools: (voicesOffered ? { ...agentTools, ...voiceTools } : agentTools) as TOOLS, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false;
+            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false; turnConsults = 0;
             return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), confirmStopped: () => confirmStopped(live), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),
@@ -833,7 +840,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           if (response.success !== true) throw new Error(typeof response.error === 'string' ? response.error.slice(0, 300) : 'harness_command_failed');
           return typeof response.output === 'string' ? response.output : '';
         };
-        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), ...(apps ? { mcpApps: apps } : {}), toolsStale: () => (!!apps && apps.devSignature(conversationId) !== devSignature) || voicesOffered !== !!options.innerVoices?.(), truncated: history.truncated, startupStatus, close: shutdown };
+        self = { agent, conversationId, title: conversationTitle, live, history: reload, rewind, memory: memoryGuard, harnessCommand, ...(webDev ? { webDev } : {}), ...(apps ? { mcpApps: apps } : {}), toolsStale: () => (!!apps && apps.devSignature(conversationId) !== devSignature) || voicesOffered !== !!options.innerVoices?.() || skipOffered !== (!!options.innerVoices?.() && skippable(options.innerVoices!()!.bounds.minimum)), truncated: history.truncated, startupStatus, close: shutdown };
         open.add(self);
         return self;
       } catch (error) { await shutdown(); throw error; }

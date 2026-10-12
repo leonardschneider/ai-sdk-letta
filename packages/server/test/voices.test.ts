@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SDKMessage, SendMessage } from '@letta-ai/letta-agent-sdk';
 import type { UIMessage } from 'ai';
-import { LettaAgent, ToolInteractions, projectHistory, innerVoicesTool, REFLECTION_PART, type InnerVoice } from 'ai-sdk-letta';
+import { LettaAgent, ToolInteractions, projectHistory, consultVoicesTool, skipVoicesTool, REFLECTION_PART, CONSULT_LIMITS, type InnerVoice } from 'ai-sdk-letta';
 import { ThreadRuntime, turnStep, DefinitionVoices, checkVoiceSettings, storedVoices, reviewPolicy, voiceCounsellor, counselRequest, runReply, DEFAULT_VOICES, type RuntimeHost, type VoiceSettings } from '../src/index.js';
 import type { RunCounsel } from '../src/runtime.js';
 
@@ -221,18 +221,20 @@ test('skipped: no voice answered; failed and listened drafts are not reviewed', 
   assert.equal(runOf(f, failed).counsel, undefined);
 });
 
-test('voices off, and minimum "calibrated if tools" with default skip: a quick reply without tools is not reviewed', async () => {
+test('voices off: no review; on: a quick reply the agent did not skip is reviewed (old settings migrate)', async () => {
   const f = fixture();
   let settings: VoiceSettings = DEFAULT_VOICES;
   const asked = counting(f, () => settings);
   const threadId = randomUUID();
-  await f.runtime.create('owner', threadId, 'Long');
-  await turn(f, threadId, 'while off');
+  await f.runtime.create('owner', threadId, 'Every');
+  const off = await turn(f, threadId, 'while off');
+  assert.equal(runOf(f, off).counsel, undefined);
+  assert.doesNotMatch(f.sent[0]!, /consult_voices/, 'no voices note while off');
+  // An old "only long turns" setting: every turn is heard now.
   settings = checkVoiceSettings({ ...on, speakAfter: 'long' });
   const quick = await turn(f, threadId, 'quick question');
-  assert.equal(asked.length, 0);
-  assert.equal(runOf(f, quick).counsel, undefined);
-  assert.equal(f.sent.length, 2);
+  assert.equal(asked.length, 2);
+  assert.equal(runOf(f, quick).counsel?.outcome, 'kept');
   assert.throws(() => checkVoiceSettings({ speakAfter: 'sometimes' }), /invalid_input/);
 });
 
@@ -272,21 +274,20 @@ test('Stop while the voices review or while the agent reflects keeps the draft a
 
 /* ---------------- revision rounds, modes, the agent's choice ---------------- */
 
-test('settings: bounds are validated (min ≤ max, default between) and the old speakAfter migrates', () => {
-  const ok = checkVoiceSettings({ ...on, decides: 'fixed', defaultMode: 'debate', minimum: 'calibrated', maximum: 'debate', maxRevisions: 3 });
-  assert.deepEqual(reviewPolicy(ok), { decides: 'fixed', defaultMode: 'debate', minimum: 'calibrated', maximum: 'debate', maxRevisions: 3 });
-  assert.deepEqual(reviewPolicy(DEFAULT_VOICES), { decides: 'agent', defaultMode: 'calibrated', minimum: 'none', maximum: 'debate', maxRevisions: 1 });
-  for (const bad of [{ minimum: 'debate', maximum: 'calibrated' }, { defaultMode: 'debate', maximum: 'calibrated' }, { defaultMode: 'skip', minimum: 'calibrated' }, { maxRevisions: 0 }, { maxRevisions: 4 }, { maxRevisions: 1.5 },
-    { decides: 'nobody' }, { defaultMode: 'loud' }, { minimum: 'some' }, { maximum: 'skip' }]) {
-    assert.throws(() => checkVoiceSettings(bad), /invalid_input/, JSON.stringify(bad));
+test('settings: bounds are validated (min ≤ max); skip minimums kept; earlier settings migrate', () => {
+  const ok = checkVoiceSettings({ ...on, minimum: 'debate', maximum: 'debate', maxRevisions: 3 });
+  assert.deepEqual(reviewPolicy(ok), { minimum: 'debate', maximum: 'debate', maxRevisions: 3 });
+  assert.deepEqual(reviewPolicy(DEFAULT_VOICES), { minimum: 'none', maximum: 'debate', maxRevisions: 1 });
+  for (const bad of [{ minimum: 'debate', maximum: 'calibrated' }, { maxRevisions: 0 }, { maxRevisions: 4 }, { decides: 'nobody' }, { defaultMode: 'loud' }, { minimum: 'some' }, { maximum: 'skip' }]) {
+    assert.throws(() => checkVoiceSettings(bad), (error: Error & { code?: string }) => error.code === 'invalid_input', JSON.stringify(bad));
   }
-  // calibrated_if_tools allows a skip default (the minimum applies only to turns with tools).
-  assert.equal(checkVoiceSettings({ minimum: 'calibrated_if_tools', defaultMode: 'skip' }).defaultMode, 'skip');
-  // Old settings: "long" → minimum calibrated_if_tools + default skip; "every" → default calibrated; speakAfter is not kept.
-  const long = storedVoices({ ...on, speakAfter: 'long' });
-  assert.equal(long.minimum, 'calibrated_if_tools'); assert.equal(long.defaultMode, 'skip'); assert.equal('speakAfter' in long, false);
-  assert.equal(storedVoices({ ...on, speakAfter: 'every' }).defaultMode, 'calibrated');
-  assert.equal(checkVoiceSettings({ speakAfter: 'long', defaultMode: 'calibrated' }).defaultMode, 'calibrated', 'explicit fields win');
+  // Minimums that let the agent skip are kept; earlier decides/defaultMode are accepted and dropped.
+  const old = checkVoiceSettings({ ...on, decides: 'fixed', defaultMode: 'skip', minimum: 'calibrated_if_tools', maximum: 'debate' });
+  assert.deepEqual(Object.keys(old).sort(), ['ambition', 'maximum', 'minimum', 'prudence']);
+  assert.equal(old.minimum, 'calibrated_if_tools');
+  assert.equal(checkVoiceSettings({ minimum: 'none' }).minimum, 'none');
+  assert.equal(checkVoiceSettings({ speakAfter: 'long' }).minimum, 'calibrated_if_tools', 'old "only long turns"');
+  assert.equal('speakAfter' in checkVoiceSettings({ speakAfter: 'long' }), false);
 });
 
 test('rounds: a revision is reviewed again (the new version) until KEEP; each round has its own hidden OTID, and rebuilt history hides them all', async () => {
@@ -336,7 +337,7 @@ test('rounds stop at the limit: the latest revision stands', async () => {
 test('debate: the voices get the debate stance; KEEP with a rebuttal keeps the draft and records the rebuttal', async () => {
   const f = fixture();
   const modes: string[] = [];
-  f.runtime.voices = voiceCounsellor({ settings: () => ({ ...on, decides: 'fixed', defaultMode: 'debate' }), agentModel: () => 'openai-codex/gpt-5.5', directory: f.directory, available: async () => [],
+  f.runtime.voices = voiceCounsellor({ settings: () => ({ ...on, minimum: 'debate', maximum: 'debate' }), agentModel: () => 'openai-codex/gpt-5.5', directory: f.directory, available: async () => [],
     voice: name => async request => { modes.push(`${name}:${request.mode}`); return { points: [`${name} point`], confidence: 'medium' }; } });
   f.state.reflection = () => 'KEEP — the counterexample assumes a rated pool the person ruled out.';
   const threadId = randomUUID();
@@ -352,75 +353,133 @@ test('debate: the voices get the debate stance; KEEP with a rebuttal keeps the d
 });
 
 /** A synthetic finished draft: its text and tool calls (name, input). */
-function draftRun(tools: [string, unknown][] = []) {
+/** A run whose events hold these tool calls (and results), then a reply. */
+function draftRun(tools: [string, unknown, unknown?][] = []) {
   let sequence = 0;
   return { id: randomUUID(), threadId: 't', input: 'q', parentRunId: null, status: 'running', events: [
-    ...tools.map(([name, input]) => ({ sequence: ++sequence, type: 'tool_started', data: { toolCallId: `c${sequence}`, name, input } })),
+    ...tools.flatMap(([name, input, output]) => [
+      { sequence: ++sequence, type: 'tool_started', data: { toolCallId: `c${sequence}`, name, input } },
+      ...(output !== undefined ? [{ sequence: ++sequence, type: 'tool_completed', data: { toolCallId: `c${sequence - 1}`, name, output } }] : []),
+    ]),
     { sequence: ++sequence, type: 'text', data: { text: 'An answer.' } },
   ] };
 }
-const reviewOf = (f: ReturnType<typeof fixture>, run: ReturnType<typeof draftRun>) => f.runtime['reviewOf'](run as never) as { mode: string; choice?: { mode: string; reason: string }; maxRounds: number } | undefined;
+const reviewOf = (f: ReturnType<typeof fixture>, run: ReturnType<typeof draftRun>) => f.runtime['reviewOf'](run as never) as { mode: string; maxRounds: number } | undefined;
+const noted = (voices: string[]) => JSON.stringify({ ok: true, mode: 'calibrated', question: 'q', notes: Object.fromEntries(voices.map(v => [v, { points: ['p'], confidence: 'high' }])) });
 
-test('the agent chooses per turn within the bounds: clamped to min/max, last call counts, skip does not persist, calibrated_if_tools', () => {
+const skipped = (reason: string) => JSON.stringify({ ok: true, reason, note: 'Your inner voices skip this turn.' });
+
+test('end of turn: consulted → nothing; skipped within the minimum → recorded skip; otherwise the review in the minimum\'s stance', () => {
   const f = fixture();
-  let settings: VoiceSettings = { ...on, minimum: 'none', maximum: 'calibrated', defaultMode: 'calibrated' };
+  let settings: VoiceSettings = { ...on, minimum: 'calibrated', maximum: 'debate', maxRevisions: 2 };
   counting(f, () => settings);
-  const choose = (mode: string, reason = 'why') => ['inner_voices', { mode, reason }] as [string, unknown];
-  assert.equal(reviewOf(f, draftRun([choose('debate')]))?.mode, 'calibrated', 'lowered to the maximum');
-  assert.equal(reviewOf(f, draftRun([choose('debate'), choose('skip', 'small talk')]))?.mode, 'skip', 'the last call counts');
-  assert.deepEqual(reviewOf(f, draftRun([choose('skip', 'small talk')]))?.choice, { mode: 'skip', reason: 'small talk' });
-  assert.equal(reviewOf(f, draftRun([choose('skip', '')]))?.mode, 'calibrated', 'an invalid call (empty reason) is ignored');
-  // The next turn starts from the default.
-  assert.equal(reviewOf(f, draftRun())?.mode, 'calibrated');
-  settings = { ...on, minimum: 'calibrated', maximum: 'debate', defaultMode: 'calibrated' };
-  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.mode, 'calibrated', 'a skip below the minimum is raised');
-  settings = { ...on, minimum: 'calibrated_if_tools', maximum: 'debate', defaultMode: 'skip', maxRevisions: 2 };
-  assert.equal(reviewOf(f, draftRun())?.mode, 'skip');
-  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.mode, 'skip', 'inner_voices itself is not a tool use');
-  assert.equal(reviewOf(f, draftRun([choose('skip'), ['Bash', { command: 'ls' }]]))?.mode, 'calibrated', 'a turn with tools gets at least calibrated');
-  assert.equal(reviewOf(f, draftRun([['Bash', {}], choose('debate')]))?.mode, 'debate');
-  assert.equal(reviewOf(f, draftRun())?.maxRounds, 2);
-  // Fixed: the tool's calls are ignored; the default applies (clamped).
-  settings = { ...on, decides: 'fixed', defaultMode: 'calibrated' };
-  assert.equal(reviewOf(f, draftRun([choose('debate'), choose('skip')]))?.mode, 'calibrated');
-  assert.equal(reviewOf(f, draftRun([choose('skip')]))?.choice, undefined);
+  assert.deepEqual(reviewOf(f, draftRun()), { mode: 'calibrated', maxRounds: 2 }, 'no tools: still reviewed');
+  assert.equal(reviewOf(f, draftRun([['consult_voices', { question: 'c3?' }, noted(['prudence'])]])), undefined, 'consulted (one voice is enough)');
+  assert.equal(reviewOf(f, draftRun([['consult_voices', { question: 'c3?' }, { ok: true, notes: { ambition: { points: ['p'], confidence: 'low' } } }]])), undefined, 'an object result too');
+  assert.equal(reviewOf(f, draftRun([['consult_voices', { question: 'c3?' }, JSON.stringify({ ok: true, notes: { prudence: { error: 'voice_timeout' } } })]]))?.mode as string, 'calibrated', 'no note came back: reviewed');
+  assert.equal((reviewOf(f, draftRun([['skip_voices', { reason: 'hi' }, skipped('hi')]])) as { mode: string }).mode, 'calibrated', 'minimum calibrated: a skip does not hold');
+  settings = { ...on, minimum: 'none', maximum: 'debate' };
+  assert.deepEqual(reviewOf(f, draftRun([['skip_voices', { reason: 'a greeting' }, skipped('a greeting')]])), { skipped: 'a greeting' });
+  assert.deepEqual(reviewOf(f, draftRun([['Bash', {}, 'ok'], ['skip_voices', { reason: 'r' }, skipped('r')]])), { skipped: 'r' }, 'none: even with tools');
+  assert.equal((reviewOf(f, draftRun()) as { mode: string }).mode, 'calibrated', 'none, but no skip: reviewed');
+  settings = { ...on, minimum: 'calibrated_if_tools', maximum: 'debate' };
+  assert.deepEqual(reviewOf(f, draftRun([['skip_voices', { reason: 'hi' }, skipped('hi')]])), { skipped: 'hi' });
+  assert.equal((reviewOf(f, draftRun([['skip_voices', { reason: 'hi' }, skipped('hi')], ['Bash', {}, 'ok']])) as { mode: string }).mode, 'calibrated', 'a turn with tools cannot skip');
+  assert.equal((reviewOf(f, draftRun([['skip_voices', { reason: 'hi' }, JSON.stringify({ ok: false, error: 'not_allowed' })]])) as { mode: string }).mode, 'calibrated', 'a refused skip');
+  settings = { ...on, minimum: 'debate', maximum: 'debate' };
+  assert.equal((reviewOf(f, draftRun()) as { mode: string }).mode, 'debate');
+  settings = DEFAULT_VOICES;
+  assert.equal(reviewOf(f, draftRun()), undefined, 'voices off');
 });
 
-test('the inner_voices tool is offered only with voices on and the agent deciding; the tool result names the effective mode', async () => {
+test('skip_voices: offered only while the minimum allows it; the turn records the skip and asks no voice', async () => {
+  const f = fixture();
+  let settings: VoiceSettings = { ...on, minimum: 'calibrated' };
+  const asked = counting(f, () => settings);
+  const tool = skipVoicesTool(() => f.runtime.voiceConsultant());
+  const call = (input: unknown) => tool.execute!(input as never, { toolCallId: 'c', messages: [] } as never) as unknown as Promise<Record<string, unknown>>;
+  assert.equal((await call({ reason: 'hi' })).error, 'not_allowed');
+  settings = { ...on, minimum: 'none' };
+  assert.deepEqual(await call({ reason: '  a  greeting ' }), { ok: true, reason: 'a greeting', note: 'Your inner voices skip this turn.' });
+  assert.equal((await call({ reason: '' })).error, 'invalid_input');
+  settings = { ...on, minimum: 'calibrated_if_tools' };
+  assert.match(String((await call({ reason: 'hi' })).note), /as long as you use no other tool/);
+  // The note the agent gets depends on the minimum.
+  settings = { ...on, minimum: 'none' };
+  const threadId = randomUUID();
+  await f.runtime.create('owner', threadId, 'Skip note');
+  await turn(f, threadId, 'hello');
+  assert.match(f.sent[0]!, /you may call skip_voices/);
+  settings = { ...on, minimum: 'calibrated' };
+  await turn(f, threadId, 'again');
+  assert.match(f.sent.at(-2)!, /you cannot skip them/);
+  assert.ok(asked.length >= 2);
+});
+
+test('consult_voices: offered while a voice is on; mode clamped to the bounds; the agent picks which voices', async () => {
   const f = fixture();
   let settings: VoiceSettings = DEFAULT_VOICES;
-  counting(f, () => settings);
-  assert.equal(f.runtime.innerVoicesBounds(), undefined, 'voices off');
-  settings = { ...on, decides: 'fixed' };
-  assert.equal(f.runtime.innerVoicesBounds(), undefined, 'fixed');
-  settings = { ...on, minimum: 'calibrated', maximum: 'calibrated', defaultMode: 'calibrated' };
-  const bounds = f.runtime.innerVoicesBounds();
-  assert.deepEqual(bounds, { minimum: 'calibrated', maximum: 'calibrated', defaultMode: 'calibrated' });
-  assert.equal(new ThreadRuntime({ open: async () => { throw new Error('x'); }, close: async () => {} }, join(f.directory, 'other.json'), 'owner').innerVoicesBounds(), undefined, 'no voices at all');
-  const tool = innerVoicesTool(() => f.runtime.innerVoicesBounds());
-  const result = await tool.execute!({ mode: 'skip', reason: 'hi' }, { toolCallId: 'c', messages: [], context: {} } as never) as { ok: boolean; mode: string; note: string };
-  assert.equal(result.mode, 'calibrated');
-  assert.match(result.note, /bounds change "skip" to "calibrated"/);
+  const asked = counting(f, () => settings);
+  assert.equal(f.runtime.voiceConsultant(), undefined, 'voices off: not offered');
+  assert.equal(new ThreadRuntime({ open: async () => { throw new Error('x'); }, close: async () => {} }, join(f.directory, 'other.json'), 'owner').voiceConsultant(), undefined, 'no voices at all');
+  settings = { ...on, minimum: 'calibrated', maximum: 'calibrated' };
+  const consultant = f.runtime.voiceConsultant()!;
+  assert.deepEqual(consultant.enabled, ['ambition', 'prudence']);
+  assert.deepEqual(consultant.bounds, { minimum: 'calibrated', maximum: 'calibrated' });
+  let taken = 0;
+  const tool = consultVoicesTool(() => f.runtime.voiceConsultant(), () => 'conv-x', () => ++taken <= 2);
+  const call = (input: unknown) => tool.execute!(input as never, { toolCallId: 'c', messages: [], abortSignal: new AbortController().signal, context: {} } as never) as unknown as Promise<Record<string, unknown>>;
+  const both = await call({ question: 'Is 4.c3 sound?', context: 'FEN …; legal: c3 d3 O-O', mode: 'debate' });
+  assert.equal(both.ok, true);
+  assert.equal(both.mode, 'calibrated', 'debate lowered to the maximum');
+  assert.equal(both.requested, 'debate');
+  assert.deepEqual(Object.keys(both.notes as object).sort(), ['ambition', 'prudence']);
+  assert.deepEqual(asked, ['ambition::FEN …; legal: c3 d3 O-O', 'prudence::FEN …; legal: c3 d3 O-O'], 'they read the context it gave');
+  const one = await call({ question: 'And now?', context: 'After the correction', voices: ['prudence'] });
+  assert.deepEqual(Object.keys(one.notes as object), ['prudence'], 'only the voice it asked');
+  assert.equal((await call({ question: 'Third' })).error, 'limit_reached', 'bounded per turn');
+  assert.equal((await call({ question: '' })).error, 'invalid_input');
+  assert.equal((await call({ question: 'x', voices: ['courage'] })).error, 'invalid_input');
+  settings = { ...on, ambition: { enabled: false, model: 'auto' } };
+  assert.equal((await call({ question: 'x', voices: ['ambition'] })).error, 'voice_off');
   settings = DEFAULT_VOICES;
-  assert.deepEqual(await tool.execute!({ mode: 'skip', reason: 'hi' }, { toolCallId: 'c', messages: [], context: {} } as never), { ok: false, error: 'voices_unavailable' });
+  assert.equal((await call({ question: 'x' })).error, 'voices_unavailable');
+  assert.equal(CONSULT_LIMITS.perTurn, 8);
 });
 
-test('a default skip asks no voice and takes no reflection step; the VOICES note reaches the agent', async () => {
+test('a turn that consults its voices mid-turn gets no end-of-turn review; the note tells the agent about consult_voices', async () => {
   const f = fixture();
-  const asked = counting(f, () => ({ ...on, defaultMode: 'skip' }));
+  const asked = counting(f, () => on);
   const threadId = randomUUID();
-  await f.runtime.create('owner', threadId, 'Skip');
-  const id = await turn(f, threadId, 'say hi');
-  assert.equal(asked.length, 0);
-  assert.equal(runOf(f, id).counsel, undefined, 'a default skip leaves no record');
-  assert.match(f.sent[0]!, /Use inner_voices to choose how your inner voices review this turn/);
-  assert.equal(f.sent.length, 1);
+  await f.runtime.create('owner', threadId, 'Consult');
+  // The person's message is part of what a consultation weighs.
+  const id = randomUUID();
+  const done = f.runtime.start('owner', { id, threadId, text: 'Play the pilot', parentRunId: null });
+  await done;
+  await until(() => !f.runtime.busy, 'turn ended');
+  assert.match(f.sent[0]!, /consult_voices/);
+  assert.match(f.sent[0]!, /If you neither consult nor skip them in a turn, they review your final reply/);
+  assert.equal(runOf(f, id).counsel?.outcome, 'kept', 'not consulted: reviewed at the end');
+  // A consultation during a running turn weighs the person's message of that turn (found by conversation).
+  const conversationId = (f.runtime['state'].threads as { id: string; conversationId?: string }[]).find(t => t.id === threadId)!.conversationId!;
+  f.runtime['lane'](threadId).active = { run: { ...draftRun(), threadId, input: 'Play the pilot game as White' } as never, control: new AbortController() };
+  await f.runtime.voiceConsultant()!.ask({ question: 'Is 4.c3 sound?', context: 'position', mode: 'calibrated', voices: ['prudence'], conversationId }, new AbortController().signal);
+  assert.equal(asked.at(-1), 'prudence:Play the pilot game as White:position');
+  f.runtime['lane'](threadId).active = undefined;
+  // Simulate a consulted turn: a completed consult_voices with a note means no end review.
+  const run = draftRun([['consult_voices', { question: 'q' }, noted(['ambition', 'prudence'])]]);
+  assert.equal(reviewOf(f, run), undefined);
+  assert.equal(asked.length, 3);
 });
 
-test('the session accepts inner_voices calls: the agent knows the tool while it is offered, and reopens when that changes', async () => {
+test('the session offers consult_voices (and skip_voices when allowed) while the voices are on, and reopens when that changes', async () => {
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../../ai-sdk-letta/src/runtime.ts', import.meta.url), 'utf8');
-  // The LettaAgent refuses calls to tools it does not know ("Unexpected tool call"): inner_voices must be among them.
-  assert.match(source, /tools: \(voicesOffered \? \{ \.\.\.agentTools, \[INNER_VOICES_TOOL\]/);
+  // The LettaAgent refuses calls to tools it does not know ("Unexpected tool call"): consult_voices must be among them.
+  assert.match(source, /tools: \(voicesOffered \? \{ \.\.\.agentTools, \.\.\.voiceTools \}/);
+  assert.match(source, /skipOffered \? \{ \[SKIP_VOICES_TOOL\]/);
   assert.match(source, /voicesOffered !== !!options\.innerVoices\?\.\(\)/);
+  assert.match(source, /turnConsults = 0;/, 'the per-turn count resets each turn');
+  // The voices take up to a minute: consult_voices must not get the default 5 s tool timeout.
+  assert.match(source, /\[CONSULT_VOICES_TOOL\]: Math\.max\(definition\.toolTimeoutMs, VOICE_TIMEOUT_MS \+ 15_000\)/);
 });
