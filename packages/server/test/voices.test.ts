@@ -480,4 +480,6 @@ test('the session offers consult_voices (and skip_voices when allowed) while the
   assert.match(source, /skipOffered \? \{ \[SKIP_VOICES_TOOL\]/);
   assert.match(source, /voicesOffered !== !!options\.innerVoices\?\.\(\)/);
   assert.match(source, /turnConsults = 0;/, 'the per-turn count resets each turn');
+  // The voices take up to a minute: consult_voices must not get the default 5 s tool timeout.
+  assert.match(source, /\[CONSULT_VOICES_TOOL\]: Math\.max\(definition\.toolTimeoutMs, VOICE_TIMEOUT_MS \+ 15_000\)/);
 });

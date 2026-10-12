@@ -20,7 +20,7 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { backgroundCommandsAt, type BackgroundCommands } from './background.js';
 import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDevToolTimeouts, type WebDevServices, type WebDevServicesOptions } from './webdev.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
-import { CONSULT_LIMITS, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, consultVoicesTool, skipVoicesTool, skippable, type VoiceConsultant } from './voices.js';
+import { CONSULT_LIMITS, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, VOICE_TIMEOUT_MS, consultVoicesTool, skipVoicesTool, skippable, type VoiceConsultant } from './voices.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 import { adoptionRefusal, lettaCodeActivity } from './adoption.js';
@@ -676,6 +676,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           toolTimeouts: { ...(sandboxTimeout ? Object.fromEntries(SANDBOX_TOOL_NAMES.map(name => [name, sandboxTimeout])) : {}), ...(webDev ? webDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(webDev && appDev ? mcpAppDevToolTimeouts(definition.toolTimeoutMs) : {}), ...(credentials ? Object.fromEntries(ATLASSIAN_TOOL_NAMES.map(name => [name, Math.max(definition.toolTimeoutMs, ATLASSIAN_TIMEOUT_MS)])) : {}),
             // A search (searching, reading, summarizing) has its own deadline; leave it room to report it.
             ...(researcher ? { [WEB_SEARCH_TOOL]: Math.max(definition.toolTimeoutMs, WEB_SEARCH_LIMITS.timeoutMs + 5000) } : {}),
+            // A consultation waits for the voices (each up to VOICE_TIMEOUT_MS, in parallel); leave room to report a voice's timeout.
+            ...(voicesOffered ? { [CONSULT_VOICES_TOOL]: Math.max(definition.toolTimeoutMs, VOICE_TIMEOUT_MS + 15_000) } : {}),
             ...(appTools ? Object.fromEntries(Object.keys(appTools.tools).map(name => [name, Math.max(definition.toolTimeoutMs, MCP_APP_LIMITS.callTimeoutMs + 5000)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
           unattended: () => turnUnattended,
