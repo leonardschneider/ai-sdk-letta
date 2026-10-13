@@ -1489,6 +1489,10 @@ agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
 
+### Automatic reload after an update
+
+Open tabs reload themselves when the server restarts or the web app is rebuilt, so you never stay on an old version after `npm run build` and a restart. The page checks `GET /build.json` (an opaque build ID: the server process plus the web app's `index.html`; no session needed) every 15 seconds and when the tab becomes visible. It reloads at once in a hidden or idle tab, and waits while you type in the message box or a dialog or menu is open. A message you had typed but not sent is kept across the reload and put back in the box. A tab opened while the server was down reloads as soon as it answers.
+
 ### Browser support
 
 The browser app works in **Chrome**, **Safari** and **Firefox**, including
