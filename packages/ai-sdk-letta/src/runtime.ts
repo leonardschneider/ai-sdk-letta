@@ -146,6 +146,12 @@ export interface OpenAgentOptions {
    * turn); when that changes, `toolsStale()` asks the host to reopen the session.
    */
   innerVoices?: () => VoiceConsultant | undefined;
+  /**
+   * The per-turn tool call limit, read at each turn's first call (a change
+   * applies from the next turn without reopening); default: the
+   * definition's `toolCallLimit`.
+   */
+  toolCallLimit?: () => number | undefined;
 }
 
 /** An opened agent plus the resources that belong to it. */
@@ -352,7 +358,7 @@ export type ConversationCheck = { unlocked: boolean; active: boolean; delivered?
  * several people; the agent gets the `stay_silent` tool so a turn with a
  * `replyMode` other than `'always'` may end without a reply (see `LettaCallOptions`).
  */
-export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'jobs' | 'background' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps' | 'innerVoices'> & { listening?: boolean };
+export type AgentHostOptions = Pick<OpenAgentOptions, 'stateDirectory' | 'foregroundExternalTools' | 'traces' | 'defaultActor' | 'scheduler' | 'decisions' | 'jobs' | 'background' | 'webSearch' | 'memoryReview' | 'webDev' | 'mcpApps' | 'innerVoices' | 'toolCallLimit'> & { listening?: boolean };
 
 type OpenedConversation<TOOLS extends ToolSet> = ConversationSession<TOOLS> & { live: LettaCodeSession; truncated: boolean; startupStatus: string };
 type Internals<TOOLS extends ToolSet> = AgentHost<TOOLS> & {
@@ -586,6 +592,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         let turnUnattended: UnattendedPolicy | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
+        // Each turn's identity, for the per-turn tool call limit.
+        let turnKey: object = {};
         // consult_voices calls in this turn (bounded per turn by the person's setting).
         const turnConsults = { count: 0 };
         // The running turn requested a decision: the rest of its tool calls are refused (the work is paused).
@@ -680,6 +688,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
             ...(voicesOffered ? { [CONSULT_VOICES_TOOL]: Math.max(definition.toolTimeoutMs, VOICE_TIMEOUT_MS + 15_000) } : {}),
             ...(appTools ? Object.fromEntries(Object.keys(appTools.tools).map(name => [name, Math.max(definition.toolTimeoutMs, MCP_APP_LIMITS.callTimeoutMs + 5000)])) : {}) },
           get interactions() { return turnSignal ? broker : undefined; }, get signal() { return turnSignal; },
+          turn: () => turnKey, callLimit: () => options.toolCallLimit?.() ?? definition.toolCallLimit,
           unattended: () => turnUnattended,
           paused: () => turnPaused,
           context: toolContext,
@@ -751,7 +760,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           // memory_provenance is the harness's, like the memory tools: never an application tool card.
           id: definition.id, tools: (voicesOffered ? { ...agentTools, ...voiceTools } : agentTools) as TOOLS, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false; turnConsults.count = 0;
+            turnSignal = signal; turnKey = {}; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false; turnConsults.count = 0;
             return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), confirmStopped: () => confirmStopped(live), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),

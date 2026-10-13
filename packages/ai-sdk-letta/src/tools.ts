@@ -121,11 +121,21 @@ export interface ToolBridgeOptions {
    */
   context?: () => Readonly<Record<string, unknown>> | undefined;
   /**
-   * Tools whose calls do not count towards the per-session limit of 100 calls
-   * (each call ID still runs at most once). The runtime uses it for
-   * `stay_silent`, which a long-lived shared conversation calls on many turns.
+   * Tools whose calls do not count towards the per-turn limit (see
+   * `callLimit`; each call ID still runs at most once). The runtime uses it
+   * for `stay_silent` and the inner voices' tools.
    */
   uncounted?: readonly string[];
+  /**
+   * Most counted tool calls a turn may make before the person is asked for
+   * more (read at the turn's first call; default {@link TOOL_CALL_LIMITS}.default).
+   * At the limit, the call waits on a question: "allow N more" (the same
+   * number again; repeatable) or "stop here". An unattended turn, or one with
+   * nobody to ask, stops there (`call_limit_reached`).
+   */
+  callLimit?: () => number | undefined;
+  /** A new turn started (the count restarts): the runtime bumps it per turn. */
+  turn?: () => unknown;
   /**
    * The running turn is unattended (started by an automation, nobody is
    * watching), read at call time. Its calls never prompt anyone: a call that
@@ -214,6 +224,14 @@ async function modelContent(definition: { toModelOutput?: (options: { toolCallId
   return { content, isError: false };
 }
 
+/** Per-turn tool call limit: its default and the setting's bounds. */
+export const TOOL_CALL_LIMITS = Object.freeze({ default: 100, min: 10, max: 1000 });
+/** A valid per-turn limit, else the default. */
+export const toolCallLimitOf = (value: unknown): number => Number.isInteger(value) && (value as number) >= TOOL_CALL_LIMITS.min && (value as number) <= TOOL_CALL_LIMITS.max ? value as number : TOOL_CALL_LIMITS.default;
+/** The tool name shown on the "more tool calls?" question (not a real tool). */
+export const CALL_LIMIT_PROMPT = 'tool_call_limit';
+const CALL_LIMIT_TEXT = (limit: number) => `This turn reached its limit of ${limit} tool calls (the person's setting). Stop here: summarize where you are and what is left, so the person can continue in the next turn.`;
+
 /**
  * Map AI SDK tools onto Letta client-side tools with a fail-closed policy:
  * schema validation before anything else, exactly-once execution per call ID,
@@ -226,8 +244,15 @@ export function createToolBridge(options: ToolBridgeOptions) {
   const restrict = options.allowedTools ? new Set(options.allowedTools) : undefined;
   const allowed = new Set(Object.keys(definitions).filter(n => (!restrict || restrict.has(n)) && Object.hasOwn(permissions, n) && (permissions[n] === 'allow' || permissions[n] === 'ask') && (n === ASK_USER_TOOL || typeof definitions[n]?.execute === 'function')));
   const sessionId = randomUUID();
+  // Call IDs ever run (each runs at most once) and this turn's counted calls (the limit).
   const seen = new Set<string>();
   const uncountedSeen = new Set<string>();
+  // A unique start value: the first counted call always starts a turn (a bridge without `turn` counts over its whole life).
+  let turnKey: unknown = Symbol('no turn yet');
+  let turnCount = 0;
+  let turnAllowed = 0;
+  let turnStopped = false;
+  let extending: Promise<boolean> | undefined;
   const validators = new Map<string, ReturnType<Ajv['compile']>>();
   const ajv = new Ajv({ strict: false, allErrors: false });
   const validateArguments = async (name: string, args: unknown) => {
@@ -252,6 +277,20 @@ export function createToolBridge(options: ToolBridgeOptions) {
     emit(name, id, 'denied', Date.now(), code);
     return { content: [{ type: 'text', text: JSON.stringify({ error: code, tool: name, message: UNATTENDED_TEXT[code] }) }], isError: true };
   };
+  const limitReached = (name: string, id: string, limit: number): ToolOutput => {
+    emit(name, id, 'denied', Date.now(), 'call_limit_reached');
+    return { content: [{ type: 'text', text: JSON.stringify({ error: 'call_limit_reached', limit, message: CALL_LIMIT_TEXT(limit) }) }], isError: true };
+  };
+  // At the limit: ask the person for another block (never in an unattended turn, or with nobody to ask).
+  const askForMore = async (used: number, block: number, unattended: UnattendedPolicy | undefined): Promise<boolean> => {
+    if (unattended || !options.interactions) return false;
+    try {
+      const answer = await options.interactions.request({ kind: 'question', toolCallId: `${CALL_LIMIT_PROMPT}-${randomUUID()}`, tool: CALL_LIMIT_PROMPT,
+        title: `The agent used ${used} tool calls in this turn. Allow ${block} more?`,
+        options: [{ id: 'more', label: `Allow ${block} more` }, { id: 'stop', label: 'Stop here' }], allowFreeText: false, multiSelect: false }, options.signal ?? new AbortController().signal);
+      return !answer.cancelled && (answer.selected ?? []).includes('more');
+    } catch { return false; }
+  };
   const execute = async (name: string, id: string, args: unknown, sdkSignal?: AbortSignal): Promise<ToolOutput> => {
     if (!allowed.has(name)) return denied(name, id, 'tool_denied');
     if (options.paused?.() && !PAUSE_EXEMPT.has(name)) {
@@ -261,7 +300,21 @@ export function createToolBridge(options: ToolBridgeOptions) {
     const unattended = options.unattended?.();
     if (unattended && stopped.has(unattended)) return refuse(unattended, name, id, 'unattended_stopped');
     const counted = !options.uncounted?.includes(name);
-    if (seen.has(id) || uncountedSeen.has(id) || (counted && seen.size >= 100) || uncountedSeen.size >= 100_000) return denied(name, id, 'duplicate_or_limit');
+    if (seen.has(id) || uncountedSeen.has(id) || seen.size >= 1_000_000 || uncountedSeen.size >= 100_000) return denied(name, id, 'duplicate_or_limit');
+    if (counted) {
+      // A new turn: the count restarts at the person's limit.
+      const key = options.turn?.();
+      if (key !== turnKey) { turnKey = key; turnCount = 0; turnAllowed = toolCallLimitOf(options.callLimit?.()); turnStopped = false; extending = undefined; }
+      if (turnStopped) return limitReached(name, id, turnAllowed);
+      if (turnCount >= turnAllowed) {
+        const block = toolCallLimitOf(options.callLimit?.());
+        extending ??= askForMore(turnAllowed, block, unattended).finally(() => { extending = undefined; });
+        const more = await extending;
+        if (!more) { turnStopped = true; return limitReached(name, id, turnAllowed); }
+        if (turnCount >= turnAllowed) turnAllowed += block;
+      }
+      turnCount++;
+    }
     (counted ? seen : uncountedSeen).add(id);
     const definition = definitions[name]!;
     // Snapshot before any await; caller mutation cannot change an approved call.

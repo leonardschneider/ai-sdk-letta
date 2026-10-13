@@ -538,6 +538,8 @@ export class ThreadRuntime {
   upcoming?: () => { id: string; at: string; prompt: string; threadId?: string; title?: string }[];
   /** The inner voices Ambition and Prudence (set by the server; see `voiceCounsellor`): asked on demand about a finished turn. */
   voices?: import('./voices.js').RuntimeVoices;
+  /** The person's per-turn tool call limit, read at each turn's first call (undefined: the definition's). */
+  toolCallLimit?: () => number | undefined;
   /** The reviewer's model setting, when the app may change it (see {@link setReviewerModel}). */
   reviewerModel?: { value(): string; set(model: string): void; available(): Promise<string[]> };
   /** The agent's project folder, read-only (see {@link RuntimeHost.project}). */

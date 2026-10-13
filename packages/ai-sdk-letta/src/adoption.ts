@@ -80,6 +80,8 @@ export type AdoptionRecord = {
    * builds; see {@link SANDBOX_LIMITS}.
    */
   commandTimeoutMs?: number;
+  /** Most tool calls a turn makes before the person is asked for as many more (10–1000; default 100). See `AgentDefinitionInput.toolCallLimit`. */
+  toolCallLimit?: number;
   /**
    * View only: the app shows its conversations (updated live as Letta Code
    * works) but never sends, opens a session, gives it tools, starts
