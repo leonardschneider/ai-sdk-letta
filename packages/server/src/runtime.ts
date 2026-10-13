@@ -11,7 +11,7 @@ import {
   decisionOutcomeNote, webResearchOutcomeNote, provenanceLabel, BACKGROUND_NOTE, type BackgroundCommands,
   type MemoryGuard, type MemoryReview,
   AttachmentStore, FILE_LIMITS, FileInputError, IMAGE_PLACEHOLDER, IMAGE_REFERENCE_PROVIDER, ImageInputError, MAX_INPUT_CHARACTERS, ResourceStore, UploadStaging, attachmentNote, sanitizeFileName, titleFromFolderName, validateImages, validateResponse,
-  reflectionPrompt, keepsDraft, rebuttalOf, reflectionOtidSuffix, reflectionRound, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, consultedVoices, skippedVoices, floorMode, maySkip, voicesNote, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest, type VoiceConsultant, type VoiceMode,
+  reflectionPrompt, keepsDraft, rebuttalOf, reflectionOtidSuffix, reflectionRound, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, consultedVoices, skippedVoices, floorMode, maySkip, voicesNote, maxConsultsOf, REFLECTION_PART, DEFAULT_TURN_MAX_MS, type Counsel, type CounselRequest, type VoiceConsultant, type VoiceMode,
   appSource, describeTurnError, LettaTurnError, type ContentSource, type ConversationRewind, type ConversationCheck, type DecodedImage, type InteractionRequest, type InteractionResponse, type LettaAgent, type ResourceTree, type StagedFile, type StoredFile, type TurnLimits, type WebDevRegistry, type WebDevStatus,
 } from 'ai-sdk-letta';
 
@@ -1828,7 +1828,7 @@ export class ThreadRuntime {
       try { context = this.turnContext?.(run.threadId) ?? {}; } catch { /* no context */ }
       // The inner voices (when they are on): the agent consults them, may skip if the minimum allows, else they review the reply at the end.
       const consultant = this.voiceConsultant();
-      const voicesNoteText = consultant ? voicesNote(consultant.bounds.minimum) : undefined;
+      const voicesNoteText = consultant ? voicesNote(consultant.bounds.minimum, maxConsultsOf(consultant)) : undefined;
       const reminders = [reminder, appNote, backgroundNote, context.reminder, voicesNoteText].filter((r): r is string => !!r);
       const decision = { ...(reminders.length ? { reminder: reminders.join('\n\n') } : {}), ...(run.decision && !this.queueing && !run.source ? { otid: run.id } : {}) };
       const unattended = run.source ? { ...(this.queueing ? {} : { otid: run.id }), unattended: { preApproved: run.unattended?.preApproved ?? [], ...(run.unattended?.onBehalfOf ? { onBehalfOf: run.unattended.onBehalfOf } : {}), source: run.source.via, kind: run.source.kind, token: run.source.tokenId, name: run.source.name, ...(run.unattended?.memoryFloor ? { memoryFloor: run.unattended.memoryFloor } : {}) } } : {};
@@ -1967,7 +1967,7 @@ export class ThreadRuntime {
       if (!enabled.length) return undefined;
       const policy = voices.policy?.() ?? { minimum: 'none' as const, maximum: 'debate' as const, maxRevisions: 1 };
       return {
-        enabled, bounds: { minimum: policy.minimum, maximum: policy.maximum },
+        enabled, bounds: { minimum: policy.minimum, maximum: policy.maximum }, ...('maxConsults' in policy ? { maxConsults: policy.maxConsults } : {}),
         ask: (consultation, signal) => {
           const threadId = this.threadOfConversationAny(consultation.conversationId);
           const run = threadId ? this.lane(threadId).active?.run : undefined;
