@@ -7,6 +7,7 @@ import { MemoryIntro, MemoryPanel } from './memory.js';
 import { AutomationsPanel } from './automations.js';
 import { MembersPanel } from './team.js';
 import { VoicesPanel } from './voices.js';
+import { ToolLimitPanel } from './tool-limit.js';
 import type { ViewPolicy } from './apps-model.js';
 import { SECTION_LABELS, settingsSections, type SettingsSection } from './settings-model.js';
 
@@ -85,6 +86,7 @@ export function SettingsPage(props: SettingsProps) {
           </>)}
           {section('tools', <p className="modal-text">{agent.adopted ? <>What {agent.name} can do in this app. Every tool call follows the app’s permissions. Once its instructions were applied, the app keeps them current after a change.</> : <>{agent.name} is defined in code: you can make a tool ask before each call, or turn it off. Loosening is done in code.</>}</p>, <>
             <ToolsPanel key={`${(agent.adopted?.tools ?? []).join()}:${JSON.stringify(agent.adopted?.overrides ?? {})}`} agent={agent} onSaved={props.onSaved}/>
+            {!team && <div className="settings-sub"><ToolLimitPanel agent={agent}/></div>}
             {agent.adopted && <div className="settings-sub"><ProjectPanel key={`${agent.adopted?.project}:${agent.adopted?.commandTimeoutMs}`} agent={agent} onSaved={props.onSaved}/></div>}
           </>)}
           {section('voices', <p className="modal-text">Two optional inner voices that review each reply’s draft before you get it. They are mirror images: Ambition pushes for the upside, Prudence for checks. Their notes are advisory: {agent.name} reflects on them in one more step and keeps or revises its reply. You see the final answer; the draft and the notes stay one click away. Each reply they review costs tokens on their models, an extra step of {agent.name}, and some time.</p>,

@@ -1489,6 +1489,10 @@ agent's file activity reads as one line each ("Read report.pdf, pages 1–3",
 from `@ai-sdk-letta/server`. The same package offers `startApiServer` for a
 token-authenticated server-to-server API with the same routes.
 
+### Tool calls per turn
+
+Each agent may make a set number of tool calls in one turn (Settings → Tools → **Tool calls per turn**: 10–1000, default 100; `toolCallLimit` in a definition, `GET`/`PUT /api/tool-limit` for the app's own agent and `/api/adoption/agents/:id/tool-limit` for adopted ones). When a turn reaches it, the turn pauses and asks you: **Allow 100 more** (the same number again; you can allow more again later in the turn) or **Stop here**. If you stop, the agent is told to summarize where it is and what is left, so you can continue in the next turn. Turns started by automations, and turns with nobody to ask, stop at the limit. The inner voices' tools and `stay_silent` don't count. A change applies from the next turn; nothing restarts.
+
 ### Automatic reload after an update
 
 Open tabs reload themselves when the server restarts or the web app is rebuilt, so you never stay on an old version after `npm run build` and a restart. The page checks `GET /build.json` (an opaque build ID: the server process plus the web app's `index.html`; no session needed) every 15 seconds and when the tab becomes visible. It reloads at once in a hidden or idle tab, and waits while you type in the message box or a dialog or menu is open. A message you had typed but not sent is kept across the reload and put back in the box. A tab opened while the server was down reloads as soon as it answers.

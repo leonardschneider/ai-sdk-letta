@@ -1,6 +1,6 @@
 import type { ToolSet } from 'ai';
 import type { CreateAgentOptions } from '@letta-ai/letta-agent-sdk';
-import { ASK_USER_TOOL } from './tools.js';
+import { ASK_USER_TOOL, TOOL_CALL_LIMITS } from './tools.js';
 import { lockedPermissionError } from './tool-control.js';
 import { resolveSandboxConfig, WEBDEV_IMAGE, type ResolvedSandboxConfig, type SandboxConfig } from './sandbox.js';
 import { includesMcpAppDevTools } from './mcp-app-dev.js';
@@ -130,6 +130,12 @@ export interface AgentDefinitionInput<TOOLS extends ToolSet = ToolSet> {
   /** Per-call tool execution deadline in milliseconds (human waits excluded). @default 5000 */
   toolTimeoutMs?: number;
   /**
+   * Most tool calls a turn makes before the person is asked to allow as many
+   * more ("Allow 100 more" / "Stop here"); an unattended turn stops there.
+   * The inner voices' and `stay_silent` calls don't count. 10–1000. @default 100
+   */
+  toolCallLimit?: number;
+  /**
    * How long one turn may run (see `TurnLimits`): `idleMs`, stopped after
    * this long without progress (streamed text, reasoning, tool calls and
    * results; a running tool is progress); `maxMs`, the hard cap on a turn's
@@ -197,6 +203,8 @@ export interface AgentDefinition<TOOLS extends ToolSet = ToolSet> {
   readonly permissions: Readonly<Record<string, ToolPermission>>;
   readonly dreaming: Readonly<DreamingSettings>;
   readonly toolTimeoutMs: number;
+  /** See {@link AgentDefinitionInput.toolCallLimit}. */
+  readonly toolCallLimit: number;
   /** Turn limits the definition sets (the rest come from the environment and the defaults; see {@link AgentDefinitionInput.turnLimits}). */
   readonly turnLimits: Readonly<Partial<TurnLimits>>;
   readonly sandbox?: ResolvedSandboxConfig;
@@ -261,6 +269,8 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   if (!Number.isInteger(dreaming.stepCount) || dreaming.stepCount < 1 || dreaming.stepCount > 10_000) throw new Error('Dreaming stepCount must be a positive integer');
   const toolTimeoutMs = input.toolTimeoutMs ?? 5000;
   if (!Number.isInteger(toolTimeoutMs) || toolTimeoutMs < 1 || toolTimeoutMs > 300_000) throw new Error('toolTimeoutMs must be 1–300000');
+  const toolCallLimit = input.toolCallLimit ?? TOOL_CALL_LIMITS.default;
+  if (!Number.isInteger(toolCallLimit) || toolCallLimit < TOOL_CALL_LIMITS.min || toolCallLimit > TOOL_CALL_LIMITS.max) throw new Error(`toolCallLimit must be ${TOOL_CALL_LIMITS.min}–${TOOL_CALL_LIMITS.max}`);
   const turnLimits = resolveDefinitionTurnLimits(input.turnLimits);
   const ui = resolveUi(input.ui);
   const replyMode = input.replyMode ?? 'auto';
@@ -280,7 +290,7 @@ export function defineAgent<TOOLS extends ToolSet>(input: AgentDefinitionInput<T
   return Object.freeze({
     ...(adopt ? { adopt } : {}), ...(mcpApps.length ? { mcpApps } : {}),
     id: input.id, name: input.name, model: input.model, instructions: input.instructions, tools: input.tools,
-    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, turnLimits, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
+    permissions: Object.freeze(permissions), dreaming: Object.freeze(dreaming), toolTimeoutMs, toolCallLimit, turnLimits, ...(sandbox ? { sandbox } : {}), ui, replyMode, webSearch, memory, webDev,
   });
 }
 

@@ -7,6 +7,7 @@ import {
   ADOPTED_TOOL_SETS, AdoptionStore, adoptedToolsRefusal, orderedAdoptedTools, webDevSandbox, SandboxError, SANDBOX_LIMITS, adoptedDefinition, validCommandTimeout, checkAdoptedProject, adoptedDefinitionId, adoptedInstructionsSection, adoptionFile, adoptionRefusal, conversationGlance, defaultAdoptedTools,
   forgetIdentity, instructionsSectionOf, instructionsUpdate, lettaCodeActivity, listAdoptableAgents, localBackendDirectory, memoryPolicyInstructions, peekConversation, sanitizeText, statePaths, titleText,
   withoutInstructionsSection, adoptedToolBase, adoptedToolControl, checkToolOverrides, ToolOverrideError, type AdoptedToolSet, type AdoptionEnvironment, type AdoptionRecord, type AgentDefinition, type LocalAgentSummary,
+  TOOL_CALL_LIMITS, toolCallLimitOf,
 } from 'ai-sdk-letta';
 import { RuntimeFault, ThreadRuntime, type ImportedConversation, type RuntimeHost } from './runtime.js';
 import { DecisionFeed, runtimeRoutes, BODY_LIMIT_BYTES, type GuiAdoption, type GuiAgentInfo } from './http.js';
@@ -143,6 +144,7 @@ const REFUSALS: Record<string, string> = {
  * - `PUT /api/adoption/agents/<id>/tools` `{ tools, overrides? }`: its tool sets and per-tool overrides (`allow`, `ask`, `off`);
  * - `PUT /api/adoption/agents/<id>/project` `{ path | null }`: its project folder, mounted at `/project` in its sandbox (see `checkAdoptedProject`);
  * - `PUT /api/adoption/agents/<id>/view-only` `{ viewOnly }`: view only (reads only; off is refused while Letta Code uses it);
+ * - `GET`/`PUT /api/adoption/agents/<id>/tool-limit` `{ toolCallLimit | null }`: its per-turn tool call limit (10–1000; null: 100); applies from the next turn.
  * - `PUT /api/adoption/agents/<id>/sandbox` `{ commandTimeoutMs | null }`: its sandbox's per-command timeout (null: the host's);
  * - `GET /api/adoption/agents/<id>/model`: its model and the models it may switch to;
  * - `PUT /api/adoption/agents/<id>/model` `{ model, effort? }`: change its model and reasoning effort in Letta (Letta Code uses it too);
@@ -195,6 +197,8 @@ export class AdoptionRegistry {
     const folder = join(statePaths(this.options.stateDirectory).server(definition.id), 'gui');
     // View only: a runtime that can only read (no session, tools, containers, decisions or memory review).
     const { runtime, board, close, webDev, apps } = record.viewOnly ? { runtime: this.viewer(record, folder), board: undefined, close: undefined, webDev: undefined, apps: undefined } : this.options.build(definition, folder);
+    // The per-turn tool call limit: read from the record at each turn's first call (a change applies from the next turn).
+    if (!record.viewOnly) runtime.toolCallLimit = () => this.hosted.get(record.definitionId)?.record.toolCallLimit;
     // The inner voices (Ambition and Prudence): their settings are read from the record on every call.
     if (!record.viewOnly) runtime.voices = voiceCounsellor({ settings: () => storedVoices(this.hosted.get(record.definitionId)?.record.voices), agentModel: () => this.hosted.get(record.definitionId)?.record.model ?? record.model,
       directory: join(folder, 'voices'), ...(this.options.voice ? { voice: this.options.voice } : {}), ...(this.options.voiceModels ? { available: this.options.voiceModels } : {}) });
@@ -405,6 +409,23 @@ export class AdoptionRegistry {
     this.host(record);
     this.keepInstructions(definitionId, 'sandbox changed');
     return { commandTimeoutMs: record.commandTimeoutMs ?? null, effectiveMs: record.commandTimeoutMs ?? this.options.environment.sandbox.timeoutMs ?? SANDBOX_LIMITS.defaultTimeoutMs };
+  }
+  /** Its per-turn tool call limit: `{ toolCallLimit, default, min, max }` (`toolCallLimit` null: the default). */
+  toolLimit(definitionId: string) {
+    const hosted = this.hosted.get(definitionId);
+    if (!hosted) throw new RuntimeFault('not_found', 404);
+    return { toolCallLimit: hosted.record.toolCallLimit ?? null, default: TOOL_CALL_LIMITS.default, min: TOOL_CALL_LIMITS.min, max: TOOL_CALL_LIMITS.max };
+  }
+  /**
+   * Set (`{ toolCallLimit }`: 10–1000) or clear (`null`: the default 100) its
+   * per-turn tool call limit. Applies from the next turn; nothing restarts.
+   */
+  setToolLimit(definitionId: string, input: unknown) {
+    const hosted = this.writable(definitionId);
+    const value = (input as { toolCallLimit?: unknown } | undefined)?.toolCallLimit;
+    if (value !== null && toolCallLimitOf(value) !== value) throw new RuntimeFault('invalid_input', 400);
+    hosted.record = this.store.update(definitionId, r => { const { toolCallLimit: _old, ...rest } = r; return value === null ? rest : { ...rest, toolCallLimit: value as number }; });
+    return this.toolLimit(definitionId);
   }
   /** Its inner voices' settings (off by default). */
   async voices(definitionId: string) {
@@ -636,6 +657,8 @@ export class AdoptionRegistry {
     app.put('/adoption/agents/:id/project', json, wrap(async req => this.setProject(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/view-only', json, wrap(async req => this.setViewOnly(String(req.params.id), req.body)));
     app.put('/adoption/agents/:id/sandbox', json, wrap(async req => this.setSandbox(String(req.params.id), req.body)));
+    app.get('/adoption/agents/:id/tool-limit', wrap(async req => this.toolLimit(String(req.params.id))));
+    app.put('/adoption/agents/:id/tool-limit', json, wrap(async req => this.setToolLimit(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/voices', wrap(async req => this.voices(String(req.params.id))));
     app.put('/adoption/agents/:id/voices', json, wrap(async req => this.setVoices(String(req.params.id), req.body)));
     app.get('/adoption/agents/:id/model', wrap(async req => this.model(String(req.params.id))));
