@@ -275,9 +275,10 @@ test('Stop while the voices review or while the agent reflects keeps the draft a
 /* ---------------- revision rounds, modes, the agent's choice ---------------- */
 
 test('settings: bounds are validated (min ≤ max); skip minimums kept; earlier settings migrate', () => {
-  const ok = checkVoiceSettings({ ...on, minimum: 'debate', maximum: 'debate', maxRevisions: 3 });
-  assert.deepEqual(reviewPolicy(ok), { minimum: 'debate', maximum: 'debate', maxRevisions: 3 });
-  assert.deepEqual(reviewPolicy(DEFAULT_VOICES), { minimum: 'none', maximum: 'debate', maxRevisions: 1 });
+  const ok = checkVoiceSettings({ ...on, minimum: 'debate', maximum: 'debate', maxRevisions: 3, maxConsults: 50 });
+  assert.deepEqual(reviewPolicy(ok), { minimum: 'debate', maximum: 'debate', maxRevisions: 3, maxConsults: 50 });
+  assert.deepEqual(reviewPolicy(DEFAULT_VOICES), { minimum: 'none', maximum: 'debate', maxRevisions: 1, maxConsults: 30 });
+  for (const bad of [{ maxConsults: 0 }, { maxConsults: 101 }, { maxConsults: 2.5 }, { maxConsults: '30' }]) assert.throws(() => checkVoiceSettings(bad), /invalid_input/, JSON.stringify(bad));
   for (const bad of [{ minimum: 'debate', maximum: 'calibrated' }, { maxRevisions: 0 }, { maxRevisions: 4 }, { decides: 'nobody' }, { defaultMode: 'loud' }, { minimum: 'some' }, { maximum: 'skip' }]) {
     assert.throws(() => checkVoiceSettings(bad), (error: Error & { code?: string }) => error.code === 'invalid_input', JSON.stringify(bad));
   }
@@ -410,6 +411,7 @@ test('skip_voices: offered only while the minimum allows it; the turn records th
   await f.runtime.create('owner', threadId, 'Skip note');
   await turn(f, threadId, 'hello');
   assert.match(f.sent[0]!, /you may call skip_voices/);
+  assert.match(f.sent[0]!, /up to 30 consultations a turn/);
   settings = { ...on, minimum: 'calibrated' };
   await turn(f, threadId, 'again');
   assert.match(f.sent.at(-2)!, /you cannot skip them/);
@@ -422,29 +424,33 @@ test('consult_voices: offered while a voice is on; mode clamped to the bounds; t
   const asked = counting(f, () => settings);
   assert.equal(f.runtime.voiceConsultant(), undefined, 'voices off: not offered');
   assert.equal(new ThreadRuntime({ open: async () => { throw new Error('x'); }, close: async () => {} }, join(f.directory, 'other.json'), 'owner').voiceConsultant(), undefined, 'no voices at all');
-  settings = { ...on, minimum: 'calibrated', maximum: 'calibrated' };
+  settings = { ...on, minimum: 'calibrated', maximum: 'calibrated', maxConsults: 2 };
   const consultant = f.runtime.voiceConsultant()!;
+  assert.equal(consultant.maxConsults, 2, 'the person\'s limit reaches the consultant');
   assert.deepEqual(consultant.enabled, ['ambition', 'prudence']);
   assert.deepEqual(consultant.bounds, { minimum: 'calibrated', maximum: 'calibrated' });
-  let taken = 0;
-  const tool = consultVoicesTool(() => f.runtime.voiceConsultant(), () => 'conv-x', () => ++taken <= 2);
+  const used = { count: 0 };
+  const tool = consultVoicesTool(() => f.runtime.voiceConsultant(), () => 'conv-x', used);
   const call = (input: unknown) => tool.execute!(input as never, { toolCallId: 'c', messages: [], abortSignal: new AbortController().signal, context: {} } as never) as unknown as Promise<Record<string, unknown>>;
   const both = await call({ question: 'Is 4.c3 sound?', context: 'FEN …; legal: c3 d3 O-O', mode: 'debate' });
   assert.equal(both.ok, true);
   assert.equal(both.mode, 'calibrated', 'debate lowered to the maximum');
   assert.equal(both.requested, 'debate');
   assert.deepEqual(Object.keys(both.notes as object).sort(), ['ambition', 'prudence']);
+  assert.deepEqual([both.left, both.of], [1, 2], 'how many are left this turn');
   assert.deepEqual(asked, ['ambition::FEN …; legal: c3 d3 O-O', 'prudence::FEN …; legal: c3 d3 O-O'], 'they read the context it gave');
   const one = await call({ question: 'And now?', context: 'After the correction', voices: ['prudence'] });
   assert.deepEqual(Object.keys(one.notes as object), ['prudence'], 'only the voice it asked');
-  assert.equal((await call({ question: 'Third' })).error, 'limit_reached', 'bounded per turn');
+  const third = await call({ question: 'Third' });
+  assert.deepEqual([third.error, third.of], ['limit_reached', 2], 'bounded per turn by the setting');
+  used.count = 0;
   assert.equal((await call({ question: '' })).error, 'invalid_input');
   assert.equal((await call({ question: 'x', voices: ['courage'] })).error, 'invalid_input');
   settings = { ...on, ambition: { enabled: false, model: 'auto' } };
   assert.equal((await call({ question: 'x', voices: ['ambition'] })).error, 'voice_off');
   settings = DEFAULT_VOICES;
   assert.equal((await call({ question: 'x' })).error, 'voices_unavailable');
-  assert.equal(CONSULT_LIMITS.perTurn, 8);
+  assert.equal(CONSULT_LIMITS.perTurn, 30, 'the default');
 });
 
 test('a turn that consults its voices mid-turn gets no end-of-turn review; the note tells the agent about consult_voices', async () => {
@@ -479,7 +485,7 @@ test('the session offers consult_voices (and skip_voices when allowed) while the
   assert.match(source, /tools: \(voicesOffered \? \{ \.\.\.agentTools, \.\.\.voiceTools \}/);
   assert.match(source, /skipOffered \? \{ \[SKIP_VOICES_TOOL\]/);
   assert.match(source, /voicesOffered !== !!options\.innerVoices\?\.\(\)/);
-  assert.match(source, /turnConsults = 0;/, 'the per-turn count resets each turn');
+  assert.match(source, /turnConsults\.count = 0;/, 'the per-turn count resets each turn');
   // The voices take up to a minute: consult_voices must not get the default 5 s tool timeout.
   assert.match(source, /\[CONSULT_VOICES_TOOL\]: Math\.max\(definition\.toolTimeoutMs, VOICE_TIMEOUT_MS \+ 15_000\)/);
 });

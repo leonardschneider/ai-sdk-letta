@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   counsel, counselPrompt, reflectionPrompt, keepsDraft, projectHistory, assertHistorySettled, REFLECTION_PART, validateVoiceNote, chooseReviewerModel, reviewerSessionOptions, advisorSessionOptions, VERDICT_SCHEMA, VOICE_NOTE_SCHEMA,
-  AMBITION_PERSONA, PRUDENCE_PERSONA, DEBATE_ADDENDA, voicePersona, rebuttalOf, reflectionRound, clampVoiceMode, validVoiceBounds, parseConsultation, consultedVoices, consultVoicesTool, VOICES_NOTE, voicesNote, skippable, maySkip, parseSkip, skippedVoices, type InnerVoice,
+  AMBITION_PERSONA, PRUDENCE_PERSONA, DEBATE_ADDENDA, voicePersona, rebuttalOf, reflectionRound, clampVoiceMode, validVoiceBounds, parseConsultation, consultedVoices, consultVoicesTool, maxConsultsOf, VOICES_NOTE, voicesNote, skippable, maySkip, parseSkip, skippedVoices, type InnerVoice,
 } from '../src/index.js';
 import { defineAgent } from '../src/definition.js';
 
@@ -183,7 +183,11 @@ test('consult_voices and skip_voices: input checked; stance clamped; skipping pe
   const tool = consultVoicesTool(() => ({ enabled: ['prudence'], bounds: { minimum: 'calibrated', maximum: 'calibrated' }, ask: async (c) => { seen.push(c); return { prudence: { points: ['c3 is legal here.'], confidence: 'high' } }; } }), () => 'conv-1');
   const output = await tool.execute!({ question: 'c3?', context: 'legal: c3', mode: 'debate' }, { toolCallId: 'c', messages: [] } as never) as unknown as Record<string, unknown>;
   assert.deepEqual(seen, [{ question: 'c3?', context: 'legal: c3', mode: 'calibrated', voices: ['prudence'], conversationId: 'conv-1' }]);
-  assert.deepEqual(output, { ok: true, mode: 'calibrated', requested: 'debate', question: 'c3?', notes: { prudence: { points: ['c3 is legal here.'], confidence: 'high' } } });
+  assert.deepEqual(output, { ok: true, mode: 'calibrated', requested: 'debate', question: 'c3?', notes: { prudence: { points: ['c3 is legal here.'], confidence: 'high' } }, left: 29, of: 30 });
+  assert.equal(maxConsultsOf({}), 30, 'default');
+  assert.equal(maxConsultsOf({ maxConsults: 5 }), 5);
+  for (const bad of [0, 101, 2.5]) assert.equal(maxConsultsOf({ maxConsults: bad }), 30);
+  assert.match(voicesNote('none', 12), /up to 12 consultations a turn/);
   assert.equal(consultedVoices(output), true);
   assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { consult_voices: {} as never } }), /reserved/);
   assert.throws(() => defineAgent({ id: 'a', name: 'A', model: 'x/y', instructions: 'i', tools: { inner_voices: {} as never } }), /reserved/);

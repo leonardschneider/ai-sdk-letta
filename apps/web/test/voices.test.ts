@@ -92,11 +92,11 @@ test('the collapsed line: revised 2×, kept, debate (older records keep the agen
   const skipped = { at: 'now', notes: {}, outcome: 'skipped' as const, reason: 'agent_skipped' as const, mode: 'skip' as const, choice: { mode: 'skip', reason: 'a greeting' } };
   assert.equal(voicesLine(undefined, skipped), 'skipped');
   assert.equal(voicesLabel('skipped', skipped), 'Skipped review: a greeting');
-  assert.equal(validPolicy({ minimum: 'calibrated', maximum: 'debate', maxRevisions: 2 }), true);
-  assert.equal(validPolicy({ minimum: 'debate', maximum: 'debate', maxRevisions: 1 }), true);
-  assert.equal(validPolicy({ minimum: 'debate', maximum: 'calibrated', maxRevisions: 1 }), false);
-  assert.equal(validPolicy({ minimum: 'none', maximum: 'calibrated', maxRevisions: 1 }), true);
-  assert.equal(validPolicy({ minimum: 'calibrated_if_tools', maximum: 'debate', maxRevisions: 1 }), true);
+  assert.equal(validPolicy({ minimum: 'calibrated', maximum: 'debate', maxRevisions: 2, maxConsults: 30 }), true);
+  assert.equal(validPolicy({ minimum: 'debate', maximum: 'debate', maxRevisions: 1, maxConsults: 30 }), true);
+  assert.equal(validPolicy({ minimum: 'debate', maximum: 'calibrated', maxRevisions: 1, maxConsults: 30 }), false);
+  assert.equal(validPolicy({ minimum: 'none', maximum: 'calibrated', maxRevisions: 1, maxConsults: 30 }), true);
+  assert.equal(validPolicy({ minimum: 'calibrated_if_tools', maximum: 'debate', maxRevisions: 1, maxConsults: 30 }), true);
 });
 
 test('a consultation\'s line: asking, then who was asked and the question; one voice; failures; JSON text results', async () => {
@@ -104,8 +104,11 @@ test('a consultation\'s line: asking, then who was asked and the question; one v
   const result = { ok: true, mode: 'debate', question: 'Is 4.c3 sound?', notes: { prudence: { points: ['c3 is legal.'], confidence: 'high' } } };
   assert.equal(consultLabel({ question: 'Is 4.c3 sound?' }, undefined, true), 'Asking Ambition & Prudence…');
   assert.equal(consultLabel({ question: 'Is 4.c3 sound?', voices: ['prudence'] }, parseConsultResult(JSON.stringify(result)), false), 'Asked Prudence: Is 4.c3 sound? · Debate');
-  assert.equal(consultLabel({ question: 'q' }, parseConsultResult({ ok: false, error: 'limit_reached' }), false), 'Couldn’t ask Ambition & Prudence (limit for this turn)');
+  assert.equal(consultLabel({ question: 'q' }, parseConsultResult({ ok: false, error: 'limit_reached' }), false), 'Couldn’t ask Ambition & Prudence (limit for this turn reached)');
   assert.equal(consultLabel({ question: 'x'.repeat(200) }, parseConsultResult({ ...result, mode: 'calibrated' }), false).length, 'Asked Ambition & Prudence: '.length + 90);
   assert.equal(parseConsultResult('not json'), undefined);
+  assert.deepEqual(parseConsultResult({ ok: false, error: 'limit_reached', of: 30 }), { ok: false, error: 'limit_reached', of: 30 });
+  assert.equal(consultLabel({ question: 'q' }, parseConsultResult({ ok: false, error: 'limit_reached', of: 30 }), false), 'Couldn’t ask Ambition & Prudence (limit for this turn reached)');
+  assert.equal((parseConsultResult({ ...result, left: 7, of: 30 }) as { left?: number }).left, 7);
   assert.deepEqual(parseConsultResult(result), { ok: true, mode: 'debate', question: 'Is 4.c3 sound?', notes: result.notes });
 });

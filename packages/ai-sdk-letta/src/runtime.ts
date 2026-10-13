@@ -20,7 +20,7 @@ import { SANDBOX_CONTEXT, SANDBOX_TOOL_NAMES, SandboxManager, sandboxEnabled, sa
 import { backgroundCommandsAt, type BackgroundCommands } from './background.js';
 import { WEBDEV_CONTEXT, WEBDEV_TOOL_NAMES, WebDevRegistry, webDevEnabled, webDevToolTimeouts, type WebDevServices, type WebDevServicesOptions } from './webdev.js';
 import { STAY_SILENT_DESCRIPTION, STAY_SILENT_SCHEMA, STAY_SILENT_TOOL } from './listening.js';
-import { CONSULT_LIMITS, CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, VOICE_TIMEOUT_MS, consultVoicesTool, skipVoicesTool, skippable, type VoiceConsultant } from './voices.js';
+import { CONSULT_VOICES_TOOL, SKIP_VOICES_TOOL, VOICE_TIMEOUT_MS, consultVoicesTool, skipVoicesTool, skippable, type VoiceConsultant } from './voices.js';
 import { ACTOR_CONTEXT, CredentialStore, LOCAL_ACTOR, type TurnActor } from './credentials.js';
 import { ATLASSIAN_CONTEXT, ATLASSIAN_TIMEOUT_MS, ATLASSIAN_TOOL_NAMES, WORKSPACE_CONTEXT, atlassianEnabled } from './atlassian.js';
 import { adoptionRefusal, lettaCodeActivity } from './adoption.js';
@@ -142,7 +142,7 @@ export interface OpenAgentOptions {
   /**
    * The inner voices as turns may consult them (voices on); undefined
    * otherwise. While it returns one, sessions offer the always-allowed
-   * `consult_voices` tool (at most {@link CONSULT_LIMITS}.perTurn calls a
+   * `consult_voices` tool (at most the consultant's `maxConsults` calls a
    * turn); when that changes, `toolsStale()` asks the host to reopen the session.
    */
   innerVoices?: () => VoiceConsultant | undefined;
@@ -586,8 +586,8 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         let turnUnattended: UnattendedPolicy | undefined;
         // Whether the running turn may end without a reply (read by stay_silent when the agent calls it).
         let turnSilence = false;
-        // consult_voices calls in this turn (bounded per turn).
-        let turnConsults = 0;
+        // consult_voices calls in this turn (bounded per turn by the person's setting).
+        const turnConsults = { count: 0 };
         // The running turn requested a decision: the rest of its tool calls are refused (the work is paused).
         let turnPaused = false;
         // Resources: every file of the agent in one git-backed folder, one folder
@@ -652,7 +652,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
         const innerVoices = options.innerVoices;
         // skip_voices only while the person's minimum allows skipping (none, calibrated if tools).
         const skipOffered = voicesOffered && skippable(options.innerVoices!()!.bounds.minimum);
-        const voiceTools = voicesOffered && innerVoices ? { [CONSULT_VOICES_TOOL]: consultVoicesTool(() => innerVoices(), () => conversationId, () => turnConsults++ < CONSULT_LIMITS.perTurn), ...(skipOffered ? { [SKIP_VOICES_TOOL]: skipVoicesTool(() => innerVoices()) } : {}) } : {};
+        const voiceTools = voicesOffered && innerVoices ? { [CONSULT_VOICES_TOOL]: consultVoicesTool(() => innerVoices(), () => conversationId, turnConsults), ...(skipOffered ? { [SKIP_VOICES_TOOL]: skipVoicesTool(() => innerVoices()) } : {}) } : {};
         const withVoices = { ...withProvenance, ...voiceTools } as ToolSet;
         const exposed = listening ? { ...withVoices, [STAY_SILENT_TOOL]: staySilentTool(() => turnSilence) } : withVoices;
         // Without a sandbox (or without web development), those tools are never exposed.
@@ -751,7 +751,7 @@ async function hostInternals<TOOLS extends ToolSet>(definition: AgentDefinition<
           // memory_provenance is the harness's, like the memory tools: never an application tool card.
           id: definition.id, tools: (voicesOffered ? { ...agentTools, ...voiceTools } : agentTools) as TOOLS, memoryTools: [...INTERNAL_MEMORY_TOOLS, MEMORY_PROVENANCE_TOOL], lettaAgentId: identity.agentId, modelId: definition.model, interactions: broker, attachments,
           open: (signal, turn) => {
-            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false; turnConsults = 0;
+            turnSignal = signal; turnSilence = turn.silence; turnActor = turn.actor; turnUnattended = turn.unattended; turnPaused = false; turnConsults.count = 0;
             return { send: (message, sendOptions) => live.send(message, sendOptions), stream: () => live.stream(), abort: () => within(live.abort(), REQUEST_TIMEOUT_MS, 'Timed out stopping the turn'), confirmStopped: () => confirmStopped(live), close: () => { if (turnSignal === signal) { turnSignal = undefined; turnSilence = false; turnActor = undefined; turnUnattended = undefined; turnPaused = false; } } };
           },
           listening, name: definition.name, ...(defaultActor ? { defaultActor } : {}),

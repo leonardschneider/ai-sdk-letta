@@ -100,15 +100,15 @@ export function ReplyVoices({ runId, reflection, tools }: { runId: string | unde
 }
 
 /** A `consult_voices` result as the app reads it (the object, or its JSON text). */
-export type Consultation = { ok: true; mode: 'calibrated' | 'debate'; requested?: string; question: string; notes: Notes } | { ok: false; error: string };
+export type Consultation = { ok: true; mode: 'calibrated' | 'debate'; requested?: string; question: string; notes: Notes; left?: number; of?: number } | { ok: false; error: string; of?: number };
 export function parseConsultResult(result: unknown): Consultation | undefined {
   let value = result;
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return undefined; } }
   const o = value as Record<string, unknown> | null;
   if (!o || typeof o !== 'object') return undefined;
-  if (o.ok === false && typeof o.error === 'string') return { ok: false, error: o.error };
+  if (o.ok === false && typeof o.error === 'string') return { ok: false, error: o.error, ...(typeof o.of === 'number' ? { of: o.of } : {}) };
   if (o.ok !== true || !o.notes || typeof o.notes !== 'object') return undefined;
-  return { ok: true, mode: o.mode === 'debate' ? 'debate' : 'calibrated', ...(typeof o.requested === 'string' ? { requested: o.requested } : {}), question: typeof o.question === 'string' ? o.question : '', notes: o.notes as Notes };
+  return { ok: true, mode: o.mode === 'debate' ? 'debate' : 'calibrated', ...(typeof o.requested === 'string' ? { requested: o.requested } : {}), question: typeof o.question === 'string' ? o.question : '', notes: o.notes as Notes, ...(typeof o.left === 'number' ? { left: o.left } : {}), ...(typeof o.of === 'number' ? { of: o.of } : {}) };
 }
 /** Who was asked: "Ambition & Prudence", or one of them. */
 export function consultedNames(voices: unknown): string {
@@ -124,7 +124,7 @@ export function consultLabel(args: { question?: unknown; voices?: unknown; mode?
   if (!result?.ok) return `Couldn’t ask ${who}${result && !result.ok ? ` (${CONSULT_FAILED[result.error] ?? result.error})` : ''}`;
   return `Asked ${who}${short ? `: ${short}` : ''}${result.mode === 'debate' ? ' · Debate' : ''}`;
 }
-const CONSULT_FAILED: Record<string, string> = { voices_unavailable: 'they are off', voice_off: 'that voice is off', limit_reached: 'limit for this turn', invalid_input: 'invalid request' };
+const CONSULT_FAILED: Record<string, string> = { voices_unavailable: 'they are off', voice_off: 'that voice is off', limit_reached: 'limit for this turn reached', invalid_input: 'invalid request' };
 
 /** The agent consulted its inner voices mid-turn: one collapsed line; open, the question and both notes side by side. */
 export function ConsultCard({ argsText, result }: { argsText: string; result: unknown }) {
@@ -144,7 +144,7 @@ export function ConsultCard({ argsText, result }: { argsText: string; result: un
       {typeof args.question === 'string' && <div className="voices-draft"><span className="voices-draft-label">Question</span><p>{args.question}</p></div>}
       {typeof args.context === 'string' && args.context.trim() && <details className="voices-context"><summary>What the agent told them</summary><p>{args.context}</p></details>}
       {notes && <div className="voices-notes">{(['ambition', 'prudence'] as const).filter(name => notes[name]).map(name => <VoiceCard key={name} name={name} note={notes[name]!}/>)}</div>}
-      <p className="voices-foot">{parsed?.ok ? `Advisory notes the agent weighed before continuing.${parsed.requested && parsed.requested !== parsed.mode ? ` It asked for ${parsed.requested}; your bounds made it ${parsed.mode}.` : ''}` : 'The agent continued without their notes.'}</p>
+      <p className="voices-foot">{parsed?.ok ? `Advisory notes the agent weighed before continuing.${parsed.requested && parsed.requested !== parsed.mode ? ` It asked for ${parsed.requested}; your bounds made it ${parsed.mode}.` : ''}${typeof parsed.left === 'number' && typeof parsed.of === 'number' ? ` ${parsed.left} of ${parsed.of} consultations left this turn.` : ''}` : parsed && !parsed.ok && parsed.error === 'limit_reached' ? `The agent reached your limit of ${parsed.of ?? 'its'} consultations this turn (Settings → Inner voices) and continued without their notes.` : 'The agent continued without their notes.'}</p>
     </div>}
   </div>;
 }
@@ -168,7 +168,7 @@ type Setting = { enabled: boolean; model: string };
 type ModelChoice = { handle: string; label: string; providerLabel: string };
 type Mode = 'calibrated' | 'debate';
 type Minimum = 'none' | 'calibrated_if_tools' | Mode;
-type Policy = { minimum?: Minimum; maximum?: Mode; maxRevisions?: number };
+type Policy = { minimum?: Minimum; maximum?: Mode; maxRevisions?: number; maxConsults?: number };
 type Loaded = Record<VoiceName, Setting> & Policy & { models: ModelChoice[] };
 
 const BLURB: Record<VoiceName, string> = {
@@ -180,8 +180,10 @@ const RANK: Record<Minimum, number> = { none: 0, calibrated_if_tools: 0, calibra
 export function validPolicy(p: Required<Policy>): boolean {
   return RANK[p.minimum] <= RANK[p.maximum];
 }
+/** Choices of "Max consultations per turn" (each consultation costs one call per voice asked). */
+const CONSULT_CHOICES = [5, 10, 20, 30, 50, 100];
 const MINIMUMS: Minimum[] = ['none', 'calibrated_if_tools', 'calibrated', 'debate'];
-const policyOf = (data: Policy): Required<Policy> => ({ minimum: MINIMUMS.includes(data.minimum as Minimum) ? data.minimum! : 'none', maximum: data.maximum ?? 'debate', maxRevisions: data.maxRevisions ?? 1 });
+const policyOf = (data: Policy): Required<Policy> => ({ minimum: MINIMUMS.includes(data.minimum as Minimum) ? data.minimum! : 'none', maximum: data.maximum ?? 'debate', maxRevisions: data.maxRevisions ?? 1, maxConsults: data.maxConsults ?? 30 });
 /** What the minimum means, in a word (the toast). */
 const MINIMUM_SAID: Record<Minimum, string> = { none: 'the agent may skip its voices on any turn', calibrated_if_tools: 'the agent may skip its voices on turns without tools', calibrated: 'the agent can’t skip its voices', debate: 'the agent can’t skip its voices; always debate' };
 
@@ -251,7 +253,13 @@ export function VoicesPanel({ agent, onSaved }: { agent: AgentInfo; onSaved(): v
           {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
-      <span className="adopt-meta">The agent consults the voices when it chooses during the turn (its question, the facts it gives, the stance within these bounds, one voice or both). The minimum says whether it may skip them for a turn: None (any turn, e.g. small talk), If tools used (only turns without tools), or never. A turn it neither consults nor skips is reviewed at the end in the minimum stance, and it may revise up to “Max revisions” times. Calibrated: each voice weighs in on its own terms. Debate: Prudence argues against with checkable objections and Ambition defends; neither sees the other.</span>
+      <label className="voice-model-pick"><span>Max consultations per turn</span>
+        <select className="member-role" value={policy.maxConsults} disabled={disabled} onChange={event => savePolicy({ maxConsults: Number(event.target.value) }, `Up to ${event.target.value} consultation${event.target.value === '1' ? '' : 's'} per turn.`)}>
+          {CONSULT_CHOICES.includes(policy.maxConsults) ? null : <option value={policy.maxConsults}>{policy.maxConsults}</option>}
+          {CONSULT_CHOICES.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <span className="adopt-meta">The agent consults the voices when it chooses during the turn (its question, the facts it gives, the stance within these bounds, one voice or both). The minimum says whether it may skip them for a turn: None (any turn, e.g. small talk), If tools used (only turns without tools), or never. A turn it neither consults nor skips is reviewed at the end in the minimum stance, and it may revise up to “Max revisions” times. “Max consultations per turn” caps how often it may ask in one turn (each consultation costs one call per voice). Calibrated: each voice weighs in on its own terms. Debate: Prudence argues against with checkable objections and Ambition defends; neither sees the other.</span>
     </div>
     {problem && <p className="form-error">{problem}</p>}
   </div>;

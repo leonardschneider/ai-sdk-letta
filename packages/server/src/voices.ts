@@ -2,7 +2,7 @@ import express from 'express';
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { chooseReviewerModel, counsel, lettaVoice, sweepVoices, localBackendDirectory, statePaths, validVoiceBounds, MAX_REVISIONS, VOICES, VOICE_MODES, VOICE_MINIMUMS, type Counsel, type CounselRequest, type InnerVoice, type VoiceBounds, type VoiceMinimum, type VoiceMode, type VoiceName } from 'ai-sdk-letta';
+import { chooseReviewerModel, counsel, lettaVoice, sweepVoices, localBackendDirectory, statePaths, validVoiceBounds, MAX_REVISIONS, CONSULT_LIMITS, VOICES, VOICE_MODES, VOICE_MINIMUMS, type Counsel, type CounselRequest, type InnerVoice, type VoiceBounds, type VoiceMinimum, type VoiceMode, type VoiceName } from 'ai-sdk-letta';
 import { BODY_LIMIT_BYTES } from './http.js';
 import { MODEL_HANDLE, localModels } from './models.js';
 import { RuntimeFault } from './runtime.js';
@@ -25,27 +25,28 @@ export type VoiceSetting = { enabled: boolean; model: string };
 /**
  * The person's policy: the minimum (`none`: the agent may skip any turn;
  * `calibrated_if_tools`: a turn without other tools; `calibrated`/`debate`:
- * never, and the stance is at least that), the highest stance, and how many
- * revision rounds an end-of-turn review may take.
+ * never, and the stance is at least that), the highest stance, how many
+ * revision rounds an end-of-turn review may take, and how many consultations
+ * (`consult_voices`) a turn may make (1 to 100, default 30).
  */
-export type ReviewPolicy = VoiceBounds & { maxRevisions: number };
+export type ReviewPolicy = VoiceBounds & { maxRevisions: number; maxConsults: number };
 /** Both voices' settings and the review policy (see {@link ReviewPolicy}; defaults when absent). */
 export type VoiceSettings = Record<VoiceName, VoiceSetting> & Partial<ReviewPolicy>;
 /** The agent may skip; up to debate; one revision. */
-export const DEFAULT_POLICY: Readonly<ReviewPolicy> = Object.freeze({ minimum: 'none', maximum: 'debate', maxRevisions: 1 });
+export const DEFAULT_POLICY: Readonly<ReviewPolicy> = Object.freeze({ minimum: 'none', maximum: 'debate', maxRevisions: 1, maxConsults: CONSULT_LIMITS.perTurn });
 /** Off, on the automatic model. */
 export const DEFAULT_VOICES: VoiceSettings = Object.freeze({ ambition: Object.freeze({ enabled: false, model: 'auto' }), prudence: Object.freeze({ enabled: false, model: 'auto' }) }) as VoiceSettings;
 /** The policy of settings (defaults filled in). */
 export const reviewPolicy = (settings: VoiceSettings): ReviewPolicy => ({
-  minimum: settings.minimum ?? DEFAULT_POLICY.minimum, maximum: settings.maximum ?? DEFAULT_POLICY.maximum, maxRevisions: settings.maxRevisions ?? DEFAULT_POLICY.maxRevisions,
+  minimum: settings.minimum ?? DEFAULT_POLICY.minimum, maximum: settings.maximum ?? DEFAULT_POLICY.maximum, maxRevisions: settings.maxRevisions ?? DEFAULT_POLICY.maxRevisions, maxConsults: settings.maxConsults ?? DEFAULT_POLICY.maxConsults,
 });
 /** Settings of earlier versions: still accepted as input, and migrated (or dropped). */
 const OLD_KEYS = ['decides', 'defaultMode', 'speakAfter'];
-const POLICY_KEYS = ['minimum', 'maximum', 'maxRevisions', ...OLD_KEYS];
+const POLICY_KEYS = ['minimum', 'maximum', 'maxRevisions', 'maxConsults', ...OLD_KEYS];
 
 /**
  * Validate settings (`{ ambition: { enabled, model }, prudence: { … },
- * minimum?, maximum?, maxRevisions? }`; anything left out keeps
+ * minimum?, maximum?, maxRevisions?, maxConsults? }`; anything left out keeps
  * `fallback`'s). The minimum's stance must not exceed the maximum. Earlier
  * settings are migrated: `decides` and `defaultMode` are accepted and dropped
  * (the agent decides within the minimum now); `speakAfter: 'long'` becomes
@@ -66,6 +67,7 @@ export function checkVoiceSettings(input: unknown, fallback: VoiceSettings = DEF
   if (o.minimum !== undefined) { if (!VOICE_MINIMUMS.includes(o.minimum as VoiceMinimum)) fail(); result.minimum = o.minimum as VoiceMinimum; }
   if (o.maximum !== undefined) { if (!VOICE_MODES.includes(o.maximum as VoiceMode)) fail(); result.maximum = o.maximum as VoiceMode; }
   if (o.maxRevisions !== undefined) { if (!Number.isInteger(o.maxRevisions) || (o.maxRevisions as number) < 1 || (o.maxRevisions as number) > MAX_REVISIONS) fail(); result.maxRevisions = o.maxRevisions as number; }
+  if (o.maxConsults !== undefined) { if (!Number.isInteger(o.maxConsults) || (o.maxConsults as number) < CONSULT_LIMITS.minPerTurn || (o.maxConsults as number) > CONSULT_LIMITS.maxPerTurn) fail(); result.maxConsults = o.maxConsults as number; }
   for (const name of VOICES) {
     const value = o[name];
     if (value === undefined) continue;

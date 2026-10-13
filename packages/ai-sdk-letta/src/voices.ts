@@ -276,8 +276,8 @@ export const skippable = (minimum: VoiceMinimum): boolean => minimum === 'none' 
 /** Whether the agent may skip this turn: `none`, or `calibrated_if_tools` in a turn that used no other tool. */
 export const maySkip = (minimum: VoiceMinimum, usedTools: boolean): boolean => minimum === 'none' || (minimum === 'calibrated_if_tools' && !usedTools);
 
-/** Bounds of a consultation's input. */
-export const CONSULT_LIMITS = Object.freeze({ question: 2000, context: 8000, perTurn: 8 });
+/** Bounds of a consultation's input, and of the person's "Max consultations per turn" (`perTurn`: its default). */
+export const CONSULT_LIMITS = Object.freeze({ question: 2000, context: 8000, perTurn: 30, minPerTurn: 1, maxPerTurn: 100 });
 /** What the agent asks with {@link CONSULT_VOICES_TOOL}: its question, the facts the voices need (they see nothing else), the stance, and which voices. */
 export type VoiceConsultation = { question: string; context: string; mode: VoiceMode; voices: VoiceName[] };
 /** The tool's raw input (`mode` and `voices` optional). */
@@ -305,10 +305,17 @@ export function parseConsultation(input: unknown): VoiceConsultation | undefined
 export interface VoiceConsultant {
   enabled: readonly VoiceName[];
   bounds: VoiceBounds;
+  /** Most consultations a turn (the person's setting; default {@link CONSULT_LIMITS}.perTurn). */
+  maxConsults?: number;
   ask(consultation: VoiceConsultation & { conversationId: string }, signal: AbortSignal): Promise<Counsel>;
 }
-/** The tool's result: the stance used and each asked voice's note (or its error). */
-export type ConsultVoicesOutput = { ok: true; mode: VoiceMode; requested?: VoiceMode; question: string; notes: Counsel } | { ok: false; error: string };
+/** A consultant's per-turn limit (valid setting, else the default). */
+export const maxConsultsOf = (consultant: Pick<VoiceConsultant, 'maxConsults'>): number => {
+  const n = consultant.maxConsults;
+  return Number.isInteger(n) && n! >= CONSULT_LIMITS.minPerTurn && n! <= CONSULT_LIMITS.maxPerTurn ? n! : CONSULT_LIMITS.perTurn;
+};
+/** The tool's result: the stance used, each asked voice's note (or its error), and how many consultations are `left` of the turn's `of`. */
+export type ConsultVoicesOutput = { ok: true; mode: VoiceMode; requested?: VoiceMode; question: string; notes: Counsel; left: number; of: number } | { ok: false; error: string; of?: number };
 /**
  * Whether a {@link CONSULT_VOICES_TOOL} result (the object, or its JSON text
  * as history and events carry it) holds at least one voice's note: the turn
@@ -322,8 +329,8 @@ export function consultedVoices(output: unknown): boolean {
   return Object.values(o.notes as Record<string, unknown>).some(note => !!note && typeof note === 'object' && !('error' in note));
 }
 /** What the agent is told every turn while its voices are on (whether and when it may skip depends on the person's minimum). */
-export function voicesNote(minimum: VoiceMinimum): string {
-  const base = 'Your inner voices (Ambition and Prudence) weigh in on your turns. Consult them with consult_voices at the moment it helps most, typically before you commit to a decision, plan, claim or move, and give them the facts they need: they see only your question and context. You may ask again (for example one voice, after a correction). If you neither consult nor skip them in a turn, they review your final reply before the person sees it.';
+export function voicesNote(minimum: VoiceMinimum, maxConsults: number = CONSULT_LIMITS.perTurn): string {
+  const base = 'Your inner voices (Ambition and Prudence) weigh in on your turns. Consult them with consult_voices at the moment it helps most, typically before you commit to a decision, plan, claim or move, and give them the facts they need: they see only your question and context. You may ask again (for example one voice, after a correction), up to ' + maxConsults + ' consultations a turn (each result says how many are left). If you neither consult nor skip them in a turn, they review your final reply before the person sees it.';
   return minimum === 'none' ? `${base} For trivial turns (small talk, a quick acknowledgement) you may call skip_voices with a reason: for this turn only.`
     : minimum === 'calibrated_if_tools' ? `${base} For a trivial turn that uses no other tool you may call skip_voices with a reason (for this turn only); once you use a tool, it no longer applies.`
     : `${base} The person requires them on every turn: you cannot skip them.`;
@@ -382,9 +389,11 @@ export function skippedVoices(output: unknown): string | undefined {
  * to the person's bounds) and which voices (both by default); the notes come
  * back as the result and the turn continues. A turn that neither consults
  * them nor skips them (when allowed) is reviewed at its end (by the host).
- * `take()` spends one of the turn's consultations (false: none left).
+ * `used()` counts the turn's consultations so far (the host resets it each
+ * turn); the result says how many are left of the person's
+ * `maxConsults`, and one past it is refused (`limit_reached`).
  */
-export function consultVoicesTool(consultant: () => VoiceConsultant | undefined, conversationId: () => string, take: () => boolean = () => true): Tool<ConsultVoicesInput, ConsultVoicesOutput> {
+export function consultVoicesTool(consultant: () => VoiceConsultant | undefined, conversationId: () => string, used: { count: number } = { count: 0 }): Tool<ConsultVoicesInput, ConsultVoicesOutput> {
   return tool({
     description: 'Consult your inner voices, two independent advisors: Ambition (daring, wants success) and Prudence (careful, wants to avoid mistakes). They see only what you give them: ask a specific question and put the facts they need in context (for example the position, the options, your candidate and why). mode "calibrated" (default): each weighs in on its own terms; "debate": Prudence argues against your candidate with checkable objections and Ambition defends it. voices: both by default, or one for a follow-up. Their notes come back as the result: advisory, they may be wrong; you decide and continue.',
     inputSchema: jsonSchema<ConsultVoicesInput>({
@@ -404,21 +413,22 @@ export function consultVoicesTool(consultant: () => VoiceConsultant | undefined,
       if (!current || !current.enabled.length) return { ok: false, error: 'voices_unavailable' };
       const voices = consultation.voices.filter(v => current.enabled.includes(v));
       if (!voices.length) return { ok: false, error: 'voice_off' };
-      if (!take()) return { ok: false, error: 'limit_reached' };
+      const of = maxConsultsOf(current);
+      if (used.count >= of) return { ok: false, error: 'limit_reached', of };
+      used.count++;
       const mode = clampVoiceMode(consultation.mode, current.bounds);
       const notes = await current.ask({ ...consultation, mode, voices, conversationId: conversationId() }, options?.abortSignal ?? new AbortController().signal);
-      return { ok: true, mode, ...(mode !== consultation.mode ? { requested: consultation.mode } : {}), question: consultation.question.slice(0, 300), notes };
+      return { ok: true, mode, ...(mode !== consultation.mode ? { requested: consultation.mode } : {}), question: consultation.question.slice(0, 300), notes, left: Math.max(0, of - used.count), of };
     },
     toModelOutput: ({ output }: { output: ConsultVoicesOutput }) => output.ok
       ? { type: 'json' as const, value: output }
-      : { type: 'error-json' as const, value: { ok: false, error: output.error, message: CONSULT_ERRORS[output.error] ?? 'The voices could not be consulted.' } },
+      : { type: 'error-json' as const, value: { ok: false, error: output.error, message: output.error === 'limit_reached' ? `You consulted your voices ${output.of ?? CONSULT_LIMITS.perTurn} times in this turn (the person's limit): decide with what you have.` : CONSULT_ERRORS[output.error] ?? 'The voices could not be consulted.' } },
   });
 }
 const CONSULT_ERRORS: Record<string, string> = {
   invalid_input: `Invalid input: question (1 to ${CONSULT_LIMITS.question} characters), context (at most ${CONSULT_LIMITS.context}), mode "calibrated" or "debate", voices a list of "ambition" and/or "prudence".`,
   voices_unavailable: 'Your inner voices are off.',
   voice_off: 'The voice you asked is off; ask the other one.',
-  limit_reached: `You consulted your voices ${CONSULT_LIMITS.perTurn} times in this turn: decide with what you have.`,
 };
 
 /* ------------------------------------------------------------------ */
