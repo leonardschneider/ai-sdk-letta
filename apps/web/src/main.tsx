@@ -37,6 +37,7 @@ import { TrustMenu } from './trust-menu.js';
 import { checkSummary, failedReplyLine, isLocked, lockedNotice, stoppedLine, type CheckResult } from './turn-state.js';
 import type { TrustOverride } from './memory-model.js';
 import { ToastProvider, useToast } from './toasts.js';
+import { takeSavedDraft, watchBuild } from './auto-reload.js';
 import { AppErrorPanel, CrashProbe, ErrorBoundary, ErrorCard } from './error-boundary.js';
 import { Starters } from './starters.js';
 import { ResourcesPanel } from './resources.js';
@@ -500,11 +501,17 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
         const first = saved === NEW_CHAT ? undefined : list.find(t => t.id === saved && t.state === 'ready') ?? sorted.find(t => t.state === 'ready' && !t.archived);
         setLoading(false);
         if (first) await select(first.id); else { if (saved === NEW_CHAT) localStorage.removeItem(SAVED_THREAD); startDraft(); }
+        // An unsent message saved before an automatic reload (after an update) comes back.
+        const restored = takeSavedDraft();
+        if (restored) requestAnimationFrame(() => { runtime.thread.composer.setText(restored); focusComposer(); });
       } catch { setListLoading(false); setLoading(false); setBlocked('Couldn’t reach the local server. Check that it’s running, then refresh.'); }
     })();
     return () => stream.current?.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connecting]);
+
+  // The server or the web app was updated: reload (never mid-typing; an unsent message survives it).
+  useEffect(() => watchBuild(() => composerRef.current, { unreachable: !!unreachable }), [unreachable]);
 
   // Team mode, and automations: follow what others do (new conversations, turns, the queue) with a long poll.
   // The last seen state of every conversation: the open one is refreshed only when it changed (never for another's turn).

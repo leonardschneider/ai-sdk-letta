@@ -4,6 +4,7 @@ import { FILE_LIMITS, IMAGE_LIMITS, IMAGE_MEDIA_TYPES, TEXT_EXTENSIONS } from 'a
 import type { RunAuthor, RuntimeEvent, ThreadRuntime } from './runtime.js';
 import { RuntimeFault, ThreadRuntime as Runtime } from './runtime.js';
 import { runtimeVersions } from './versions.js';
+import { buildIdRoute } from './build-id.js';
 import { activitySummary, agentActivity } from './activity.js';
 import { authorOf, servedOrigin, tailscaleIdentity, type TailscaleIdentity, type TeamDirectory, type TeamUser } from './team.js';
 import { atlassianMediaRoute, integrationError, integrationRoutes } from './integrations.js';
@@ -652,6 +653,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
     if (req.headers.host !== host || (req.headers.origin && req.headers.origin !== `http://${host}`) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
     next();
   });
+  // The build (process + web app): the app reloads itself when it changes. Outside /api: no session needed.
+  app.get('/build.json', buildIdRoute(assets));
   app.get('/api/session', (_req, res) => {
     res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
     res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}), ...(agent.toolControl && toolRoutes ? { toolControl: true } : {}), ...(agent.voices?.length ? { voices: [...agent.voices] } : {}) }, versions,
@@ -772,6 +775,8 @@ export function teamApp(options: TeamAppOptions) {
   const agentSummary = (id: string, role: string) => { const { info, runtime } = agents.get(id)!; return { id, name: info.name, role, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ...(info.resources ? { resources: true } : {}), ui: { latex: info.ui?.latex ?? true }, ...(info.replyMode ? { replyMode: info.replyMode } : {}), ...(info.integrations?.length ? { integrations: [...info.integrations] } : {}), ...(info.automations ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(info.memory ? { memory: true } : {}), ...(info.trustJiminy ? { trustJiminy: true } : {}), ...(info.project ? { project: info.project } : {}) }; };
   // Pending decisions of every agent you belong to (the notification bell).
   const feed = new DecisionFeed([...agents].flatMap(([id, { info, runtime }]) => runtime.decisions ? [{ agent: { id, name: info.name }, board: runtime.decisions, runtime, owner: 'team' }] : []));
+  // The build (process + web app): the app reloads itself when it changes.
+  app.get('/build.json', buildIdRoute(assets));
   /** Who you are and which agents you belong to. A person with no agent gets `agents: []` (the app shows "no access"). */
   app.get('/api/session', (req, res) => {
     const { identity, user } = who(req)!;
