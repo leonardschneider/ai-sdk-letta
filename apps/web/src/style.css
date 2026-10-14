@@ -1493,3 +1493,5 @@ button.job-last:hover { color: var(--text); }
 @media (max-width: 640px) {
   .voices-notes, .voices-settings { grid-template-columns: 1fr; }
 }
+.earlier { display: flex; justify-content: center; padding: 12px 0 4px; }
+.earlier-button { font-size: 13px; color: var(--text-3); }
