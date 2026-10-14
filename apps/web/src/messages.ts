@@ -277,10 +277,29 @@ export function observedParts(events: RuntimeEvent[]): Part[] {
 }
 
 /** Each assistant reply carries the run of the user message before it (`custom.replyRun`): the inner voices' review of that run shows under it. */
+// The annotated copy of each assistant message, kept per input object and run: an unchanged message keeps its identity
+// across updates, so the chat doesn't redraw the whole (possibly very long) conversation for every streamed event.
+const annotated = new WeakMap<ThreadMessageLike, { run: string; message: ThreadMessageLike }>();
 export function withReplyRuns(messages: readonly ThreadMessageLike[]): ThreadMessageLike[] {
   let run: string | undefined;
   return messages.map(message => {
     if (message.role === 'user') { run = (message.metadata?.custom as { runId?: string } | undefined)?.runId; return message; }
-    return message.role === 'assistant' && run ? { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, replyRun: run } } } : message;
+    if (message.role !== 'assistant' || !run) return message;
+    const cached = annotated.get(message);
+    if (cached?.run === run) return cached.message;
+    const copy = { ...message, metadata: { ...message.metadata, custom: { ...message.metadata?.custom, replyRun: run } } };
+    annotated.set(message, { run, message: copy });
+    return copy;
   });
+}
+
+/** How many messages a long conversation shows at first; "Show earlier messages" adds this many more each time. */
+export const SHOWN_WINDOW = 60;
+/** The last `limit` messages (starting on a user message when possible, so a reply keeps its question), and how many are hidden before them. */
+export function latestMessages<T extends { role: string }>(messages: readonly T[], limit: number): { messages: readonly T[]; hidden: number } {
+  if (messages.length <= limit) return { messages, hidden: 0 };
+  let start = messages.length - limit;
+  // Start on a user message (at most a few steps earlier), so the first reply shown has its question.
+  for (let i = start; i > Math.max(0, start - 6); i--) if (messages[i]!.role === 'user') { start = i; break; }
+  return { messages: messages.slice(start), hidden: start };
 }

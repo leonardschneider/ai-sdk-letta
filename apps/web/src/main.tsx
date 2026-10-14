@@ -11,7 +11,7 @@ import type { ReplyModeOverride } from 'ai-sdk-letta/listening';
 import type { UIMessage } from 'ai';
 import type { RuntimeEvent } from '@ai-sdk-letta/server';
 import type { InteractionRequest, InteractionResponse } from 'ai-sdk-letta';
-import { historyMessages, markListened, markReflection, observedParts, userContent, withAuthor, withBackground, withDecision, withRun, withSource, withoutListened, withReplyRuns, withTime, type FileChip, type MessageBackground, type MessageSource } from './messages.js';
+import { historyMessages, markListened, markReflection, observedParts, userContent, withAuthor, withBackground, withDecision, withRun, withSource, withoutListened, withReplyRuns, withTime, latestMessages, SHOWN_WINDOW, type FileChip, type MessageBackground, type MessageSource } from './messages.js';
 import { ClaimCard, DecisionBell, DecisionsContext, MemoryReviewCard, NoticeCard, PendingDecisionBar, useDecisionFeed, type DecisionsState } from './decisions.js';
 import { MemoryDialog, MemoryRow, useMemoryToasts } from './memory.js';
 import { decideError, mayReview, type DecisionOutcome, type DecisionView, type FeedDecision } from './decisions-model.js';
@@ -323,6 +323,9 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
     let endedAt: string | undefined;
     let members = [...batch];
     // A combined turn shows each of its messages as its own bubble, with its author, then the one reply.
+    // Streamed events arrive many times a second (each text token): draw at most every 100 ms, and at once for events that change the turn's state.
+    let drawTimer: ReturnType<typeof setTimeout> | undefined;
+    const renderSoon = () => { if (!drawTimer) drawTimer = setTimeout(() => { drawTimer = undefined; if (stream.current === control) render(); }, 100); };
     const render = () => setMessages([...base,
       withBackground(withRun(withDecision(withSource(withAuthor(withTime({ id: `${id}-user`, role: 'user', content: userContent(input, images, files) }, startedAt), author), source), decision), id), background),
       ...members.map(member => withAuthor(withTime({ id: `${member.id}-user`, role: 'user', content: userContent(member.input) }, startedAt), member.author)),
@@ -373,7 +376,8 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
             if (event.type === 'failed') setFailedNote({ runId: id, usable: event.data.usable === true, ...(typeof event.data.error === 'string' ? { error: event.data.error } : {}) });
             if (event.type === 'failed' && !team && event.data.usable !== true) { setBlocked(lockedNotice(String(event.data.code))); setCheckable(true); }
           }
-          render();
+          if (event.type === 'text' || event.type === 'reasoning') renderSoon();
+          else { if (drawTimer) { clearTimeout(drawTimer); drawTimer = undefined; } render(); }
         }
       }
       if (!ended) throw new Error('Stream disconnected. Refresh to reconnect without replaying the turn.');
@@ -764,7 +768,11 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
   // Sent files download from where they are now in the resources (the server follows moves and renames).
   const fileLink = useCallback((name: string) => current.draft ? undefined : apiPath(`/v1/threads/${encodeURIComponent(current.id)}/files/${encodeURIComponent(name)}`), [current]);
   // The quiet "Listened" lines can be hidden (a per-browser setting); the messages themselves always stay.
-  const shown = useMemo(() => withReplyRuns(showListened ? messages : withoutListened(messages)), [messages, showListened]);
+  // Long conversations show their latest messages; "Show earlier messages" adds more (reset when the conversation changes).
+  const [shownLimit, setShownLimit] = useState(SHOWN_WINDOW);
+  useEffect(() => { setShownLimit(SHOWN_WINDOW); }, [current.id]);
+  const windowed = useMemo(() => latestMessages(withReplyRuns(showListened ? messages : withoutListened(messages)), shownLimit), [messages, showListened, shownLimit]);
+  const shown = windowed.messages as ThreadMessageLike[];
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     // Team mode: the composer stays usable during a reply (messages queue), so the runtime is never "running" for assistant-ui.
     messages: shown, convertMessage: m => m, isRunning: team ? false : running, isLoading: loading,
@@ -1052,6 +1060,7 @@ function App({ agent, versions, team, local, connecting, unreachable }: { agent:
                       <h2>{readOnly ? 'This archived conversation is empty' : viewOnly ? 'Pick a conversation to view' : 'What’s on your mind?'}</h2>
                       {!readOnly && !viewOnly && !blocked && <Starters/>}
                     </div>)}
+                {windowed.hidden > 0 && <div className="earlier"><button type="button" className="btn ghost earlier-button" onClick={() => setShownLimit(limit => limit + SHOWN_WINDOW)}>Show earlier messages ({windowed.hidden})</button></div>}
                 <ThreadPrimitive.Messages components={{ Message }}/>
                 <AppApprovalCards approvals={appApprovals} onDecided={refreshAppApprovals} admin={!team || isAdmin}/>
                 {memoryReviews.map(decision => decision.kind === 'claim-confirmation' ? <ClaimCard key={decision.id} decision={decision}/> : decision.kind === 'memory-notice' ? <NoticeCard key={decision.id} decision={decision}/> : <MemoryReviewCard key={decision.id} decision={decision}/>)}
