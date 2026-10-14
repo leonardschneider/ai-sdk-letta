@@ -323,7 +323,8 @@ function Disclosure({ summary, children, className, tone, label }: { summary: Re
     <button type="button" className="line-summary" aria-expanded={open} aria-controls={id} aria-label={label} onClick={() => setOpen(o => !o)}>
       {summary}<ChevronRight size={14} className="chev" aria-hidden="true"/>
     </button>
-    <div id={id} className="line-detail" hidden={!open}>{children}</div>
+    {/* Closed: nothing inside is rendered (a long turn has hundreds of tool lines, each with its command, output and icons). */}
+    <div id={id} className="line-detail" hidden={!open}>{open ? children : null}</div>
   </div>;
 }
 
