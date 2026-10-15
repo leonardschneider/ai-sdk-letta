@@ -1,6 +1,0 @@
----
-"ai-sdk-letta": minor
-"@ai-sdk-letta/server": minor
----
-
-Activity view: see at a glance whether an agent is idle, working or waiting for you. The conversation header (always visible, also with the sidebar hidden or on a phone) shows a status pill: "Idle", "Working · 2" (pulsing) or "Needs you · 1" (amber), with a marker when another agent is busy. It opens a popover (a bottom sheet on phones) with running turns and their current step, queued messages, prompts, decisions, memory reviews and app approvals waiting for you, services (the services container with its idle countdown, the dev server, the headless browser, dev and installed apps), Jiminy reviews, dreaming and scheduled tasks — each with its elapsed time, a link to its conversation, and Stop / Restart where the app already could. The agent switcher marks busy agents, and the sidebar shows a spinner on conversations with a running turn for every agent. New routes: `GET /v1/activity` (per agent, also `/api/agents/:id/v1/activity`), `GET /api/activity?since=` (counts per agent, long poll on the change channel; no Letta call) and `POST /v1/threads/:id/preview/stop-dev-server`. `WebDevStatus` gains `idleStopsAt` and `browser`; `WebDevRegistry.conversations()` and `MemoryGuard.reviewing()` are new.

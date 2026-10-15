@@ -1,6 +1,0 @@
----
-"ai-sdk-letta": minor
-"@ai-sdk-letta/server": minor
----
-
-Per-tool control. Adopted agents get per-tool overrides on top of their tool sets (`AdoptionRecord.toolOverrides`: `allow`, `ask` or `off`; off leaves the tool out, also from the instructions section). `LOCKED_PERMISSIONS` holds the safety rules shared by `defineAgent` and overrides: `run_command_online`, `allow_web_origin` and `web_search` are never `allow`; `request_decision` and `ask_user` never `ask`. A set's anchor tool (`read_file`, `run_command`, `dev_server_start`, `app_dev_start`, `job_start`) cannot be turned off alone. New `GET /api/adoption/agents/<id>/tools` lists each set's tools with their default, override, lock (with the reason) and a context cost estimate (description + JSON schema characters / 4); `PUT` accepts `{ tools, overrides }` (unknown tools dropped; `tool_locked`, `invalid_input`) and, during a reply, applies after it. The app's own (code-defined) agent is **tighten only**: Settings → Tools switches its tools to Ask or Off (Allow only where the definition allows it), stored in `<state>/server/<id>/tool-overrides.json` and applied on its next session (`GET`/`PUT /api/tools`). The Tools panel shows each set with its cost, expands to Allow / Ask / Off per tool (default dot, lock and reason), resets per set and overall, and the total tool context cost.
