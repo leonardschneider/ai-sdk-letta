@@ -275,6 +275,7 @@ export function ResourcesPanel(props: Props) {
         </div>}
       </div>}
       {tree?.truncated && <p className="res-empty muted">Showing the first 5,000 entries.</p>}
+      {tree?.overLimit && <p className="res-empty muted">Too many files to keep versions of (over 20,000): changes aren’t recorded until some are removed. Generated output such as builds belongs in folders like <code>node_modules</code> or <code>.cache</code>, which are never versioned.</p>}
       {props.project && <ProjectSection name={props.project} visible={props.visible} refreshKey={`${String(props.refreshKey)}:${projectRefresh}`} alone={!!props.projectOnly}/>}
     </div>
     {tree && <p className="res-foot">{footerText(shown, showArchived ? 0 : split.archived.length)} · versioned with git</p>}

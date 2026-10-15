@@ -2,7 +2,7 @@
 
 export type ResourceNode = { name: string; path: string; type: 'file' | 'folder'; bytes?: number; modifiedAt: string; conversationId?: string; children?: ResourceNode[] };
 /** `archived`: paths of the folders whose conversation is archived (older servers omit it). */
-export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; archived?: string[]; changes: number };
+export type ResourceTree = { children: ResourceNode[]; truncated: boolean; version: string; threads: Record<string, string>; archived?: string[]; changes: number; overLimit?: boolean };
 
 /** What a preview shows, by extension (the server decides by content again). */
 export type PreviewKind = 'table' | 'markdown' | 'text' | 'html' | 'pdf' | 'image' | 'atlassian' | 'none';

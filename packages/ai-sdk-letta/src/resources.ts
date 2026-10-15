@@ -61,6 +61,19 @@ __pycache__/
 .cache/
 node_modules/
 .DS_Store
+# Generated output and tool caches: rebuilt, often tens of thousands of files.
+.next/
+.nuxt/
+.svelte-kit/
+.output/
+.turbo/
+.parcel-cache/
+.vite/
+target/
+.lake/
+.tox/
+.venv-*/
+venv/
 `;
 
 const AGENT_ID = /^agent-[a-zA-Z0-9-]{1,100}$/;
@@ -305,7 +318,9 @@ export class ResourceStore {
       privateDirectory(join(this.gitDir, 'info'));
       const exclude = join(this.gitDir, 'info', 'exclude');
       if (!existsSync(exclude) || readFileSync(exclude, 'utf8') !== RESOURCES_GITIGNORE) writeReplace(exclude, RESOURCES_GITIGNORE);
-      await this.commitLocked(await this.head() ? 'Changes made while the app was closed' : 'Initialize resources');
+      // Too many files to version (a large generated tree): the store still opens and lists them; versioning resumes once it's back under the limit.
+      try { await this.commitLocked(await this.head() ? 'Changes made while the app was closed' : 'Initialize resources'); }
+      catch (error) { if (!(error instanceof FileInputError && error.code === 'resources_full')) throw error; this.overLimit = true; }
     }).catch(error => { this.ready = undefined; throw error; });
   }
 
@@ -428,8 +443,13 @@ export class ResourceStore {
   /** Commit everything that changed (for example, by the agent during a turn), as one commit. */
   async commitAll(message: string): Promise<string | undefined> {
     await this.init();
-    return exclusive(this.directory, () => this.commitLocked(message));
+    return exclusive(this.directory, async () => {
+      try { const commit = await this.commitLocked(message); this.overLimit = false; return commit; }
+      catch (error) { if (error instanceof FileInputError && error.code === 'resources_full') { this.overLimit = true; return undefined; } throw error; }
+    });
   }
+  /** Whether the last snapshot was skipped because there are too many files to version (they are still listed). */
+  overLimit = false;
   /**
    * Commit the agent's changes at the end of a turn: "Agent changes in
    * <folder>", with the trailers `X-Turn: <turn>` (the turn's OTID, when it

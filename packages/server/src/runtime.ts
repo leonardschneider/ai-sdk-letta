@@ -1434,7 +1434,7 @@ export class ThreadRuntime {
    * (the browser hides them by default; nothing moves on disk). The version
    * changes when a conversation is archived or restored.
    */
-  async resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; archived: string[]; changes: number }> {
+  async resourceTree(owner: string): Promise<ResourceTree & { threads: Record<string, string>; archived: string[]; changes: number; overLimit?: true }> {
     this.authorize(owner);
     // Before the first conversation there is no agent yet, so nothing to list (not an error).
     if (this.host.attachmentsRoot && !this.state.threads.some(t => t.agentId)) return { children: [], truncated: false, version: 'empty', threads: {}, archived: [], changes: 0 };
@@ -1449,7 +1449,7 @@ export class ThreadRuntime {
       }
       archived.sort();
       const version = archived.length ? createHash('sha256').update(`${tree.version}\0${archived.join('\0')}`).digest('hex').slice(0, 20) : tree.version;
-      return { ...tree, version, threads, archived, changes: store.commits };
+      return { ...tree, version, threads, archived, changes: store.commits, ...(store.overLimit ? { overLimit: true as const } : {}) };
     });
   }
   /** Add a file to a folder (any type, up to the per-file limit). One commit. */
