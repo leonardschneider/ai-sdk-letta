@@ -12,7 +12,7 @@ import { JobBoard } from './jobs.js';
 import { BackgroundNotifier } from './background.js';
 import { ThreadRuntime, type RewindHooks, type RuntimeHost } from './runtime.js';
 import { guiApp, teamApp, tokenApiApp, type GuiAgentInfo, type TeamAgent } from './http.js';
-import { TeamDirectory, authorOf } from './team.js';
+import { TeamDirectory, authorOf, servedOrigin } from './team.js';
 import { AutomationService, AutomationStore, createToken, listenAutomation, revokeToken, tokenSummary, type AutomationAgent, type AutomationEndpoint, type AutomationVia } from './automation.js';
 import { AdoptionRegistry, adoptedPeek } from './adoption.js';
 import { DefinitionToolOverrides } from './tool-overrides.js';
@@ -28,6 +28,13 @@ export const DEFAULT_PORT = 4400;
 export interface ServeOptions {
   /** Loopback port. `0` picks a free port. @default 4400 */
   port?: number;
+  /**
+   * Reach the app from your other devices through `tailscale serve`
+   * (for example your phone): `owners` are your Tailscale login(s), `origins`
+   * the served address(es), such as `https://machine.tailnet.ts.net`. Only
+   * those logins are let in; everyone else, and Funnel, is refused. Off unless set.
+   */
+  remote?: { owners: string[]; origins: string[] };
   /** State root; see `resolveStateDirectory`. */
   stateDirectory?: string;
   /** Log sink for startup and shutdown lines. @default console.log */
@@ -292,6 +299,8 @@ function lifecycle(server: Server, runtime: ThreadRuntime, unlock: () => void, l
  * @param assets Directory of the built web app (for example `@ai-sdk-letta/web`'s `dist`).
  */
 export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDefinition<TOOLS>, assets: string, options: ServeOptions = {}): Promise<RunningServer> {
+  // Remote access (tailscale serve): owners must be logins, origins valid served addresses.
+  const remote = options.remote ? checkRemote(options.remote) : undefined;
   const log = options.log ?? console.log;
   const stateDirectory = resolveStateDirectory(options.stateDirectory);
   const directory = join(statePaths(stateDirectory).server(definition.id), 'gui');
@@ -380,7 +389,7 @@ export async function startGuiServer<TOOLS extends ToolSet>(definition: AgentDef
           sandbox: token => { for (const member of previewMembers) { const page = member.sandbox(token); if (page.status !== 404) return page; } return { status: 404 }; } });
         previewRef.port = preview.port;
       }
-      const server = guiApp(runtime, owner, port, assets, Object.assign(info, automation ? { automations: true } : {}), credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui(), express.Router().use(toolOverrides.routes(), voiceSettings.routes(), toolLimit.routes())).listen(port, '127.0.0.1');
+      const server = guiApp(runtime, owner, port, assets, Object.assign(info, automation ? { automations: true } : {}), credentials, options.integrations, automation ? { service: automation.service, endpoint: automation.endpoint } : undefined, preview ? { frameSrc: `http://*.localhost:${preview.port}` } : undefined, adoption?.gui(), express.Router().use(toolOverrides.routes(), voiceSettings.routes(), toolLimit.routes()), remote).listen(port, '127.0.0.1');
       const bound = await listen(server, port);
       appPort = bound; appPortRef.port = bound;
       const url = `http://127.0.0.1:${bound}`;
@@ -667,4 +676,15 @@ export function revokeAutomationToken(definition: AgentDefinition, id: string, o
 /** List an agent's automation tokens (never their secrets). */
 export function listAutomationTokens(definition: AgentDefinition, options: { stateDirectory?: string } = {}) {
   return new AutomationStore(automationFile(resolveStateDirectory(options.stateDirectory), definition.id)).read().tokens.map(tokenSummary);
+}
+
+/** Validated remote access: lower-cased logins, at least one owner and one served origin. @throws on invalid input */
+export function checkRemote(remote: { owners: string[]; origins: string[] }): { owners: string[]; origins: string[] } {
+  const owners = remote.owners.map(o => o.trim().toLowerCase()).filter(Boolean);
+  const origins = remote.origins.map(o => o.trim()).filter(Boolean);
+  if (!owners.length) throw new Error('Remote access needs your Tailscale login (--owner you@example.com)');
+  if (!origins.length) throw new Error('Remote access needs the served address (--origin https://machine.tailnet.ts.net)');
+  for (const owner of owners) if (!/^[^\s@]{1,64}@[^\s@]{1,253}$/.test(owner)) throw new Error(`Invalid owner login: ${owner}`);
+  for (const origin of origins) { const { origin: o } = servedOrigin(origin); if (!o.startsWith('https://')) throw new Error(`Remote origin must be https (tailscale serve): ${origin}`); }
+  return { owners, origins: origins.map(o => servedOrigin(o).origin) };
 }
