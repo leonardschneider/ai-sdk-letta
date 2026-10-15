@@ -27,3 +27,5 @@ export { ProjectFolder, PROJECT_LIMITS, PROJECT_DEFAULT_IGNORES, type ProjectEnt
 export { localModels, modelOptions, modelSettings, providerLabel, anthropicOAuth, publicModel, effortOf, EFFORT_ORDER, EFFORT_VALUE, MODEL_HANDLE, MODEL_CACHE_MS, type ModelOption, type ModelEffort, type PublicModel } from './models.js';
 export { buildIdRoute } from './build-id.js';
 export { DefinitionToolLimit } from './tool-limit.js';
+export { checkRemote } from './serve.js';
+export type { RemoteAccess } from './http.js';

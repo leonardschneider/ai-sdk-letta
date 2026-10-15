@@ -637,13 +637,30 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   /** Web app previews: their listener's origin pattern, for `frame-src` (see `startPreviewServer`). */
   preview?: { frameSrc: string }, adoption?: GuiAdoption,
   /** Per-tool control of the app's own agent (`GET`/`PUT /api/tools`, tighten only; see `DefinitionToolOverrides`). */
-  toolRoutes?: express.Router) {
+  toolRoutes?: express.Router,
+  /** Remote access through `tailscale serve` for the owner only (see {@link RemoteAccess}). */
+  remote?: RemoteAccess) {
   const app = express();
   const versions = runtimeVersions();
   const session = randomBytes(32).toString('hex');
   const csrf = randomBytes(32).toString('hex');
   app.disable('x-powered-by');
+  // Remote (tailscale serve): a request for a served host, from the owner's own Tailscale login, is allowed with that host's origin.
+  const remoteOrigin = (req: express.Request): string | undefined => {
+    if (!remote) return undefined;
+    const served = remote.origins.map(o => servedOrigin(o)).find(o => o.host === String(req.headers.host ?? '').toLowerCase());
+    if (!served) return undefined;
+    const identity = tailscaleIdentity(req.headers, req.socket.remoteAddress);
+    return identity && remote.owners.includes(identity.login) ? served.origin : undefined;
+  };
   app.use((req, res, next) => {
+    const remoteAt = remoteOrigin(req);
+    if (remoteAt) {
+      res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': appCsp(preview ? { frameSrc: preview.frameSrc } : {}) });
+      if ((req.headers.origin && req.headers.origin !== remoteAt) || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) return res.status(403).json({ error: 'invalid_origin' });
+      (req as unknown as { appOrigin?: string }).appOrigin = remoteAt;
+      return next();
+    }
     const host = `127.0.0.1:${port || req.socket.localPort}`;
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
       // Previews load in frames of this origin (their own responses set a stricter policy); nothing else may frame the app.
@@ -656,7 +673,7 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   // The build (process + web app): the app reloads itself when it changes. Outside /api: no session needed.
   app.get('/build.json', buildIdRoute(assets));
   app.get('/api/session', (_req, res) => {
-    res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/' });
+    res.cookie('ai_sdk_letta_session', session, { httpOnly: true, sameSite: 'strict', path: '/', ...((_req as unknown as { appOrigin?: string }).appOrigin ? { secure: true } : {}) });
     res.json({ csrf, agent: { id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}), ...(agent.effort ? { effort: agent.effort } : {}), approvalTools: [...(agent.approvalTools ?? [])], files: !!agent.files, ...(agent.resources ? { resources: true } : {}), ui: { latex: agent.ui?.latex ?? true }, ...(agent.integrations?.length ? { integrations: [...agent.integrations] } : {}), ...(automation ? { automations: true } : {}), ...(runtime.decisions ? { decisions: true } : {}), ...(agent.memory ? { memory: true } : {}), ...(agent.trustJiminy ? { trustJiminy: true } : {}), ...(agent.webDev && preview ? { webDev: true } : {}), ...(agent.project ? { project: agent.project } : {}), ...(agent.apps && runtime.apps ? { apps: true } : {}), ...(agent.toolControl && toolRoutes ? { toolControl: true } : {}), ...(agent.voices?.length ? { voices: [...agent.voices] } : {}) }, versions,
       // Adopted agents (the agent switcher): the app's own agent first.
       ...(adoption ? { agents: adoption.agents().map(info => ({ ...info, approvalTools: [...(info.approvalTools ?? [])], files: !!info.files, ui: { latex: info.ui?.latex ?? true }, decisions: !info.viewOnly })), adoption: true } : {}) });
@@ -670,7 +687,8 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   app.use('/api', (req, res, next) => {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ai_sdk_letta_session='))?.slice('ai_sdk_letta_session='.length);
     if (!cookie || !/^[a-f0-9]{64}$/.test(cookie) || !timingSafeEqual(Buffer.from(cookie), Buffer.from(session))) return res.status(401).json({ error: 'session_required' });
-    if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== `http://127.0.0.1:${port || req.socket.localPort}` || req.headers['x-csrf-token'] !== csrf)) return res.status(403).json({ error: 'csrf_required' });
+    const appOrigin = (req as unknown as { appOrigin?: string }).appOrigin ?? `http://127.0.0.1:${port || req.socket.localPort}`;
+    if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== appOrigin || req.headers['x-csrf-token'] !== csrf)) return res.status(403).json({ error: 'csrf_required' });
     next();
   },
   // Render errors the app caught (its error boundaries): one line each in the server's log, rate limited.
@@ -689,6 +707,16 @@ export function guiApp(runtime: ThreadRuntime, owner: string, port: number, asse
   app.use(express.static(assets, { index: 'index.html', dotfiles: 'deny' }));
   return app;
 }
+
+/**
+ * Remote access to the single-user app through `tailscale serve`: requests
+ * whose Host is one of `origins` (for example
+ * `https://machine.tailnet.ts.net`) are accepted only from loopback with a
+ * Tailscale identity (`Tailscale-User-Login`, set by `tailscale serve`; never
+ * Funnel) that is one of `owners`. The rest of the app is unchanged: the same
+ * session cookie (Secure) and CSRF token, with that origin.
+ */
+export interface RemoteAccess { owners: string[]; origins: string[] }
 
 /* ------------------------------------------------------------------ */
 /* Team (multi-user) browser app                                       */

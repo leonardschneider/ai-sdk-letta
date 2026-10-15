@@ -1718,6 +1718,23 @@ or later in the agent menu.
 From code: `PUT /api/adoption/agents/<id>/view-only` with `{ "viewOnly": true }`
 (or `false`), or `POST /api/adoption/agents` with `{ "agentId", "viewOnly": true }`.
 
+## Using it from your phone (Tailscale)
+
+Reach your own app, with all its agents and conversations, from your phone or another computer of yours. Only your Tailscale login gets in.
+
+1. **Install Tailscale** on the Mac and the phone and sign in to both with the same account. In the [admin console](https://login.tailscale.com/admin/dns), enable **HTTPS certificates**.
+2. **Start the app with remote access** (still bound to 127.0.0.1):
+
+   ```sh
+   npm run gui -- --remote --owner you@example.com --origin https://your-mac.your-tailnet.ts.net
+   ```
+
+   `--owner` is your Tailscale login (`tailscale status` shows it); `--origin` the address you'll open. From code: `startGuiServer(agent, assets, { remote: { owners, origins } })`.
+3. **Publish it to your tailnet:** `tailscale serve --bg 4400`. Stop with `tailscale serve --https=443 off`. Never use `tailscale funnel` (the app refuses its requests).
+4. **Open `https://your-mac.your-tailnet.ts.net`** on the phone. Turns started on the Mac show live there; you can reply, approve, answer questions and stop.
+
+Requests through the served address are accepted only from loopback with a `Tailscale-User-Login` that is one of `--owner` (never Funnel); the session cookie is then Secure and writes need that origin and the CSRF token. **Not on the phone yet:** MCP App views and web app previews (they use `*.localhost` addresses only the Mac can reach).
+
 ## Sharing with your team (Tailscale)
 
 One server can host several agents for a small team. People reach it over
